@@ -1,0 +1,42 @@
+# Build outputs
+.gradle/
+build/
+**/build/
+out/
+target/
+dist/
+
+# Local runtime data
+.local/
+data/
+logs/
+tmp/
+*.log
+*.pid
+
+# Environment and secrets
+.env
+.env.*
+!*.env.example
+*.local.yml
+*.local.yaml
+*.local.properties
+!compose.local.yml
+
+# IDE and editor files
+.idea/
+.vscode/
+*.iml
+*.iws
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Java diagnostics
+hs_err_pid*
+replay_pid*
+
+# Docker local overrides
+compose.override.yml
+docker-compose.override.yml

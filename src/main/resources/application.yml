@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: event-mosaic
+  flyway:
+    locations: classpath:db/migration
+  docker:
+    compose:
+      enabled: true
+      file: compose.local.yml
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+event-mosaic:
+  ingestion:
+    scheduler:
+      enabled: false
+    batch-size: 1000
