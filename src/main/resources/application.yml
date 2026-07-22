@@ -3,6 +3,7 @@ spring:
     name: event-mosaic
   flyway:
     locations: classpath:db/migration
+    validate-migration-naming: true
   docker:
     compose:
       enabled: true
@@ -20,6 +21,19 @@ management:
 
 event-mosaic:
   ingestion:
-    scheduler:
-      enabled: false
-    batch-size: 1000
+    gdelt:
+      base-uri: https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/
+      staging-root: .local/gdelt
+      http:
+        max-manifest-bytes: 65536
+        max-archive-bytes: 536870912
+        connect-timeout: 10s
+        request-timeout: 2m
+      zip:
+        max-entries: 4
+        max-entry-bytes: 1073741824
+        max-total-bytes: 1073741824
+      continuity:
+        recovery-lease: 15m
+        first-run-policy: LATEST
+      one-shot-enabled: false

@@ -23,7 +23,6 @@ repositories {
 dependencies {
 	// Application runtime
 	implementation("org.springframework.boot:spring-boot-starter-actuator")
-	implementation("org.springframework.boot:spring-boot-starter-restclient")
 	implementation("org.springframework.boot:spring-boot-starter-validation")
 	implementation("org.springframework.boot:spring-boot-starter-webmvc")
 
@@ -31,10 +30,16 @@ dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-flyway")
 	implementation("org.springframework.boot:spring-boot-starter-jdbc")
 	implementation("org.flywaydb:flyway-database-postgresql")
-	runtimeOnly("org.postgresql:postgresql")
 
 	// Search read model
 	implementation("org.springframework.boot:spring-boot-starter-elasticsearch")
+
+	// Architecture contracts
+	compileOnly(platform("org.springframework.modulith:spring-modulith-bom:$springModulithVersion"))
+	compileOnly("org.springframework.modulith:spring-modulith-api")
+
+	// Persistence runtime driver
+	runtimeOnly("org.postgresql:postgresql")
 
 	// Local development
 	developmentOnly("org.springframework.boot:spring-boot-docker-compose")
@@ -44,9 +49,11 @@ dependencies {
 	testImplementation("org.springframework.boot:spring-boot-starter-elasticsearch-test")
 	testImplementation("org.springframework.boot:spring-boot-starter-flyway-test")
 	testImplementation("org.springframework.boot:spring-boot-starter-jdbc-test")
-	testImplementation("org.springframework.boot:spring-boot-starter-restclient-test")
 	testImplementation("org.springframework.boot:spring-boot-starter-validation-test")
 	testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+
+	// Mockito для точечных unit tests без поддержки final/static/constructor mocks
+	testImplementation("org.mockito:mockito-subclass")
 
 	// Testcontainers
 	testImplementation("org.springframework.boot:spring-boot-testcontainers")
@@ -63,4 +70,5 @@ dependencies {
 
 tasks.withType<Test> {
 	useJUnitPlatform()
+	jvmArgs("-XX:+EnableDynamicAgentLoading")
 }
