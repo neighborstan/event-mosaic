@@ -8,9 +8,9 @@ dist/
 
 # Local runtime data
 .local/
-data/
-logs/
-tmp/
+/data/
+/logs/
+/tmp/
 *.log
 *.pid
 

@@ -7,9 +7,15 @@ services:
       POSTGRES_PASSWORD: ${EVENT_MOSAIC_POSTGRES_PASSWORD:?EVENT_MOSAIC_POSTGRES_PASSWORD is required}
       POSTGRES_USER: ${EVENT_MOSAIC_POSTGRES_USER:-event_mosaic}
     ports:
-      - "${EVENT_MOSAIC_POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${EVENT_MOSAIC_POSTGRES_PORT:-5432}:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:9.4.2
@@ -18,10 +24,9 @@ services:
       discovery.type: single-node
       xpack.security.enabled: "false"
       xpack.security.http.ssl.enabled: "false"
-      ES_JAVA_OPTS: ${EVENT_MOSAIC_ES_JAVA_OPTS:-"-Xms1g -Xmx1g"}
+      ES_JAVA_OPTS: "${EVENT_MOSAIC_ES_JAVA_OPTS:--Xms1g -Xmx1g}"
     ports:
-      - "${EVENT_MOSAIC_ELASTICSEARCH_HTTP_PORT:-9200}:9200"
-      - "${EVENT_MOSAIC_ELASTICSEARCH_TRANSPORT_PORT:-9300}:9300"
+      - "127.0.0.1:${EVENT_MOSAIC_ELASTICSEARCH_HTTP_PORT:-9200}:9200"
     volumes:
       - elasticsearch-data:/usr/share/elasticsearch/data
 

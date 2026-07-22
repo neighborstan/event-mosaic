@@ -1,26 +1,27 @@
 package com.neighbor.eventmosaic.ingestion.api;
 
-import java.net.URI;
 import java.time.Instant;
 
+/**
+ * Состояние одного Event или Mention archive в durable ingestion ledger.
+ *
+ * @param runId идентификатор общего update run
+ * @param archive проверенная source metadata
+ * @param status текущий статус архива
+ * @param attempt состояние claim/lease
+ * @param stagedArchive опубликованные artifacts или {@code null}
+ * @param failure последняя записанная ошибка или {@code null}
+ * @param firstSeenAt время первой регистрации
+ * @param completedAt время успешного staging или {@code null}
+ */
 public record IngestionArchiveState(
-		String idempotencyKey,
-		String archiveName,
-		URI archiveUri,
-		String expectedMd5,
-		String actualMd5,
-		ArchiveType archiveType,
+		long runId,
+		DiscoveredArchive archive,
 		IngestionArchiveStatus status,
-		Long fileSizeBytes,
-		long rawRecordCount,
-		long parsedRecordCount,
-		long processedRecordCount,
-		long indexedRecordCount,
-		long failedRecordCount,
+		ArchiveAttemptState attempt,
+		StagedArchive stagedArchive,
+		RecordedIngestionFailure failure,
 		Instant firstSeenAt,
-		Instant lastAttemptAt,
-		Instant completedAt,
-		int attemptCount,
-		String lastError
+		Instant completedAt
 ) {
 }
