@@ -28,17 +28,29 @@ import org.junit.jupiter.api.Test;
 class GdeltManifestClientTest {
 
 	private HttpServer server;
+	private HttpClient httpClient;
 
 	@BeforeEach
 	void startServer() throws IOException {
 		server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
 		server.start();
+		httpClient = HttpClient.newBuilder()
+				.followRedirects(HttpClient.Redirect.NEVER)
+				.build();
 	}
 
 	@AfterEach
 	void stopServer() {
-		server.stop(0);
 		Thread.interrupted();
+		try {
+			if (server != null) {
+				server.stop(0);
+			}
+		} finally {
+			if (httpClient != null) {
+				httpClient.close();
+			}
+		}
 	}
 
 	@Test
@@ -164,7 +176,7 @@ class GdeltManifestClientTest {
 	private GdeltManifestClient client(long maxBytes, Duration timeout) {
 		URI uri = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/manifest");
 		return new GdeltManifestClient(
-				HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build(),
+				httpClient,
 				uri,
 				timeout,
 				maxBytes

@@ -45,6 +45,10 @@ final class GdeltCsvCounters {
 		return validRecords;
 	}
 
+	long invalidRecords() {
+		return invalidRecords;
+	}
+
 	Map<GdeltCsvRecordErrorCode, Long> rejectionCounts() {
 		return Map.copyOf(rejectionCounts);
 	}

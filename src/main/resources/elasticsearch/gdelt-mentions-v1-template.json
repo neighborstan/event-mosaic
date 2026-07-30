@@ -1,0 +1,87 @@
+{
+  "index_patterns": [
+    "gdelt-mentions-v1"
+  ],
+  "priority": 100,
+  "version": 1,
+  "allow_auto_create": true,
+  "template": {
+    "mappings": {
+      "dynamic": "strict",
+      "_meta": {
+        "schema_version": 1
+      },
+      "properties": {
+        "rawMentionId": {
+          "type": "keyword"
+        },
+        "sourceDocumentKey": {
+          "type": "keyword"
+        },
+        "globalEventId": {
+          "type": "long"
+        },
+        "eventTimeDate": {
+          "type": "date"
+        },
+        "mentionTimeDate": {
+          "type": "date"
+        },
+        "mentionType": {
+          "type": "integer"
+        },
+        "mentionSourceName": {
+          "type": "keyword",
+          "ignore_above": 1024
+        },
+        "mentionIdentifier": {
+          "type": "keyword",
+          "ignore_above": 8191
+        },
+        "sentenceId": {
+          "type": "integer"
+        },
+        "actor1CharOffset": {
+          "type": "integer"
+        },
+        "actor2CharOffset": {
+          "type": "integer"
+        },
+        "actionCharOffset": {
+          "type": "integer"
+        },
+        "inRawText": {
+          "type": "integer"
+        },
+        "confidence": {
+          "type": "integer"
+        },
+        "mentionDocLen": {
+          "type": "integer"
+        },
+        "mentionDocTone": {
+          "type": "double"
+        },
+        "mentionDocTranslationInfo": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
+        "extras": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
+        "sourceUpdateTime": {
+          "type": "date"
+        },
+        "sourceArchiveKey": {
+          "type": "keyword"
+        },
+        "sourceLineNumber": {
+          "type": "long"
+        }
+      }
+    }
+  }
+}

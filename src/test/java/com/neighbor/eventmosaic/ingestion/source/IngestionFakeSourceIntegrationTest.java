@@ -58,6 +58,7 @@ class IngestionFakeSourceIntegrationTest {
 	private JdbcClient jdbcClient;
 
 	private HttpServer server;
+	private HttpClient httpClient;
 
 	@BeforeEach
 	void setUp() throws IOException {
@@ -67,11 +68,22 @@ class IngestionFakeSourceIntegrationTest {
 				""").update();
 		server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
 		server.start();
+		httpClient = HttpClient.newBuilder()
+				.followRedirects(HttpClient.Redirect.NEVER)
+				.build();
 	}
 
 	@AfterEach
 	void tearDown() {
-		server.stop(0);
+		try {
+			if (server != null) {
+				server.stop(0);
+			}
+		} finally {
+			if (httpClient != null) {
+				httpClient.close();
+			}
+		}
 	}
 
 	@Test
@@ -90,9 +102,6 @@ class IngestionFakeSourceIntegrationTest {
 		server.createContext("/objects/" + eventArchiveName, exchange -> respond(exchange, eventZip, eventRequests));
 		server.createContext("/objects/" + mentionArchiveName, exchange -> respond(exchange, mentionZip, mentionRequests));
 
-		HttpClient httpClient = HttpClient.newBuilder()
-				.followRedirects(HttpClient.Redirect.NEVER)
-				.build();
 		URI serverRoot = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
 		GdeltManifestClient manifestClient = new GdeltManifestClient(
 				httpClient,

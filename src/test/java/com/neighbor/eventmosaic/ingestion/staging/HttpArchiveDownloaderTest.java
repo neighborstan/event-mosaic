@@ -49,17 +49,29 @@ class HttpArchiveDownloaderTest {
 	Path tempDir;
 
 	private HttpServer server;
+	private HttpClient httpClient;
 
 	@BeforeEach
 	void startServer() throws IOException {
 		server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
 		server.start();
+		httpClient = HttpClient.newBuilder()
+				.followRedirects(HttpClient.Redirect.NEVER)
+				.build();
 	}
 
 	@AfterEach
 	void stopServer() {
-		server.stop(0);
 		Thread.interrupted();
+		try {
+			if (server != null) {
+				server.stop(0);
+			}
+		} finally {
+			if (httpClient != null) {
+				httpClient.close();
+			}
+		}
 	}
 
 	@Test
@@ -349,7 +361,7 @@ class HttpArchiveDownloaderTest {
 		SimpleMeterRegistry registry = new SimpleMeterRegistry();
 		IngestionMetrics metrics = new IngestionMetrics(registry);
 		HttpArchiveDownloader downloader = new HttpArchiveDownloader(
-				HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build(),
+				httpClient,
 				Duration.ofSeconds(5),
 				1024,
 				metrics,
@@ -373,7 +385,7 @@ class HttpArchiveDownloaderTest {
 
 	private HttpArchiveDownloader downloader(long maxBytes, Duration timeout) {
 		return new HttpArchiveDownloader(
-				HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build(),
+				httpClient,
 				timeout,
 				maxBytes,
 				new IngestionMetrics(new SimpleMeterRegistry()),

@@ -7,8 +7,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.neighbor.eventmosaic.ingestion.IngestionRunService;
+import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
+import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.DefaultApplicationArguments;
@@ -19,9 +20,9 @@ import org.springframework.context.annotation.Import;
 @DisplayName("Однократный запуск загрузки")
 class IngestionOneShotRunnerTest {
 
-	private final IngestionRunService ingestionRunService = mock(IngestionRunService.class);
+	private final GdeltPipelineService pipelineService = mock(GdeltPipelineService.class);
 	private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-			.withBean(IngestionRunService.class, () -> ingestionRunService)
+			.withBean(GdeltPipelineService.class, () -> pipelineService)
 			.withUserConfiguration(RunnerConfiguration.class);
 
 	@Test
@@ -29,7 +30,7 @@ class IngestionOneShotRunnerTest {
 	void isAbsentAndDoesNotCallSourceByDefault() {
 		contextRunner.run(context -> {
 			assertThat(context).doesNotHaveBean(IngestionOneShotRunner.class);
-			verifyNoInteractions(ingestionRunService);
+			verifyNoInteractions(pipelineService);
 		});
 	}
 
@@ -43,7 +44,7 @@ class IngestionOneShotRunnerTest {
 
 					runner.run(new DefaultApplicationArguments(new String[0]));
 
-					verify(ingestionRunService).runLatestUpdate();
+					verify(pipelineService).runLatestUpdate();
 				});
 	}
 
@@ -51,8 +52,8 @@ class IngestionOneShotRunnerTest {
 	@DisplayName("Runner заменяет неожиданную ошибку безопасной причиной остановки")
 	void sanitizesUnexpectedFailureAtApplicationBoundary() {
 		IllegalStateException unsafe = new IllegalStateException("secret runtime detail");
-		when(ingestionRunService.runLatestUpdate()).thenThrow(unsafe);
-		IngestionOneShotRunner runner = new IngestionOneShotRunner(ingestionRunService);
+		when(pipelineService.runLatestUpdate()).thenThrow(unsafe);
+		IngestionOneShotRunner runner = new IngestionOneShotRunner(pipelineService);
 		DefaultApplicationArguments arguments = new DefaultApplicationArguments(new String[0]);
 
 		assertThatThrownBy(() -> runner.run(arguments))
@@ -61,6 +62,21 @@ class IngestionOneShotRunnerTest {
 						+ ": "
 						+ IngestionErrorCode.INTERNAL_ERROR.safeMessage())
 				.hasMessageNotContaining("secret runtime detail")
+				.hasNoCause();
+	}
+
+	@Test
+	@DisplayName("Runner сохраняет безопасный код cooperative interruption")
+	void preservesCooperativeInterruptionCode() {
+		when(pipelineService.runLatestUpdate()).thenThrow(new IngestionInterruptedException());
+		IngestionOneShotRunner runner = new IngestionOneShotRunner(pipelineService);
+		DefaultApplicationArguments arguments = new DefaultApplicationArguments(new String[0]);
+
+		assertThatThrownBy(() -> runner.run(arguments))
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessage(IngestionErrorCode.OPERATION_INTERRUPTED.code()
+						+ ": "
+						+ IngestionErrorCode.OPERATION_INTERRUPTED.safeMessage())
 				.hasNoCause();
 	}
 

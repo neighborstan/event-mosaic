@@ -19,6 +19,14 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltMention;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMentionCsvReader;
 import com.neighbor.eventmosaic.gdelt.api.GdeltRecordConsumer;
 import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
+import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
+import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
+import com.neighbor.eventmosaic.indexing.api.IndexedMentionDocument;
+import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
+import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
+import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
+import com.neighbor.eventmosaic.search.api.EventDetails;
+import com.neighbor.eventmosaic.search.api.EventDetailsQuery;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -62,5 +70,44 @@ class ArchitectureVerificationTest {
 				.allSatisfy(type -> assertThat(api.contains(type))
 				.as("%s принадлежит gdelt::api", type.getSimpleName())
 				.isTrue());
+	}
+
+	@Test
+	@DisplayName("Новые модули публикуют только явные named API boundaries")
+	void exposesProcessingIndexingAndSearchNamedInterfaces() {
+		var modules = ApplicationModules.of(EventMosaicApplication.class);
+
+		assertNamedApi(
+				modules,
+				"processing",
+				List.of(
+						ArchiveProcessingRequest.class,
+						GdeltArchiveProcessor.class,
+						ProcessingFingerprintFactory.class));
+		assertNamedApi(
+				modules,
+				"indexing",
+				List.of(
+						GdeltIndexWriter.class,
+						IndexedEventDocument.class,
+						IndexedMentionDocument.class));
+		assertNamedApi(
+				modules,
+				"search",
+				List.of(EventDetails.class, EventDetailsQuery.class));
+	}
+
+	private static void assertNamedApi(
+			ApplicationModules modules,
+			String moduleName,
+			List<Class<?>> contracts
+	) {
+		var module = modules.getModuleByName(moduleName).orElseThrow();
+		var api = module.getNamedInterfaces().getByName("api").orElseThrow();
+
+		assertThat(contracts).isNotEmpty()
+				.allSatisfy(type -> assertThat(api.contains(type))
+						.as("%s принадлежит %s::api", type.getSimpleName(), moduleName)
+						.isTrue());
 	}
 }

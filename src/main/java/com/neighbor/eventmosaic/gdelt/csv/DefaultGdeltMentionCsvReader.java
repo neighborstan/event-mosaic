@@ -2,6 +2,7 @@ package com.neighbor.eventmosaic.gdelt.csv;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvReadSummary;
+import com.neighbor.eventmosaic.gdelt.api.GdeltCsvProgressListener;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMention;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMentionCsvReader;
 import com.neighbor.eventmosaic.gdelt.api.GdeltRecordConsumer;
@@ -27,5 +28,14 @@ final class DefaultGdeltMentionCsvReader extends GdeltCsvReaderSupport<GdeltMent
 	@Override
 	public GdeltCsvReadSummary read(Path csvPath, GdeltRecordConsumer<GdeltMention> consumer) {
 		return readCsv(csvPath, consumer);
+	}
+
+	@Override
+	public GdeltCsvReadSummary read(
+			Path csvPath,
+			GdeltRecordConsumer<GdeltMention> consumer,
+			GdeltCsvProgressListener progressListener
+	) {
+		return readCsv(csvPath, consumer, progressListener);
 	}
 }

@@ -1,6 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.trigger;
 
-import com.neighbor.eventmosaic.ingestion.IngestionRunService;
+import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
 import org.springframework.boot.ApplicationArguments;
@@ -9,8 +9,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
- * Однократно запускает acquisition cycle после старта приложения, когда это
- * явно разрешено свойством {@code one-shot-enabled}.
+ * Однократно запускает сквозной ingestion pipeline после старта приложения,
+ * когда это явно разрешено свойством {@code one-shot-enabled}.
  */
 @Component
 @ConditionalOnProperty(
@@ -20,15 +20,15 @@ import org.springframework.stereotype.Component;
 )
 public class IngestionOneShotRunner implements ApplicationRunner {
 
-	private final IngestionRunService ingestionRunService;
+	private final GdeltPipelineService pipelineService;
 
 	/**
 	 * Создает runner для основного orchestration service.
 	 *
-	 * @param ingestionRunService сервис одного ingestion cycle
+	 * @param pipelineService сервис одного сквозного ingestion cycle
 	 */
-	public IngestionOneShotRunner(IngestionRunService ingestionRunService) {
-		this.ingestionRunService = ingestionRunService;
+	public IngestionOneShotRunner(GdeltPipelineService pipelineService) {
+		this.pipelineService = pipelineService;
 	}
 
 	/**
@@ -39,7 +39,7 @@ public class IngestionOneShotRunner implements ApplicationRunner {
 	@Override
 	public void run(ApplicationArguments arguments) {
 		try {
-			ingestionRunService.runLatestUpdate();
+			pipelineService.runLatestUpdate();
 		} catch (ApplicationException exception) {
 			throw new IllegalStateException(
 					exception.errorCode().code() + ": " + exception.errorCode().safeMessage());

@@ -1,0 +1,69 @@
+package com.neighbor.eventmosaic.indexing;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+
+import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
+import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
+import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
+import com.neighbor.eventmosaic.indexing.api.IndexingProperties;
+import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.shared.error.NonRetryableException;
+import com.neighbor.eventmosaic.shared.error.RetryableException;
+import java.io.IOException;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+@DisplayName("Контракты конфигурации и ошибок indexing")
+class IndexingApiContractsTest {
+
+	@Test
+	@DisplayName("Bulk count и byte size принимают только безопасные диапазоны")
+	void validatesBulkLimits() {
+		IndexingProperties properties = new IndexingProperties(
+				500,
+				IndexingProperties.DEFAULT_MAX_BULK_BYTES);
+
+		assertThat(properties.bulkSize()).isEqualTo(500);
+		assertThat(properties.maxBulkBytes()).isEqualTo(5L * 1024 * 1024);
+		assertThatIllegalArgumentException()
+				.isThrownBy(() -> new IndexingProperties(
+						0,
+						IndexingProperties.DEFAULT_MAX_BULK_BYTES));
+		assertThatIllegalArgumentException()
+				.isThrownBy(() -> new IndexingProperties(
+						10_001,
+						IndexingProperties.DEFAULT_MAX_BULK_BYTES));
+		assertThatIllegalArgumentException()
+				.isThrownBy(() -> new IndexingProperties(500, 0));
+		assertThatIllegalArgumentException()
+				.isThrownBy(() -> new IndexingProperties(
+						500,
+						IndexingProperties.MAX_BULK_BYTES + 1));
+	}
+
+	@Test
+	@DisplayName("Смысловые ошибки выбирают retry-ветку без публикации remote reason")
+	void keepsRemoteReasonOutOfSafeMessage() {
+		IndexingAccessException retryable = new IndexingAccessException(
+				IndexingErrorCode.INDEXING_UNAVAILABLE,
+				new IOException("remote identifier and reason"));
+		IndexingProtocolException permanent = new IndexingProtocolException(
+				IndexingErrorCode.INDEXING_REQUEST_REJECTED);
+		IndexingInterruptedException interruption =
+				new IndexingInterruptedException(new IOException("interrupted remote call"));
+
+		assertThat(retryable).isInstanceOf(RetryableException.class);
+		assertThat(retryable.retryable()).isTrue();
+		assertThat(retryable.getMessage())
+				.isEqualTo("Elasticsearch временно недоступен")
+				.doesNotContain("remote");
+		assertThat(permanent).isInstanceOf(NonRetryableException.class);
+		assertThat(permanent.retryable()).isFalse();
+		assertThat(interruption).isInstanceOf(RetryableException.class);
+		assertThat(interruption.interruptsProcessing()).isTrue();
+		assertThat(interruption.errorCode())
+				.isEqualTo(IndexingErrorCode.INDEXING_INTERRUPTED);
+	}
+
+}

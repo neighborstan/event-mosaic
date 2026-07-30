@@ -891,6 +891,40 @@ class GdeltCsvReaderTest {
 	}
 
 	@Test
+	@DisplayName("Сохраняет close failure у исключения source progress listener")
+	void preservesCloseFailureOnProgressListenerException() {
+		StringReader content = new StringReader("wrong-width\n");
+		IOException closeFailure = new IOException("synthetic close failure");
+		Reader source = new Reader() {
+			@Override
+			public int read(char[] buffer, int offset, int length) throws IOException {
+				return content.read(buffer, offset, length);
+			}
+
+			@Override
+			public void close() throws IOException {
+				throw closeFailure;
+			}
+		};
+		IllegalStateException progressFailure =
+				new IllegalStateException("progress listener failed");
+
+		assertThatThrownBy(() -> eventReader.readCsv(
+				source,
+				_ -> {
+				},
+				_ -> {
+					throw progressFailure;
+				})).isSameAs(progressFailure);
+
+		assertThat(progressFailure.getSuppressed()).containsExactly(closeFailure);
+		assertThat(meterRegistry.get("event_mosaic.gdelt.csv.files")
+				.tags("kind", "translation_events", "outcome", "consumer_failed")
+				.counter()
+				.count()).isEqualTo(1);
+	}
+
+	@Test
 	@DisplayName("Не классифицирует внутренний mapper defect как consumer failure")
 	void doesNotClassifyMapperDefectAsConsumerFailure() {
 		IllegalStateException mapperFailure = new IllegalStateException("mapper defect");
@@ -951,6 +985,59 @@ class GdeltCsvReaderTest {
 				.tags("kind", "translation_events", "outcome", "io_failed")
 				.counter()
 				.count()).isEqualTo(1);
+	}
+
+	@Test
+	@DisplayName("Потоково сообщает каждое отклонение до invalid-only schema failure")
+	void reportsInvalidOnlyProgressBeforeSchemaFailure() throws IOException {
+		Path path = write(
+				"invalid-only-progress.csv",
+				String.join("\n", "wrong-width", "still-wrong-width"));
+		List<Long> invalidProgress = new ArrayList<>();
+
+		assertThatExceptionOfType(GdeltCsvSchemaException.class)
+				.isThrownBy(() -> eventReader.read(
+						path,
+						_ -> {
+						},
+						invalidProgress::add))
+				.satisfies(exception -> assertThat(exception.errorCode())
+						.isEqualTo(GdeltCsvErrorCode.CSV_SCHEMA_MISMATCH));
+
+		assertThat(invalidProgress).containsExactly(1L, 2L);
+	}
+
+	@Test
+	@DisplayName("Сохраняет source rejection progress перед последующим I/O failure")
+	void reportsInvalidProgressBeforeIoFailure() {
+		StringReader prefix = new StringReader("wrong-width\n");
+		Reader source = new Reader() {
+			@Override
+			public int read(char[] buffer, int offset, int length) throws IOException {
+				int read = prefix.read(buffer, offset, length);
+				if (read >= 0) {
+					return read;
+				}
+				throw new IOException("synthetic read failure");
+			}
+
+			@Override
+			public void close() {
+				// Test double не владеет внешним ресурсом.
+			}
+		};
+		List<Long> invalidProgress = new ArrayList<>();
+
+		assertThatExceptionOfType(GdeltCsvAccessException.class)
+				.isThrownBy(() -> eventReader.readCsv(
+						source,
+						_ -> {
+						},
+						invalidProgress::add))
+				.satisfies(exception -> assertThat(exception.errorCode())
+						.isEqualTo(GdeltCsvErrorCode.CSV_FILESYSTEM_IO_FAILURE));
+
+		assertThat(invalidProgress).containsExactly(1L);
 	}
 
 	@Test

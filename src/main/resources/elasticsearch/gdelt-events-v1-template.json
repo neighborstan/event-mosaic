@@ -1,0 +1,105 @@
+{
+  "index_patterns": [
+    "gdelt-events-v1"
+  ],
+  "priority": 100,
+  "version": 1,
+  "allow_auto_create": true,
+  "template": {
+    "mappings": {
+      "dynamic": "strict",
+      "_meta": {
+        "schema_version": 1
+      },
+      "properties": {
+        "globalEventId": {
+          "type": "long"
+        },
+        "eventDay": {
+          "type": "date"
+        },
+        "dateAdded": {
+          "type": "date"
+        },
+        "actor1Name": {
+          "type": "keyword",
+          "ignore_above": 1024
+        },
+        "actor1Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor2Name": {
+          "type": "keyword",
+          "ignore_above": 1024
+        },
+        "actor2Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "eventCode": {
+          "type": "keyword",
+          "ignore_above": 64
+        },
+        "eventBaseCode": {
+          "type": "keyword",
+          "ignore_above": 64
+        },
+        "eventRootCode": {
+          "type": "keyword",
+          "ignore_above": 64
+        },
+        "quadClass": {
+          "type": "integer"
+        },
+        "goldsteinScale": {
+          "type": "double"
+        },
+        "averageTone": {
+          "type": "double"
+        },
+        "location": {
+          "type": "object",
+          "dynamic": "strict",
+          "properties": {
+            "role": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "keyword",
+              "ignore_above": 1024
+            },
+            "countryCode": {
+              "type": "keyword",
+              "ignore_above": 32
+            },
+            "admin1Code": {
+              "type": "keyword",
+              "ignore_above": 64
+            },
+            "admin2Code": {
+              "type": "keyword",
+              "ignore_above": 64
+            },
+            "featureId": {
+              "type": "keyword",
+              "ignore_above": 256
+            },
+            "point": {
+              "type": "geo_point"
+            }
+          }
+        },
+        "sourceUpdateTime": {
+          "type": "date"
+        },
+        "sourceArchiveKey": {
+          "type": "keyword"
+        },
+        "sourceLineNumber": {
+          "type": "long"
+        }
+      }
+    }
+  }
+}

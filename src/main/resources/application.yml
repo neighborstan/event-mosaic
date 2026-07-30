@@ -20,6 +20,11 @@ management:
         enabled: true
 
 event-mosaic:
+  search:
+    max-sources-per-event: 20
+  indexing:
+    bulk-size: 500
+    max-bulk-bytes: 5242880
   gdelt:
     csv:
       max-record-chars: 1048576
