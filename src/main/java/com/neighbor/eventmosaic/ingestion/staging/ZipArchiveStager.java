@@ -1,6 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.staging;
 
-import com.neighbor.eventmosaic.gdelt.GdeltArchiveName;
+import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveName;
 import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveAttempt;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
@@ -148,29 +148,8 @@ public class ZipArchiveStager {
 					break;
 				}
 				entryCount++;
-				if (entryCount > maxEntries) {
-					throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_LIMIT_EXCEEDED);
-				}
-				validateEntryPath(entry, expectedName, dataRoot);
-				if (entryCount > 1) {
-					throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_CONTENT_MISMATCH);
-				}
-				long entryBytes = 0;
-				byte[] buffer = new byte[BUFFER_SIZE];
-				while (true) {
-					IngestionInterruption.throwIfRequested();
-					int read = zip.read(buffer);
-					if (read == -1) {
-						break;
-					}
-					entryBytes += read;
-					totalBytes += read;
-					if (entryBytes > maxEntryBytes || totalBytes > maxTotalBytes) {
-						throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_LIMIT_EXCEEDED);
-					}
-					output.write(buffer, 0, read);
-					digest.update(buffer, 0, read);
-				}
+				validateEntry(entryCount, entry, expectedName, dataRoot);
+				totalBytes = copyEntry(zip, output, digest, totalBytes);
 				zip.closeEntry();
 			}
 		}
@@ -179,6 +158,45 @@ public class ZipArchiveStager {
 			throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_CONTENT_MISMATCH);
 		}
 		return new EntryFingerprint(totalBytes, Md5Checksum.hex(digest));
+	}
+
+	private void validateEntry(
+			int entryCount,
+			ZipEntry entry,
+			String expectedName,
+			Path dataRoot
+	) {
+		if (entryCount > maxEntries) {
+			throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_LIMIT_EXCEEDED);
+		}
+		validateEntryPath(entry, expectedName, dataRoot);
+		if (entryCount > 1) {
+			throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_CONTENT_MISMATCH);
+		}
+	}
+
+	private long copyEntry(
+			ZipInputStream zip,
+			OutputStream output,
+			MessageDigest digest,
+			long totalBytes
+	) throws IOException {
+		long entryBytes = 0;
+		byte[] buffer = new byte[BUFFER_SIZE];
+		while (true) {
+			IngestionInterruption.throwIfRequested();
+			int read = zip.read(buffer);
+			if (read == -1) {
+				return totalBytes;
+			}
+			entryBytes += read;
+			totalBytes += read;
+			if (entryBytes > maxEntryBytes || totalBytes > maxTotalBytes) {
+				throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_LIMIT_EXCEEDED);
+			}
+			output.write(buffer, 0, read);
+			digest.update(buffer, 0, read);
+		}
 	}
 
 	private static void validateEntryPath(ZipEntry entry, String expectedName, Path dataRoot) {

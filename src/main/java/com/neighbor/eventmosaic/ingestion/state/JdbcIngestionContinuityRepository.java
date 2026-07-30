@@ -1,6 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.state;
 
-import com.neighbor.eventmosaic.gdelt.GdeltSourceContract;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.ingestion.api.IngestionGap;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
 import java.sql.Timestamp;
@@ -15,6 +15,8 @@ import org.springframework.stereotype.Repository;
  */
 @Repository
 class JdbcIngestionContinuityRepository {
+
+	private static final String PARAM_SOURCE_NAME = "sourceName";
 
 	private final JdbcClient jdbcClient;
 
@@ -52,7 +54,7 @@ class JdbcIngestionContinuityRepository {
 				""")
 				.param("latestObserved", Timestamp.from(updateTime))
 				.param("updatedAt", Timestamp.from(now))
-				.param("sourceName", GdeltSourceContract.SOURCE_NAME)
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
 				.update();
 		return gapsCreated;
 	}
@@ -64,7 +66,7 @@ class JdbcIngestionContinuityRepository {
 				where source_name = :sourceName
 				for update
 				""")
-				.param("sourceName", GdeltSourceContract.SOURCE_NAME)
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
 				.query((resultSet, rowNumber) ->
 						IngestionJdbcMappers.instant(resultSet, "latest_observed_update_time"))
 				.optional();
@@ -77,7 +79,7 @@ class JdbcIngestionContinuityRepository {
 				where source_name = :sourceName
 				order by first_missing_update_time
 				""")
-				.param("sourceName", GdeltSourceContract.SOURCE_NAME)
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
 				.query((resultSet, rowNumber) -> new IngestionGap(
 						resultSet.getLong("id"),
 						IngestionJdbcMappers.instant(resultSet, "first_missing_update_time"),
@@ -103,7 +105,7 @@ class JdbcIngestionContinuityRepository {
 				)
 				on conflict (source_name) do nothing
 				""")
-				.param("sourceName", GdeltSourceContract.SOURCE_NAME)
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
 				.param("baseline", Timestamp.from(baseline))
 				.param("latestObserved", Timestamp.from(updateTime))
 				.param("firstRunPolicy", firstRunPolicy.name())
@@ -127,7 +129,7 @@ class JdbcIngestionContinuityRepository {
 				)
 				on conflict (source_name, first_missing_update_time, last_missing_update_time) do nothing
 				""")
-				.param("sourceName", GdeltSourceContract.SOURCE_NAME)
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
 				.param("firstMissing", Timestamp.from(firstMissing))
 				.param("lastMissing", Timestamp.from(lastMissing))
 				.param("detectedAt", Timestamp.from(now))

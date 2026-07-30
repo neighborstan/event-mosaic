@@ -1,6 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.api;
 
-import com.neighbor.eventmosaic.gdelt.GdeltSourceContract;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import java.nio.file.Path;
 import java.util.Objects;
 

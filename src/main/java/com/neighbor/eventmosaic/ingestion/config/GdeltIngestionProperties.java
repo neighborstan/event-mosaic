@@ -1,6 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.config;
 
-import com.neighbor.eventmosaic.gdelt.GdeltSourceContract;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;

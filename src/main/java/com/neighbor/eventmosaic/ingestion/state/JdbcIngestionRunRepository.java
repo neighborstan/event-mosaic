@@ -1,6 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.state;
 
-import com.neighbor.eventmosaic.gdelt.GdeltSourceContract;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
 import com.neighbor.eventmosaic.ingestion.api.RecordedIngestionFailure;
 import java.sql.ResultSet;
@@ -16,6 +16,12 @@ import org.springframework.stereotype.Repository;
  */
 @Repository
 class JdbcIngestionRunRepository {
+
+	private static final String PARAM_RUN_ID = "runId";
+	private static final String PARAM_SOURCE_NAME = "sourceName";
+	private static final String PARAM_SOURCE_UPDATE_TIME = "sourceUpdateTime";
+	private static final String PARAM_STATUS = "status";
+	private static final String PARAM_UPDATED_AT = "updatedAt";
 
 	private final JdbcClient jdbcClient;
 
@@ -34,12 +40,12 @@ class JdbcIngestionRunRepository {
 				on conflict (source_name, source_update_time) do nothing
 				returning id
 				""")
-				.param("sourceName", GdeltSourceContract.SOURCE_NAME)
-				.param("sourceUpdateTime", Timestamp.from(sourceUpdateTime))
-				.param("status", IngestionRunStatus.DISCOVERED.name())
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
+				.param(PARAM_SOURCE_UPDATE_TIME, Timestamp.from(sourceUpdateTime))
+				.param(PARAM_STATUS, IngestionRunStatus.DISCOVERED.name())
 				.param("firstSeenAt", Timestamp.from(now))
 				.param("createdAt", Timestamp.from(now))
-				.param("updatedAt", Timestamp.from(now))
+				.param(PARAM_UPDATED_AT, Timestamp.from(now))
 				.query(Long.class)
 				.optional();
 		return inserted.orElseGet(() -> findIdByUpdateTime(sourceUpdateTime).orElseThrow());
@@ -52,8 +58,8 @@ class JdbcIngestionRunRepository {
 				where source_name = :sourceName
 				  and source_update_time = :sourceUpdateTime
 				""")
-				.param("sourceName", GdeltSourceContract.SOURCE_NAME)
-				.param("sourceUpdateTime", Timestamp.from(sourceUpdateTime))
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
+				.param(PARAM_SOURCE_UPDATE_TIME, Timestamp.from(sourceUpdateTime))
 				.query(IngestionJdbcMappers.RUN)
 				.optional();
 	}
@@ -69,7 +75,7 @@ class JdbcIngestionRunRepository {
 				from ingestion_archives
 				where run_id = :runId
 				""")
-				.param("runId", runId)
+				.param(PARAM_RUN_ID, runId)
 				.query(JdbcIngestionRunRepository::mapCounts)
 				.single();
 		IngestionRunStatus status = IngestionRunStatusPolicy.derive(counts);
@@ -83,7 +89,7 @@ class JdbcIngestionRunRepository {
 
 	private void lockRun(long runId) {
 		jdbcClient.sql("select id from ingestion_runs where id = :runId for update")
-				.param("runId", runId)
+				.param(PARAM_RUN_ID, runId)
 				.query(Long.class)
 				.single();
 	}
@@ -95,8 +101,8 @@ class JdbcIngestionRunRepository {
 				where source_name = :sourceName
 				  and source_update_time = :sourceUpdateTime
 				""")
-				.param("sourceName", GdeltSourceContract.SOURCE_NAME)
-				.param("sourceUpdateTime", Timestamp.from(sourceUpdateTime))
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
+				.param(PARAM_SOURCE_UPDATE_TIME, Timestamp.from(sourceUpdateTime))
 				.query(Long.class)
 				.optional();
 	}
@@ -110,7 +116,7 @@ class JdbcIngestionRunRepository {
 				order by failed_at desc, idempotency_key asc
 				limit 1
 				""")
-				.param("runId", runId)
+				.param(PARAM_RUN_ID, runId)
 				.query((resultSet, rowNumber) -> IngestionJdbcMappers.mapRecordedFailure(
 						resultSet,
 						"failed_at"))
@@ -134,13 +140,13 @@ class JdbcIngestionRunRepository {
 				    updated_at = :updatedAt
 				where id = :runId
 				""")
-				.param("status", status.name())
+				.param(PARAM_STATUS, status.name())
 				.param("completedAt", Timestamp.from(now))
 				.param("lastFailedAt", Timestamp.from(recordedFailure.occurredAt()))
 				.param("lastErrorCode", failure.code().code())
 				.param("lastErrorRetryable", failure.retryable())
-				.param("updatedAt", Timestamp.from(now))
-				.param("runId", runId)
+				.param(PARAM_UPDATED_AT, Timestamp.from(now))
+				.param(PARAM_RUN_ID, runId)
 				.update();
 	}
 
@@ -155,10 +161,10 @@ class JdbcIngestionRunRepository {
 				    updated_at = :updatedAt
 				where id = :runId
 				""")
-				.param("status", status.name())
+				.param(PARAM_STATUS, status.name())
 				.param("completedAt", Timestamp.from(now))
-				.param("updatedAt", Timestamp.from(now))
-				.param("runId", runId)
+				.param(PARAM_UPDATED_AT, Timestamp.from(now))
+				.param(PARAM_RUN_ID, runId)
 				.update();
 	}
 

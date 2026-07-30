@@ -1,8 +1,8 @@
 package com.neighbor.eventmosaic.ingestion.source;
 
-import com.neighbor.eventmosaic.gdelt.GdeltHttpStatusPolicy;
-import com.neighbor.eventmosaic.gdelt.GdeltHttpBodyDeadline;
-import com.neighbor.eventmosaic.gdelt.GdeltSourceContract;
+import com.neighbor.eventmosaic.gdelt.api.GdeltHttpBodyDeadline;
+import com.neighbor.eventmosaic.gdelt.api.GdeltHttpStatusPolicy;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorContext;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;

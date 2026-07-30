@@ -1,4 +1,4 @@
-package com.neighbor.eventmosaic.gdelt;
+package com.neighbor.eventmosaic.gdelt.api;
 
 import java.net.URI;
 import java.time.Duration;
@@ -22,7 +22,13 @@ public final class GdeltSourceContract {
 	/** Каноническое имя источника в ingestion ledger и telemetry. */
 	public static final String SOURCE_NAME = "GDELT";
 
-	/** Официальный HTTPS-каталог объектов GDELT v2. */
+	/**
+	 * Официальный HTTPS-каталог объектов GDELT v2.
+	 *
+	 * <p>URI является фиксированным trust anchor, а runtime property обязана
+	 * совпадать с ним и не расширяет allowlist.</p>
+	 */
+	@SuppressWarnings("java:S1075")
 	public static final URI OFFICIAL_DOWNLOAD_BASE_URI =
 			URI.create("https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/");
 

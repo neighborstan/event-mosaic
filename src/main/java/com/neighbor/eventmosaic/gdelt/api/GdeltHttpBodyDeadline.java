@@ -1,4 +1,4 @@
-package com.neighbor.eventmosaic.gdelt;
+package com.neighbor.eventmosaic.gdelt.api;
 
 import java.io.IOException;
 import java.io.InputStream;

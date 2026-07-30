@@ -1,7 +1,7 @@
 package com.neighbor.eventmosaic.ingestion.source;
 
-import com.neighbor.eventmosaic.gdelt.GdeltArchiveName;
-import com.neighbor.eventmosaic.gdelt.GdeltSourceContract;
+import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveName;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import java.net.URI;
 import java.util.Objects;

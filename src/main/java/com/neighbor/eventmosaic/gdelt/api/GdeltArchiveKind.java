@@ -1,4 +1,4 @@
-package com.neighbor.eventmosaic.gdelt;
+package com.neighbor.eventmosaic.gdelt.api;
 
 /**
  * Поддерживаемые типы архивов GDELT Translation, входящие в один update.

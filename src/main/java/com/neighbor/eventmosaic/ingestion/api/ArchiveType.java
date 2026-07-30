@@ -1,6 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.api;
 
-import com.neighbor.eventmosaic.gdelt.GdeltArchiveKind;
+import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import java.util.Objects;
 
 /**

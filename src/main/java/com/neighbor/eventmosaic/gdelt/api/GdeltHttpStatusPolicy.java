@@ -1,4 +1,4 @@
-package com.neighbor.eventmosaic.gdelt;
+package com.neighbor.eventmosaic.gdelt.api;
 
 /**
  * Классифицирует HTTP status источника GDELT для retry policy.

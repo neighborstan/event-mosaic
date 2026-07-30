@@ -20,6 +20,9 @@ management:
         enabled: true
 
 event-mosaic:
+  gdelt:
+    csv:
+      max-record-chars: 1048576
   ingestion:
     gdelt:
       base-uri: https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/

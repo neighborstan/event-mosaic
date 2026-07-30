@@ -1,8 +1,8 @@
 package com.neighbor.eventmosaic.ingestion.staging;
 
-import com.neighbor.eventmosaic.gdelt.GdeltArchiveName;
-import com.neighbor.eventmosaic.gdelt.GdeltHttpBodyDeadline;
-import com.neighbor.eventmosaic.gdelt.GdeltHttpStatusPolicy;
+import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveName;
+import com.neighbor.eventmosaic.gdelt.api.GdeltHttpBodyDeadline;
+import com.neighbor.eventmosaic.gdelt.api.GdeltHttpStatusPolicy;
 import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveAttempt;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;

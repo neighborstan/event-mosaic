@@ -1,6 +1,6 @@
 package com.neighbor.eventmosaic.ingestion;
 
-import com.neighbor.eventmosaic.gdelt.GdeltSourceContract;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredArchive;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredUpdate;
