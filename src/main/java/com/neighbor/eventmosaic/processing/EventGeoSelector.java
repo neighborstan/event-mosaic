@@ -18,6 +18,7 @@ final class EventGeoSelector {
 		Candidate action = evaluate(new GeoCandidate(
 				IndexedLocationRole.ACTION,
 				new GeoAttributes(
+						event.actionGeoType(),
 						event.actionGeoFullName(),
 						event.actionGeoCountryCode(),
 						event.actionGeoAdm1Code(),
@@ -32,6 +33,7 @@ final class EventGeoSelector {
 		Candidate actor1 = evaluate(new GeoCandidate(
 				IndexedLocationRole.ACTOR1,
 				new GeoAttributes(
+						event.actor1GeoType(),
 						event.actor1GeoFullName(),
 						event.actor1GeoCountryCode(),
 						event.actor1GeoAdm1Code(),
@@ -46,6 +48,7 @@ final class EventGeoSelector {
 		Candidate actor2 = evaluate(new GeoCandidate(
 				IndexedLocationRole.ACTOR2,
 				new GeoAttributes(
+						event.actor2GeoType(),
 						event.actor2GeoFullName(),
 						event.actor2GeoCountryCode(),
 						event.actor2GeoAdm1Code(),
@@ -79,6 +82,7 @@ final class EventGeoSelector {
 		GeoAttributes attributes = candidate.attributes();
 		return Candidate.valid(new IndexedEventLocation(
 				candidate.role(),
+				attributes.geoType(),
 				attributes.name(),
 				attributes.countryCode(),
 				attributes.admin1Code(),
@@ -95,6 +99,7 @@ final class EventGeoSelector {
 	}
 
 	private record GeoAttributes(
+			Integer geoType,
 			String name,
 			String countryCode,
 			String admin1Code,

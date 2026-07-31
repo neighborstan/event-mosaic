@@ -174,27 +174,50 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 				EVENT_ID,
 				LocalDate.of(2026, 7, 21),
 				UPDATE_TIME,
-				"UNITED STATES",
 				"USA",
-				"RUSSIA",
+				"UNITED STATES",
+				"US",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
 				"RUS",
+				"RUSSIA",
+				"RS",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				1,
 				"010",
 				"01",
 				"01",
 				1,
 				-1.5,
 				2.25,
+				3,
+				2,
+				2,
 				new IndexedEventLocation(
 						IndexedLocationRole.ACTION,
+						1,
 						"Moscow, Moskva, Russia",
 						"RS",
 						"RS48",
 						"",
 						"-2960561",
 						new IndexedGeoPoint(55.7558, 37.6173)),
+				"https://example.test/event",
 				UPDATE_TIME,
 				EVENT_ARCHIVE,
-				1);
+				1,
+				"e".repeat(64));
 	}
 
 	private static IndexedMentionDocument mention(
@@ -226,6 +249,7 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 				"",
 				UPDATE_TIME,
 				MENTION_ARCHIVE,
-				lineNumber);
+				lineNumber,
+				"f".repeat(64));
 	}
 }

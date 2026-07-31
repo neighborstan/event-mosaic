@@ -1,10 +1,11 @@
 {
   "index_patterns": [
-    "gdelt-mentions-v1"
+    "gdelt-mentions-v1",
+    "gdelt-mentions-v1-*-g*"
   ],
   "priority": 100,
   "version": 1,
-  "allow_auto_create": true,
+  "allow_auto_create": false,
   "template": {
     "mappings": {
       "dynamic": "strict",
@@ -13,10 +14,12 @@
       },
       "properties": {
         "rawMentionId": {
-          "type": "keyword"
+          "type": "keyword",
+          "doc_values": true
         },
         "sourceDocumentKey": {
-          "type": "keyword"
+          "type": "keyword",
+          "doc_values": true
         },
         "globalEventId": {
           "type": "long"
@@ -25,7 +28,8 @@
           "type": "date"
         },
         "mentionTimeDate": {
-          "type": "date"
+          "type": "date",
+          "doc_values": true
         },
         "mentionType": {
           "type": "integer"
@@ -76,10 +80,16 @@
           "type": "date"
         },
         "sourceArchiveKey": {
-          "type": "keyword"
+          "type": "keyword",
+          "doc_values": true
         },
         "sourceLineNumber": {
-          "type": "long"
+          "type": "long",
+          "doc_values": true
+        },
+        "processingFingerprint": {
+          "type": "keyword",
+          "doc_values": true
         }
       }
     }

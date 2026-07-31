@@ -74,6 +74,7 @@ final class GdeltMentionDocumentMapper {
 				mention.extras(),
 				request.sourceUpdateTime(),
 				request.sourceArchiveKey(),
-				sourceRecord.lineNumber()), 0);
+				sourceRecord.lineNumber(),
+				request.processingFingerprint()), 0);
 	}
 }

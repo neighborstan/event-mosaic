@@ -1,10 +1,11 @@
 {
   "index_patterns": [
-    "gdelt-events-v1"
+    "gdelt-events-v1",
+    "gdelt-events-v1-*-g*"
   ],
   "priority": 100,
   "version": 1,
-  "allow_auto_create": true,
+  "allow_auto_create": false,
   "template": {
     "mappings": {
       "dynamic": "strict",
@@ -13,7 +14,8 @@
       },
       "properties": {
         "globalEventId": {
-          "type": "long"
+          "type": "long",
+          "doc_values": true
         },
         "eventDay": {
           "type": "date"
@@ -21,11 +23,47 @@
         "dateAdded": {
           "type": "date"
         },
+        "actor1Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
         "actor1Name": {
           "type": "keyword",
           "ignore_above": 1024
         },
-        "actor1Code": {
+        "actor1CountryCode": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor1KnownGroupCode": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor1EthnicCode": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor1Religion1Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor1Religion2Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor1Type1Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor1Type2Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor1Type3Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor2Code": {
           "type": "keyword",
           "ignore_above": 256
         },
@@ -33,9 +71,40 @@
           "type": "keyword",
           "ignore_above": 1024
         },
-        "actor2Code": {
+        "actor2CountryCode": {
           "type": "keyword",
           "ignore_above": 256
+        },
+        "actor2KnownGroupCode": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor2EthnicCode": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor2Religion1Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor2Religion2Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor2Type1Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor2Type2Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "actor2Type3Code": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "isRootEvent": {
+          "type": "integer"
         },
         "eventCode": {
           "type": "keyword",
@@ -58,12 +127,24 @@
         "averageTone": {
           "type": "double"
         },
+        "numMentions": {
+          "type": "integer"
+        },
+        "numSources": {
+          "type": "integer"
+        },
+        "numArticles": {
+          "type": "integer"
+        },
         "location": {
           "type": "object",
           "dynamic": "strict",
           "properties": {
             "role": {
               "type": "keyword"
+            },
+            "geoType": {
+              "type": "integer"
             },
             "name": {
               "type": "keyword",
@@ -90,14 +171,25 @@
             }
           }
         },
+        "sourceUrl": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
         "sourceUpdateTime": {
           "type": "date"
         },
         "sourceArchiveKey": {
-          "type": "keyword"
+          "type": "keyword",
+          "doc_values": true
         },
         "sourceLineNumber": {
-          "type": "long"
+          "type": "long",
+          "doc_values": true
+        },
+        "processingFingerprint": {
+          "type": "keyword",
+          "doc_values": true
         }
       }
     }

@@ -34,4 +34,11 @@ public sealed interface GdeltIndexedDocument
 	 */
 	long sourceLineNumber();
 
+	/**
+	 * Возвращает fingerprint версии processing projection и mapping.
+	 *
+	 * @return непустой fingerprint обработки
+	 */
+	String processingFingerprint();
+
 }

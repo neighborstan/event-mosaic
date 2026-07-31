@@ -27,6 +27,7 @@ import java.util.Objects;
  * @param sourceUpdateTime время выпуска исходного архива
  * @param sourceArchiveKey точный ключ исходного архива
  * @param sourceLineNumber физический номер строки CSV
+ * @param processingFingerprint fingerprint версии processing projection и mapping
  */
 @SuppressWarnings("java:S107")
 public record IndexedMentionDocument(
@@ -50,7 +51,8 @@ public record IndexedMentionDocument(
 		String extras,
 		Instant sourceUpdateTime,
 		String sourceArchiveKey,
-		long sourceLineNumber
+		long sourceLineNumber,
+		String processingFingerprint
 ) implements GdeltIndexedDocument {
 
 	/**
@@ -84,6 +86,9 @@ public record IndexedMentionDocument(
 		}
 		if (sourceLineNumber <= 0) {
 			throw new IllegalArgumentException("sourceLineNumber must be positive");
+		}
+		if (processingFingerprint == null || processingFingerprint.isBlank()) {
+			throw new IllegalArgumentException("processingFingerprint must not be blank");
 		}
 	}
 

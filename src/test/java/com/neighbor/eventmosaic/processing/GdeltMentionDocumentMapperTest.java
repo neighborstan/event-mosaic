@@ -56,6 +56,39 @@ class GdeltMentionDocumentMapperTest {
 			assertThat(document.sourceArchiveKey())
 					.isEqualTo(ProcessingTestFixtures.SOURCE_ARCHIVE_KEY);
 			assertThat(document.sourceLineNumber()).isEqualTo(23);
+			assertThat(document.processingFingerprint())
+					.isEqualTo(ProcessingTestFixtures.mentionRequest().processingFingerprint());
+		});
+	}
+
+	@Test
+	@DisplayName("Сохраняет пустые Mention strings и nullable optional numbers")
+	void preservesEmptyStringsAndNullableNumbers() {
+		GdeltMention mention = ProcessingTestFixtures
+				.mentionWithNullableNumericsAndEmptyStrings(
+						700_000_001L,
+						EVENT_TIME,
+						MENTION_TIME,
+						1,
+						"identifier");
+
+		DocumentMappingResult<IndexedMentionDocument> result = map(mention);
+
+		assertThat(result.accepted()).isTrue();
+		assertThat(result.document()).satisfies(document -> {
+			assertThat(document.mentionSourceName()).isEmpty();
+			assertThat(document.sentenceId()).isNull();
+			assertThat(document.actor1CharOffset()).isNull();
+			assertThat(document.actor2CharOffset()).isNull();
+			assertThat(document.actionCharOffset()).isNull();
+			assertThat(document.inRawText()).isNull();
+			assertThat(document.confidence()).isNull();
+			assertThat(document.mentionDocLen()).isNull();
+			assertThat(document.mentionDocTone()).isNull();
+			assertThat(document.mentionDocTranslationInfo()).isEmpty();
+			assertThat(document.extras()).isEmpty();
+			assertThat(document.processingFingerprint())
+					.isEqualTo(ProcessingTestFixtures.mentionRequest().processingFingerprint());
 		});
 	}
 

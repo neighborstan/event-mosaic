@@ -61,6 +61,32 @@ final class ProcessingTestFixtures {
 				"extras");
 	}
 
+	static GdeltMention mentionWithNullableNumericsAndEmptyStrings(
+			long globalEventId,
+			Instant eventTimeDate,
+			Instant mentionTimeDate,
+			Integer mentionType,
+			String mentionIdentifier
+	) {
+		return new GdeltMention(
+				globalEventId,
+				eventTimeDate,
+				mentionTimeDate,
+				mentionType,
+				"",
+				mentionIdentifier,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				"",
+				"");
+	}
+
 	static GdeltEvent event(
 			long globalEventId,
 			LocalDate day,
@@ -78,23 +104,23 @@ final class ProcessingTestFixtures {
 				"A1-CODE",
 				"Actor 1",
 				"A1-COUNTRY",
-				"",
-				"",
-				"",
-				"",
-				"",
-				"",
-				"",
+				"A1-GROUP",
+				"A1-ETHNIC",
+				"A1-RELIGION-1",
+				"A1-RELIGION-2",
+				"A1-TYPE-1",
+				"A1-TYPE-2",
+				"A1-TYPE-3",
 				"A2-CODE",
 				"Actor 2",
 				"A2-COUNTRY",
-				"",
-				"",
-				"",
-				"",
-				"",
-				"",
-				"",
+				"A2-GROUP",
+				"A2-ETHNIC",
+				"A2-RELIGION-1",
+				"A2-RELIGION-2",
+				"A2-TYPE-1",
+				"A2-TYPE-2",
+				"A2-TYPE-3",
 				1,
 				"042",
 				"042",
@@ -133,8 +159,81 @@ final class ProcessingTestFixtures {
 				"https://source.example/event");
 	}
 
+	static GdeltEvent eventWithNullableNumericsAndEmptyStrings(
+			long globalEventId,
+			LocalDate day,
+			Instant dateAdded
+	) {
+		return new GdeltEvent(
+				globalEventId,
+				day,
+				null,
+				null,
+				null,
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+				null,
+				"",
+				"",
+				"",
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				"",
+				"",
+				"",
+				"",
+				null,
+				null,
+				"",
+				null,
+				"",
+				"",
+				"",
+				"",
+				null,
+				null,
+				"",
+				null,
+				"",
+				"",
+				"",
+				"",
+				null,
+				null,
+				"",
+				dateAdded,
+				"");
+	}
+
 	static Geo geo(String name, double latitude, double longitude) {
-		return new Geo(1, name, "US", "USCA", "", latitude, longitude, "feature");
+		return geo(1, name, latitude, longitude);
+	}
+
+	static Geo geo(Integer type, String name, double latitude, double longitude) {
+		return new Geo(type, name, "US", "USCA", "", latitude, longitude, "feature");
 	}
 
 	static Geo partialGeo(String name, Double latitude, Double longitude) {

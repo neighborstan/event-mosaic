@@ -6,6 +6,7 @@ import java.util.Objects;
  * Единственная выбранная географическая точка индексируемого события.
  *
  * @param role роль точки в исходной строке
+ * @param geoType тип географического совпадения GDELT или {@code null}
  * @param name отображаемое имя
  * @param countryCode код страны
  * @param admin1Code код административного региона первого уровня
@@ -15,6 +16,7 @@ import java.util.Objects;
  */
 public record IndexedEventLocation(
 		IndexedLocationRole role,
+		Integer geoType,
 		String name,
 		String countryCode,
 		String admin1Code,
