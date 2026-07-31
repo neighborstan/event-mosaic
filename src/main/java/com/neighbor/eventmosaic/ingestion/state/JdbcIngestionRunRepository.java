@@ -71,7 +71,7 @@ class JdbcIngestionRunRepository {
 				    count(*) filter (where status = 'STAGED') as staged_count,
 				    count(*) filter (where status = 'PROCESSING') as processing_count,
 				    count(*) filter (where status = 'FAILED') as failed_count,
-				    count(*) filter (where attempt_count > 0) as attempted_count
+				    count(*) filter (where total_attempt_count > 0) as attempted_count
 				from ingestion_archives
 				where run_id = :runId
 				""")

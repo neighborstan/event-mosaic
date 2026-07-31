@@ -20,6 +20,23 @@ management:
         enabled: true
 
 event-mosaic:
+  backend-data:
+    partition-interval: P7D
+    retry:
+      initial-delay: 1m
+      multiplier: 2.0
+      maximum-delay: 15m
+      jitter-ratio: 0.1
+      automatic-retry-limit: 3
+    operation-deadline: 12m
+    receipt-page-size: 500
+    disk-pressure:
+      staging-min-free-bytes: 1073741824
+      elasticsearch-min-free-bytes: 2147483648
+    cleanup:
+      orphan-building-age: 24h
+      superseded-age: 7d
+      automatic-deletion-enabled: false
   search:
     max-sources-per-event: 20
   indexing:

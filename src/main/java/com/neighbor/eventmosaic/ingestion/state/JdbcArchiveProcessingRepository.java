@@ -8,10 +8,13 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingStatus;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
+import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -34,7 +37,6 @@ class JdbcArchiveProcessingRepository {
 	private static final String PARAM_SUBMITTED = "submittedOperations";
 	private static final String PARAM_SUCCEEDED = "succeededOperations";
 	private static final String PARAM_FAILED = "failedOperations";
-	private static final String PARAM_RECEIPT = "receiptDocuments";
 	private static final String PARAM_FIRST_FAILED_LINE = "firstFailedLine";
 	private static final String SELECT_PROCESSING_STATE_BY_ARCHIVE_KEY = """
 			select
@@ -45,7 +47,11 @@ class JdbcArchiveProcessingRepository {
 			    status,
 			    attempt_token,
 			    lease_expires_at,
-			    attempt_count,
+			    total_attempt_count,
+			    automatic_retries_used,
+			    consecutive_retryable_failures,
+			    automatic_retry_limit,
+			    retry_not_before,
 			    last_attempt_at,
 			    delivered_records,
 			    source_invalid_records,
@@ -53,7 +59,7 @@ class JdbcArchiveProcessingRepository {
 			    submitted_operations,
 			    succeeded_operations,
 			    failed_operations,
-			    receipt_documents,
+			    actual_document_count,
 			    first_failed_line,
 			    failed_at,
 			    completed_at,
@@ -65,9 +71,14 @@ class JdbcArchiveProcessingRepository {
 			""";
 
 	private final JdbcClient jdbcClient;
+	private final int automaticRetryLimit;
 
-	JdbcArchiveProcessingRepository(JdbcClient jdbcClient) {
+	JdbcArchiveProcessingRepository(
+			JdbcClient jdbcClient,
+			BackendDataProperties properties
+	) {
 		this.jdbcClient = jdbcClient;
+		this.automaticRetryLimit = properties.retry().automaticRetryLimit();
 	}
 
 	ArchiveProcessingState register(
@@ -82,6 +93,7 @@ class JdbcArchiveProcessingRepository {
 				    projection_revision,
 				    processing_fingerprint,
 				    status,
+				    automatic_retry_limit,
 				    first_seen_at,
 				    created_at,
 				    updated_at
@@ -92,6 +104,7 @@ class JdbcArchiveProcessingRepository {
 				    :projectionRevision,
 				    :processingFingerprint,
 				    :status,
+				    :automaticRetryLimit,
 				    :firstSeenAt,
 				    :createdAt,
 				    :updatedAt
@@ -104,6 +117,7 @@ class JdbcArchiveProcessingRepository {
 				.param("projectionRevision", fingerprint.projectionRevision())
 				.param("processingFingerprint", fingerprint.processingFingerprint())
 				.param(PARAM_STATUS, ArchiveProcessingStatus.PENDING.name())
+				.param("automaticRetryLimit", automaticRetryLimit)
 				.param("firstSeenAt", Timestamp.from(now))
 				.param("createdAt", Timestamp.from(now))
 				.param(PARAM_UPDATED_AT, Timestamp.from(now))
@@ -131,12 +145,16 @@ class JdbcArchiveProcessingRepository {
 
 		UUID token = UUID.randomUUID();
 		Instant leaseExpiresAt = now.plus(leaseDuration);
+		boolean recovered = state.status() == ArchiveProcessingStatus.PROCESSING;
+		boolean automaticRetry = state.status() == ArchiveProcessingStatus.FAILED || recovered;
 		int updated = jdbcClient.sql("""
 				update ingestion_archive_processing
 				set status = :status,
 				    attempt_token = :attemptToken,
 				    lease_expires_at = :leaseExpiresAt,
-				    attempt_count = attempt_count + 1,
+				    total_attempt_count = total_attempt_count + 1,
+				    automatic_retries_used = automatic_retries_used + :automaticRetryIncrement,
+				    retry_not_before = null,
 				    last_attempt_at = :lastAttemptAt,
 				    delivered_records = 0,
 				    source_invalid_records = 0,
@@ -144,12 +162,20 @@ class JdbcArchiveProcessingRepository {
 				    submitted_operations = 0,
 				    succeeded_operations = 0,
 				    failed_operations = 0,
-				    receipt_documents = 0,
 				    first_failed_line = null,
+				    expected_document_count = null,
+				    receipt_digest_algorithm = null,
+				    expected_identity_digest = null,
+				    verified_generation_id = null,
+				    verified_index_uuid = null,
+				    actual_document_count = null,
+				    actual_identity_digest = null,
+				    receipt_verified_at = null,
 				    failed_at = null,
 				    completed_at = null,
 				    last_error_code = null,
 				    last_error_retryable = null,
+				    state_version = state_version + 1,
 				    updated_at = :updatedAt
 				where archive_idempotency_key = :archiveIdempotencyKey
 				""")
@@ -157,6 +183,7 @@ class JdbcArchiveProcessingRepository {
 				.param(PARAM_ATTEMPT_TOKEN, token)
 				.param("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
 				.param("lastAttemptAt", Timestamp.from(now))
+				.param("automaticRetryIncrement", automaticRetry ? 1 : 0)
 				.param(PARAM_UPDATED_AT, Timestamp.from(now))
 				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
 				.update();
@@ -171,7 +198,7 @@ class JdbcArchiveProcessingRepository {
 				token,
 				leaseExpiresAt,
 				state.attempt().count() + 1,
-				state.status() == ArchiveProcessingStatus.PROCESSING
+				recovered
 		));
 	}
 
@@ -191,9 +218,9 @@ class JdbcArchiveProcessingRepository {
 						    submitted_operations = :submittedOperations,
 						    succeeded_operations = :succeededOperations,
 						    failed_operations = :failedOperations,
-						    receipt_documents = :receiptDocuments,
 						    first_failed_line = :firstFailedLine,
 						    lease_expires_at = greatest(lease_expires_at, :leaseExpiresAt),
+						    state_version = state_version + 1,
 						    updated_at = :updatedAt
 						where archive_idempotency_key = :archiveIdempotencyKey
 						  and status = :processingStatus
@@ -204,7 +231,6 @@ class JdbcArchiveProcessingRepository {
 						  and submitted_operations <= :submittedOperations
 						  and succeeded_operations <= :succeededOperations
 						  and failed_operations <= :failedOperations
-						  and receipt_documents <= :receiptDocuments
 						  and (
 						      first_failed_line is null
 						      or first_failed_line = :firstFailedLine
@@ -236,14 +262,17 @@ class JdbcArchiveProcessingRepository {
 						    submitted_operations = :submittedOperations,
 						    succeeded_operations = :succeededOperations,
 						    failed_operations = :failedOperations,
-						    receipt_documents = :receiptDocuments,
 						    first_failed_line = :firstFailedLine,
 						    attempt_token = null,
 						    lease_expires_at = null,
 						    failed_at = null,
 						    completed_at = :completedAt,
+						    automatic_retries_used = 0,
+						    consecutive_retryable_failures = 0,
+						    retry_not_before = null,
 						    last_error_code = null,
 						    last_error_retryable = null,
+						    state_version = state_version + 1,
 						    updated_at = :updatedAt
 						where archive_idempotency_key = :archiveIdempotencyKey
 						  and status = :processingStatus
@@ -254,7 +283,6 @@ class JdbcArchiveProcessingRepository {
 						  and submitted_operations <= :submittedOperations
 						  and succeeded_operations <= :succeededOperations
 						  and failed_operations <= :failedOperations
-						  and receipt_documents <= :receiptDocuments
 						  and (
 						      first_failed_line is null
 						      or first_failed_line = :firstFailedLine
@@ -278,6 +306,9 @@ class JdbcArchiveProcessingRepository {
 			ArchiveProcessingProgress progress,
 			Instant now
 	) {
+		OffsetDateTime retryNotBefore = failure.retryable()
+				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
+				: null;
 		int updated = bindProgress(
 				jdbcClient.sql("""
 						update ingestion_archive_processing
@@ -288,14 +319,21 @@ class JdbcArchiveProcessingRepository {
 						    submitted_operations = :submittedOperations,
 						    succeeded_operations = :succeededOperations,
 						    failed_operations = :failedOperations,
-						    receipt_documents = :receiptDocuments,
 						    first_failed_line = :firstFailedLine,
 						    attempt_token = null,
 						    lease_expires_at = null,
+						    bound_partition_state_version = null,
+						    bound_generation_id = null,
 						    failed_at = :failedAt,
 						    completed_at = null,
+						    consecutive_retryable_failures = case
+						        when :retryable then consecutive_retryable_failures + 1
+						        else 0
+						    end,
+						    retry_not_before = :retryNotBefore,
 						    last_error_code = :errorCode,
 						    last_error_retryable = :retryable,
+						    state_version = state_version + 1,
 						    updated_at = :updatedAt
 						where archive_idempotency_key = :archiveIdempotencyKey
 						  and status = :processingStatus
@@ -306,7 +344,6 @@ class JdbcArchiveProcessingRepository {
 						  and submitted_operations <= :submittedOperations
 						  and succeeded_operations <= :succeededOperations
 						  and failed_operations <= :failedOperations
-						  and receipt_documents <= :receiptDocuments
 						  and (
 						      first_failed_line is null
 						      or first_failed_line = :firstFailedLine
@@ -316,6 +353,7 @@ class JdbcArchiveProcessingRepository {
 						.param("failedAt", Timestamp.from(now))
 						.param("errorCode", failure.errorCode())
 						.param("retryable", failure.retryable())
+						.param("retryNotBefore", retryNotBefore, Types.TIMESTAMP_WITH_TIMEZONE)
 						.param(PARAM_UPDATED_AT, Timestamp.from(now))
 						.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
 						.param(PARAM_PROCESSING_STATUS, ArchiveProcessingStatus.PROCESSING.name())
@@ -332,23 +370,35 @@ class JdbcArchiveProcessingRepository {
 			ArchiveProcessingFailure failure,
 			Instant now
 	) {
+		OffsetDateTime retryNotBefore = failure.retryable()
+				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
+				: null;
 		int updated = jdbcClient.sql("""
 				update ingestion_archive_processing
 				set status = :status,
 				    failed_at = :failedAt,
 				    completed_at = null,
+				    bound_partition_state_version = null,
+				    bound_generation_id = null,
+				    consecutive_retryable_failures = case
+				        when :retryable then consecutive_retryable_failures + 1
+				        else 0
+				    end,
+				    retry_not_before = :retryNotBefore,
 				    last_error_code = :errorCode,
 				    last_error_retryable = :retryable,
+				    state_version = state_version + 1,
 				    updated_at = :updatedAt
 				where archive_idempotency_key = :archiveIdempotencyKey
 				  and processing_fingerprint = :processingFingerprint
-				  and attempt_count = :expectedAttemptCount
+				  and total_attempt_count = :expectedAttemptCount
 				  and status = :indexedStatus
 				""")
 				.param(PARAM_STATUS, ArchiveProcessingStatus.FAILED.name())
 				.param("failedAt", Timestamp.from(now))
 				.param("errorCode", failure.errorCode())
 				.param("retryable", failure.retryable())
+				.param("retryNotBefore", retryNotBefore, Types.TIMESTAMP_WITH_TIMEZONE)
 				.param(PARAM_UPDATED_AT, Timestamp.from(now))
 				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
 				.param("processingFingerprint", expectedProcessingFingerprint)
@@ -400,14 +450,21 @@ class JdbcArchiveProcessingRepository {
 			throw new IllegalStateException(
 					"Processing fingerprint conflicts with registered state");
 		}
+		if (existing.attempt().retry().automaticRetryLimit() != automaticRetryLimit) {
+			throw new IllegalStateException(
+					"Configured processing retry limit conflicts with durable state");
+		}
 	}
 
 	private static boolean isClaimable(ArchiveProcessingState state, Instant now) {
 		return switch (state.status()) {
 			case PENDING -> true;
 			case FAILED -> state.failure() != null
-					&& state.failure().failure().retryable();
-			case PROCESSING -> !state.attempt().leaseExpiresAt().isAfter(now);
+					&& state.failure().failure().retryable()
+					&& !state.attempt().retry().exhausted()
+					&& !state.attempt().retry().retryNotBefore().isAfter(now);
+			case PROCESSING -> !state.attempt().retry().exhausted()
+					&& !state.attempt().leaseExpiresAt().isAfter(now);
 			case INDEXED -> false;
 		};
 	}
@@ -423,7 +480,6 @@ class JdbcArchiveProcessingRepository {
 				.param(PARAM_SUBMITTED, progress.submittedOperations())
 				.param(PARAM_SUCCEEDED, progress.succeededOperations())
 				.param(PARAM_FAILED, progress.failedOperations())
-				.param(PARAM_RECEIPT, progress.receiptDocuments())
 				.param(PARAM_FIRST_FAILED_LINE, progress.firstFailedLine(), Types.BIGINT);
 	}
 }

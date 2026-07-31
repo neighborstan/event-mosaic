@@ -13,26 +13,49 @@ create table ingestion_runs (
     constraint uq_ingestion_runs_source_update unique (source_name, source_update_time),
     constraint ck_ingestion_runs_status
         check (status in ('DISCOVERED', 'IN_PROGRESS', 'PARTIAL', 'FAILED', 'STAGED')),
+    constraint ck_ingestion_runs_error_code
+        check (
+            last_error_code is null
+            or last_error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'
+        ),
     constraint ck_ingestion_runs_failure_complete
         check (
-            (last_error_code is null and last_failed_at is null
-                and last_error_retryable is null)
+            (
+                last_error_code is null
+                and last_failed_at is null
+                and last_error_retryable is null
+            )
             or
-            (last_error_code is not null and last_failed_at is not null
-                and last_error_retryable is not null)
+            (
+                last_error_code is not null
+                and last_failed_at is not null
+                and last_error_retryable is not null
+            )
         ),
     constraint ck_ingestion_runs_status_state
         check (
-            (status = 'STAGED' and completed_at is not null
-                and last_error_code is null)
+            (
+                status = 'STAGED'
+                and completed_at is not null
+                and last_error_code is null
+            )
             or
-            (status = 'DISCOVERED' and completed_at is null
-                and last_error_code is null)
+            (
+                status = 'DISCOVERED'
+                and completed_at is null
+                and last_error_code is null
+            )
             or
-            (status in ('FAILED', 'PARTIAL') and completed_at is null
-                and last_error_code is not null)
+            (
+                status in ('FAILED', 'PARTIAL')
+                and completed_at is null
+                and last_error_code is not null
+            )
             or
-            (status = 'IN_PROGRESS' and completed_at is null)
+            (
+                status = 'IN_PROGRESS'
+                and completed_at is null
+            )
         )
 );
 
@@ -47,6 +70,114 @@ create table ingestion_source_state (
         check (first_run_policy in ('LATEST', 'FIXED')),
     constraint ck_ingestion_source_state_order
         check (continuity_baseline <= latest_observed_update_time)
+);
+
+create table ingestion_source_poll_state (
+    source_name varchar(64) primary key,
+    status varchar(32) not null,
+    attempt_token uuid,
+    lease_expires_at timestamptz,
+    total_attempt_count integer not null default 0,
+    automatic_retries_used integer not null default 0,
+    consecutive_retryable_failures integer not null default 0,
+    automatic_retry_limit integer not null,
+    retry_not_before timestamptz,
+    last_attempt_at timestamptz,
+    last_succeeded_at timestamptz,
+    failed_at timestamptz,
+    last_error_code varchar(64),
+    last_error_retryable boolean,
+    state_version bigint not null default 0,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint ck_ingestion_source_poll_name
+        check (btrim(source_name) <> ''),
+    constraint ck_ingestion_source_poll_status
+        check (status in ('IDLE', 'POLLING', 'FAILED')),
+    constraint ck_ingestion_source_poll_attempts
+        check (
+            total_attempt_count >= 0
+            and automatic_retries_used between 0 and automatic_retry_limit
+            and automatic_retries_used <= greatest(total_attempt_count - 1, 0)
+            and automatic_retry_limit between 0 and 100
+            and consecutive_retryable_failures >= 0
+            and consecutive_retryable_failures <= total_attempt_count
+            and state_version >= 0
+            and (
+                (total_attempt_count = 0 and last_attempt_at is null)
+                or
+                (total_attempt_count > 0 and last_attempt_at is not null)
+            )
+        ),
+    constraint ck_ingestion_source_poll_error_code
+        check (
+            last_error_code is null
+            or last_error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'
+        ),
+    constraint ck_ingestion_source_poll_lease
+        check (
+            (attempt_token is null and lease_expires_at is null)
+            or
+            (
+                attempt_token is not null
+                and lease_expires_at is not null
+                and last_attempt_at is not null
+                and lease_expires_at > last_attempt_at
+            )
+        ),
+    constraint ck_ingestion_source_poll_failure
+        check (
+            (
+                last_error_code is null
+                and last_error_retryable is null
+                and failed_at is null
+                and retry_not_before is null
+            )
+            or
+            (
+                last_error_code is not null
+                and last_error_retryable is not null
+                and failed_at is not null
+                and (
+                    (last_error_retryable and retry_not_before is not null)
+                    or
+                    (not last_error_retryable and retry_not_before is null)
+                )
+            )
+        ),
+    constraint ck_ingestion_source_poll_status_state
+        check (
+            (
+                status = 'IDLE'
+                and attempt_token is null
+                and lease_expires_at is null
+                and failed_at is null
+                and last_error_code is null
+                and automatic_retries_used = 0
+                and consecutive_retryable_failures = 0
+                and (
+                    total_attempt_count = 0
+                    or last_succeeded_at is not null
+                )
+            )
+            or
+            (
+                status = 'POLLING'
+                and attempt_token is not null
+                and lease_expires_at is not null
+                and failed_at is null
+                and last_error_code is null
+            )
+            or
+            (
+                status = 'FAILED'
+                and total_attempt_count > 0
+                and attempt_token is null
+                and lease_expires_at is null
+                and failed_at is not null
+                and last_error_code is not null
+            )
+        )
 );
 
 create table ingestion_gaps (
@@ -83,15 +214,22 @@ create table ingestion_archives (
     first_seen_at timestamptz not null,
     last_attempt_at timestamptz,
     completed_at timestamptz,
-    attempt_count integer not null default 0,
+    total_attempt_count integer not null default 0,
+    automatic_retries_used integer not null default 0,
+    consecutive_retryable_failures integer not null default 0,
+    automatic_retry_limit integer not null,
+    retry_not_before timestamptz,
     last_error_code varchar(64),
     last_error_retryable boolean,
+    state_version bigint not null default 0,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     constraint fk_ingestion_archives_run
         foreign key (run_id) references ingestion_runs (id),
     constraint uq_ingestion_archives_run_type
         unique (run_id, archive_type),
+    constraint uq_ingestion_archives_key_type
+        unique (idempotency_key, archive_type),
     constraint ck_ingestion_archives_type
         check (archive_type in ('TRANSLATION_EVENTS', 'TRANSLATION_MENTIONS')),
     constraint ck_ingestion_archives_status
@@ -101,75 +239,803 @@ create table ingestion_archives (
     constraint ck_ingestion_archives_actual_md5
         check (actual_md5 is null or actual_md5 ~ '^[0-9a-f]{32}$'),
     constraint ck_ingestion_archives_size
-        check (file_size_bytes > 0 and (actual_size_bytes is null or actual_size_bytes > 0)),
-    constraint ck_ingestion_archives_attempt_count
-        check (attempt_count >= 0),
+        check (
+            file_size_bytes > 0
+            and (actual_size_bytes is null or actual_size_bytes > 0)
+        ),
+    constraint ck_ingestion_archives_attempts
+        check (
+            total_attempt_count >= 0
+            and automatic_retries_used between 0 and automatic_retry_limit
+            and automatic_retries_used <= greatest(total_attempt_count - 1, 0)
+            and automatic_retry_limit between 0 and 100
+            and consecutive_retryable_failures >= 0
+            and consecutive_retryable_failures <= total_attempt_count
+            and state_version >= 0
+            and (
+                (total_attempt_count = 0 and last_attempt_at is null)
+                or
+                (total_attempt_count > 0 and last_attempt_at is not null)
+            )
+        ),
+    constraint ck_ingestion_archives_error_code
+        check (
+            last_error_code is null
+            or last_error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'
+        ),
     constraint ck_ingestion_archives_lease
         check (
             (attempt_token is null and lease_expires_at is null)
             or
-            (attempt_token is not null and lease_expires_at is not null)
+            (
+                attempt_token is not null
+                and lease_expires_at is not null
+                and last_attempt_at is not null
+                and lease_expires_at > last_attempt_at
+            )
         ),
     constraint ck_ingestion_archives_failure_complete
         check (
-            (last_error_code is null and failed_at is null
-                and last_error_retryable is null)
+            (
+                last_error_code is null
+                and failed_at is null
+                and last_error_retryable is null
+                and retry_not_before is null
+            )
             or
-            (last_error_code is not null and failed_at is not null
-                and last_error_retryable is not null)
+            (
+                last_error_code is not null
+                and failed_at is not null
+                and last_error_retryable is not null
+                and (
+                    (last_error_retryable and retry_not_before is not null)
+                    or
+                    (not last_error_retryable and retry_not_before is null)
+                )
+            )
         ),
     constraint ck_ingestion_archives_staged_artifacts
         check (
             status <> 'STAGED'
             or
-            (actual_size_bytes is not null and actual_md5 is not null
-                and actual_size_bytes = file_size_bytes and actual_md5 = expected_md5
-                and staged_archive_path is not null and staged_csv_path is not null)
+            (
+                actual_size_bytes is not null
+                and actual_md5 is not null
+                and actual_size_bytes = file_size_bytes
+                and actual_md5 = expected_md5
+                and staged_archive_path is not null
+                and staged_csv_path is not null
+            )
         ),
     constraint ck_ingestion_archives_status_state
         check (
             (
                 status = 'DISCOVERED'
-                and attempt_count = 0
+                and total_attempt_count = 0
+                and automatic_retries_used = 0
+                and consecutive_retryable_failures = 0
                 and last_attempt_at is null
-                and attempt_token is null and lease_expires_at is null
+                and attempt_token is null
+                and lease_expires_at is null
                 and last_error_code is null
                 and completed_at is null
-                and actual_size_bytes is null and actual_md5 is null
-                and staged_archive_path is null and staged_csv_path is null
+                and actual_size_bytes is null
+                and actual_md5 is null
+                and staged_archive_path is null
+                and staged_csv_path is null
             )
             or
             (
                 status = 'PROCESSING'
-                and attempt_count > 0
+                and total_attempt_count > 0
                 and last_attempt_at is not null
-                and attempt_token is not null and lease_expires_at is not null
+                and attempt_token is not null
+                and lease_expires_at is not null
                 and last_error_code is null
                 and completed_at is null
-                and actual_size_bytes is null and actual_md5 is null
-                and staged_archive_path is null and staged_csv_path is null
+                and actual_size_bytes is null
+                and actual_md5 is null
+                and staged_archive_path is null
+                and staged_csv_path is null
             )
             or
             (
                 status = 'FAILED'
-                and attempt_count > 0
+                and total_attempt_count > 0
                 and last_attempt_at is not null
-                and attempt_token is null and lease_expires_at is null
+                and attempt_token is null
+                and lease_expires_at is null
                 and last_error_code is not null
                 and completed_at is null
-                and actual_size_bytes is null and actual_md5 is null
-                and staged_archive_path is null and staged_csv_path is null
+                and actual_size_bytes is null
+                and actual_md5 is null
+                and staged_archive_path is null
+                and staged_csv_path is null
             )
             or
             (
                 status = 'STAGED'
-                and attempt_count > 0
+                and total_attempt_count > 0
+                and automatic_retries_used = 0
+                and consecutive_retryable_failures = 0
                 and last_attempt_at is not null
-                and attempt_token is null and lease_expires_at is null
+                and attempt_token is null
+                and lease_expires_at is null
                 and last_error_code is null
                 and completed_at is not null
-                and actual_size_bytes is not null and actual_md5 is not null
-                and staged_archive_path is not null and staged_csv_path is not null
+                and actual_size_bytes is not null
+                and actual_md5 is not null
+                and staged_archive_path is not null
+                and staged_csv_path is not null
+            )
+        )
+);
+
+create table index_logical_partitions (
+    partition_key varchar(32) primary key,
+    partition_start_at timestamptz not null,
+    partition_end_at timestamptz not null,
+    partition_interval varchar(16) not null,
+    state_version bigint not null default 0,
+    repair_cause varchar(64),
+    repair_requested_at timestamptz,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint uq_index_logical_partitions_start
+        unique (partition_start_at),
+    constraint ck_index_logical_partitions_key
+        check (partition_key ~ '^[a-z0-9][a-z0-9_-]{0,31}$'),
+    constraint ck_index_logical_partitions_interval
+        check (
+            partition_interval = 'P7D'
+            and partition_end_at - partition_start_at = interval '168 hours'
+        ),
+    constraint ck_index_logical_partitions_version
+        check (state_version >= 0),
+    constraint ck_index_logical_partitions_repair
+        check (
+            (repair_cause is null and repair_requested_at is null)
+            or
+            (
+                repair_cause is not null
+                and repair_cause ~ '^[A-Z][A-Z0-9_]{0,63}$'
+                and repair_requested_at is not null
+            )
+        )
+);
+
+create table index_generations (
+    id bigint generated by default as identity primary key,
+    generation_uuid uuid not null,
+    partition_key varchar(32) not null,
+    generation_number integer not null,
+    state varchar(32) not null,
+    event_index_name varchar(255) not null,
+    event_index_uuid varchar(128),
+    mention_index_name varchar(255) not null,
+    mention_index_uuid varchar(128),
+    failure_origin varchar(64),
+    state_version bigint not null default 0,
+    heartbeat_at timestamptz not null,
+    activated_at timestamptz,
+    superseded_at timestamptz,
+    failed_at timestamptz,
+    cleanup_requested_at timestamptz,
+    delete_requested_at timestamptz,
+    cleaned_at timestamptz,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint fk_index_generations_partition
+        foreign key (partition_key)
+        references index_logical_partitions (partition_key),
+    constraint uq_index_generations_uuid
+        unique (generation_uuid),
+    constraint uq_index_generations_partition_number
+        unique (partition_key, generation_number),
+    constraint uq_index_generations_id_partition
+        unique (id, partition_key),
+    constraint uq_index_generations_event_name
+        unique (event_index_name),
+    constraint uq_index_generations_mention_name
+        unique (mention_index_name),
+    constraint ck_index_generations_number
+        check (generation_number > 0),
+    constraint ck_index_generations_state
+        check (
+            state in (
+                'BUILDING',
+                'ACTIVE',
+                'SUPERSEDED',
+                'FAILED',
+                'CLEANUP_PENDING',
+                'DELETE_REQUESTED',
+                'CLEANED'
+            )
+        ),
+    constraint ck_index_generations_names
+        check (
+            event_index_name ~ (
+                '^gdelt-events-v[0-9]+-'
+                || partition_key
+                || '-g'
+                || case
+                    when generation_number < 10000
+                        then lpad(generation_number::text, 4, '0')
+                    else generation_number::text
+                end
+                || '$'
+            )
+            and mention_index_name = regexp_replace(
+                event_index_name,
+                '^gdelt-events-',
+                'gdelt-mentions-'
+            )
+        ),
+    constraint ck_index_generations_event_uuid
+        check (
+            event_index_uuid is null
+            or (
+                btrim(event_index_uuid) <> ''
+                and event_index_uuid !~ '[*?,[:space:]]'
+            )
+        ),
+    constraint ck_index_generations_mention_uuid
+        check (
+            mention_index_uuid is null
+            or (
+                btrim(mention_index_uuid) <> ''
+                and mention_index_uuid !~ '[*?,[:space:]]'
+            )
+        ),
+    constraint ck_index_generations_uuid_pair
+        check (
+            event_index_uuid is null
+            or mention_index_uuid is null
+            or event_index_uuid <> mention_index_uuid
+        ),
+    constraint ck_index_generations_version
+        check (state_version >= 0),
+    constraint ck_index_generations_failure_origin
+        check (
+            failure_origin is null
+            or failure_origin ~ '^[A-Z][A-Z0-9_]{0,63}$'
+        ),
+    constraint ck_index_generations_cleanup_origin
+        check (
+            state not in ('CLEANUP_PENDING', 'DELETE_REQUESTED', 'CLEANED')
+            or
+            (
+                failed_at is not null
+                and failure_origin is not null
+            )
+            or
+            (
+                activated_at is not null
+                and superseded_at is not null
+                and event_index_uuid is not null
+                and mention_index_uuid is not null
+                and failed_at is null
+                and failure_origin is null
+            )
+        ),
+    constraint ck_index_generations_state_data
+        check (
+            (
+                state = 'BUILDING'
+                and activated_at is null
+                and superseded_at is null
+                and failed_at is null
+                and cleanup_requested_at is null
+                and delete_requested_at is null
+                and cleaned_at is null
+                and failure_origin is null
+            )
+            or
+            (
+                state = 'ACTIVE'
+                and event_index_uuid is not null
+                and mention_index_uuid is not null
+                and activated_at is not null
+                and superseded_at is null
+                and failed_at is null
+                and cleanup_requested_at is null
+                and delete_requested_at is null
+                and cleaned_at is null
+                and failure_origin is null
+            )
+            or
+            (
+                state = 'SUPERSEDED'
+                and event_index_uuid is not null
+                and mention_index_uuid is not null
+                and activated_at is not null
+                and superseded_at is not null
+                and cleanup_requested_at is null
+                and delete_requested_at is null
+                and cleaned_at is null
+                and failure_origin is null
+            )
+            or
+            (
+                state = 'FAILED'
+                and failed_at is not null
+                and failure_origin is not null
+                and cleanup_requested_at is null
+                and delete_requested_at is null
+                and cleaned_at is null
+            )
+            or
+            (
+                state = 'CLEANUP_PENDING'
+                and cleanup_requested_at is not null
+                and delete_requested_at is null
+                and cleaned_at is null
+            )
+            or
+            (
+                state = 'DELETE_REQUESTED'
+                and cleanup_requested_at is not null
+                and delete_requested_at is not null
+                and cleaned_at is null
+            )
+            or
+            (
+                state = 'CLEANED'
+                and cleanup_requested_at is not null
+                and delete_requested_at is not null
+                and cleaned_at is not null
+            )
+        )
+);
+
+create table ingestion_archive_processing (
+    archive_idempotency_key text primary key,
+    source_fingerprint varchar(128) not null,
+    projection_revision varchar(64) not null,
+    processing_fingerprint varchar(64) not null,
+    logical_partition_key varchar(32),
+    status varchar(32) not null,
+    attempt_token uuid,
+    lease_expires_at timestamptz,
+    bound_partition_state_version bigint,
+    bound_generation_id bigint,
+    total_attempt_count integer not null default 0,
+    automatic_retries_used integer not null default 0,
+    consecutive_retryable_failures integer not null default 0,
+    automatic_retry_limit integer not null,
+    retry_not_before timestamptz,
+    last_attempt_at timestamptz,
+    delivered_records bigint not null default 0,
+    source_invalid_records bigint not null default 0,
+    mapping_rejected_records bigint not null default 0,
+    submitted_operations bigint not null default 0,
+    succeeded_operations bigint not null default 0,
+    failed_operations bigint not null default 0,
+    first_failed_line bigint,
+    expected_document_count bigint,
+    receipt_digest_algorithm varchar(64),
+    expected_identity_digest varchar(64),
+    verified_generation_id bigint,
+    verified_index_uuid varchar(128),
+    actual_document_count bigint,
+    actual_identity_digest varchar(64),
+    receipt_verified_at timestamptz,
+    failed_at timestamptz,
+    completed_at timestamptz,
+    last_error_code varchar(64),
+    last_error_retryable boolean,
+    state_version bigint not null default 0,
+    first_seen_at timestamptz not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint fk_ingestion_archive_processing_archive
+        foreign key (archive_idempotency_key)
+        references ingestion_archives (idempotency_key),
+    constraint fk_ingestion_archive_processing_partition
+        foreign key (logical_partition_key)
+        references index_logical_partitions (partition_key),
+    constraint fk_ingestion_archive_processing_bound_generation
+        foreign key (bound_generation_id, logical_partition_key)
+        references index_generations (id, partition_key),
+    constraint fk_ingestion_archive_processing_verified_generation
+        foreign key (verified_generation_id, logical_partition_key)
+        references index_generations (id, partition_key),
+    constraint uq_ingestion_archive_processing_fingerprint
+        unique (processing_fingerprint),
+    constraint ck_ingestion_archive_processing_source_fingerprint
+        check (btrim(source_fingerprint) <> ''),
+    constraint ck_ingestion_archive_processing_projection_revision
+        check (btrim(projection_revision) <> ''),
+    constraint ck_ingestion_archive_processing_fingerprint
+        check (processing_fingerprint ~ '^[0-9a-f]{64}$'),
+    constraint ck_ingestion_archive_processing_error_code
+        check (
+            last_error_code is null
+            or last_error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'
+        ),
+    constraint ck_ingestion_archive_processing_status
+        check (status in ('PENDING', 'PROCESSING', 'FAILED', 'INDEXED')),
+    constraint ck_ingestion_archive_processing_attempts
+        check (
+            total_attempt_count >= 0
+            and automatic_retries_used between 0 and automatic_retry_limit
+            and automatic_retries_used <= greatest(total_attempt_count - 1, 0)
+            and automatic_retry_limit between 0 and 100
+            and consecutive_retryable_failures >= 0
+            and consecutive_retryable_failures <= total_attempt_count
+            and state_version >= 0
+            and (
+                (total_attempt_count = 0 and last_attempt_at is null)
+                or
+                (total_attempt_count > 0 and last_attempt_at is not null)
+            )
+        ),
+    constraint ck_ingestion_archive_processing_counters
+        check (
+            delivered_records >= 0
+            and source_invalid_records >= 0
+            and mapping_rejected_records >= 0
+            and submitted_operations >= 0
+            and succeeded_operations >= 0
+            and failed_operations >= 0
+            and mapping_rejected_records <= delivered_records
+            and submitted_operations <= delivered_records - mapping_rejected_records
+            and succeeded_operations <= submitted_operations
+            and failed_operations <= submitted_operations - succeeded_operations
+        ),
+    constraint ck_ingestion_archive_processing_failed_line
+        check (
+            (failed_operations = 0 and first_failed_line is null)
+            or
+            (
+                failed_operations > 0
+                and first_failed_line is not null
+                and first_failed_line > 0
+            )
+        ),
+    constraint ck_ingestion_archive_processing_lease
+        check (
+            (attempt_token is null and lease_expires_at is null)
+            or
+            (
+                attempt_token is not null
+                and lease_expires_at is not null
+                and last_attempt_at is not null
+                and lease_expires_at > last_attempt_at
+            )
+        ),
+    constraint ck_ingestion_archive_processing_binding
+        check (
+            (
+                bound_partition_state_version is null
+                and bound_generation_id is null
+            )
+            or
+            (
+                logical_partition_key is not null
+                and
+                bound_partition_state_version is not null
+                and bound_partition_state_version >= 0
+                and bound_generation_id is not null
+            )
+        ),
+    constraint ck_ingestion_archive_processing_failure
+        check (
+            (
+                last_error_code is null
+                and last_error_retryable is null
+                and failed_at is null
+                and retry_not_before is null
+            )
+            or
+            (
+                last_error_code is not null
+                and last_error_retryable is not null
+                and failed_at is not null
+                and (
+                    (last_error_retryable and retry_not_before is not null)
+                    or
+                    (not last_error_retryable and retry_not_before is null)
+                )
+            )
+        ),
+    constraint ck_ingestion_archive_processing_receipt
+        check (
+            (
+                expected_document_count is null
+                and receipt_digest_algorithm is null
+                and expected_identity_digest is null
+                and verified_generation_id is null
+                and verified_index_uuid is null
+                and actual_document_count is null
+                and actual_identity_digest is null
+                and receipt_verified_at is null
+            )
+            or
+            (
+                logical_partition_key is not null
+                and expected_document_count is not null
+                and expected_document_count >= 0
+                and receipt_digest_algorithm is not null
+                and receipt_digest_algorithm = 'sha256-length-prefix-v1'
+                and expected_identity_digest is not null
+                and expected_identity_digest ~ '^[0-9a-f]{64}$'
+                and verified_generation_id is not null
+                and verified_index_uuid is not null
+                and btrim(verified_index_uuid) <> ''
+                and verified_index_uuid !~ '[*?,[:space:]]'
+                and actual_document_count is not null
+                and actual_document_count >= 0
+                and actual_identity_digest is not null
+                and actual_identity_digest ~ '^[0-9a-f]{64}$'
+                and receipt_verified_at is not null
+            )
+        ),
+    constraint ck_ingestion_archive_processing_status_state
+        check (
+            (
+                status = 'PENDING'
+                and total_attempt_count = 0
+                and automatic_retries_used = 0
+                and consecutive_retryable_failures = 0
+                and last_attempt_at is null
+                and attempt_token is null
+                and lease_expires_at is null
+                and bound_partition_state_version is null
+                and bound_generation_id is null
+                and failed_at is null
+                and completed_at is null
+                and last_error_code is null
+                and delivered_records = 0
+                and source_invalid_records = 0
+                and mapping_rejected_records = 0
+                and submitted_operations = 0
+                and succeeded_operations = 0
+                and failed_operations = 0
+                and first_failed_line is null
+                and expected_document_count is null
+            )
+            or
+            (
+                status = 'PROCESSING'
+                and total_attempt_count > 0
+                and last_attempt_at is not null
+                and attempt_token is not null
+                and lease_expires_at is not null
+                and failed_at is null
+                and completed_at is null
+                and last_error_code is null
+                and expected_document_count is null
+                and (
+                    (
+                        logical_partition_key is null
+                        and bound_partition_state_version is null
+                        and bound_generation_id is null
+                    )
+                    or
+                    (
+                        logical_partition_key is not null
+                        and bound_partition_state_version is not null
+                        and bound_generation_id is not null
+                    )
+                )
+            )
+            or
+            (
+                status = 'FAILED'
+                and total_attempt_count > 0
+                and last_attempt_at is not null
+                and attempt_token is null
+                and lease_expires_at is null
+                and bound_partition_state_version is null
+                and bound_generation_id is null
+                and failed_at is not null
+                and completed_at is null
+                and last_error_code is not null
+            )
+            or
+            (
+                status = 'INDEXED'
+                and total_attempt_count > 0
+                and automatic_retries_used = 0
+                and consecutive_retryable_failures = 0
+                and last_attempt_at is not null
+                and attempt_token is null
+                and lease_expires_at is null
+                and failed_at is null
+                and completed_at is not null
+                and last_error_code is null
+                and failed_operations = 0
+                and first_failed_line is null
+                and submitted_operations = succeeded_operations
+                and submitted_operations = delivered_records - mapping_rejected_records
+                and (
+                    (
+                        logical_partition_key is null
+                        and expected_document_count is null
+                    )
+                    or
+                    (
+                        logical_partition_key is not null
+                        and expected_document_count is not null
+                        and actual_document_count = expected_document_count
+                        and actual_identity_digest = expected_identity_digest
+                    )
+                )
+            )
+        )
+);
+
+create table index_maintenance_operations (
+    id bigint generated by default as identity primary key,
+    operation_token uuid not null,
+    partition_key varchar(32) not null,
+    operation_kind varchar(32) not null,
+    phase varchar(32) not null,
+    repair_cause varchar(64),
+    expected_partition_state_version bigint not null,
+    base_generation_id bigint,
+    target_generation_id bigint,
+    cleanup_generation_id bigint,
+    operation_version bigint not null default 0,
+    lease_expires_at timestamptz not null,
+    heartbeat_at timestamptz not null,
+    plan_fingerprint varchar(64),
+    plan_expires_at timestamptz,
+    actor varchar(64),
+    reason_code varchar(64),
+    last_error_code varchar(64),
+    failed_at timestamptz,
+    completed_at timestamptz,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint fk_index_maintenance_operations_partition
+        foreign key (partition_key)
+        references index_logical_partitions (partition_key),
+    constraint fk_index_maintenance_operations_base_generation
+        foreign key (base_generation_id, partition_key)
+        references index_generations (id, partition_key),
+    constraint fk_index_maintenance_operations_target_generation
+        foreign key (target_generation_id, partition_key)
+        references index_generations (id, partition_key),
+    constraint fk_index_maintenance_operations_cleanup_generation
+        foreign key (cleanup_generation_id, partition_key)
+        references index_generations (id, partition_key),
+    constraint uq_index_maintenance_operations_token
+        unique (operation_token),
+    constraint ck_index_maintenance_operations_kind
+        check (operation_kind in ('INITIAL_PROMOTION', 'REBUILD', 'CLEANUP')),
+    constraint ck_index_maintenance_operations_phase
+        check (
+            phase in (
+                'PLANNED',
+                'FREEZE_REQUESTED',
+                'FROZEN',
+                'BUILDING',
+                'VERIFIED',
+                'CUTOVER_REQUESTED',
+                'CUTOVER_OBSERVED',
+                'UNFREEZE_REQUESTED',
+                'CLEANUP_PENDING',
+                'DELETE_REQUESTED',
+                'COMPLETED',
+                'FAILED'
+            )
+        ),
+    constraint ck_index_maintenance_operations_versions
+        check (
+            expected_partition_state_version >= 0
+            and operation_version >= 0
+        ),
+    constraint ck_index_maintenance_operations_lease
+        check (lease_expires_at > heartbeat_at),
+    constraint ck_index_maintenance_operations_generation_roles
+        check (
+            (base_generation_id is null or base_generation_id <> target_generation_id)
+            and (base_generation_id is null or base_generation_id <> cleanup_generation_id)
+            and (target_generation_id is null or target_generation_id <> cleanup_generation_id)
+        ),
+    constraint ck_index_maintenance_operations_kind_shape
+        check (
+            (
+                operation_kind = 'INITIAL_PROMOTION'
+                and base_generation_id is null
+                and target_generation_id is not null
+                and cleanup_generation_id is null
+                and phase in (
+                    'PLANNED',
+                    'BUILDING',
+                    'VERIFIED',
+                    'CUTOVER_REQUESTED',
+                    'CUTOVER_OBSERVED',
+                    'COMPLETED',
+                    'FAILED'
+                )
+            )
+            or
+            (
+                operation_kind = 'REBUILD'
+                and base_generation_id is not null
+                and target_generation_id is not null
+                and cleanup_generation_id is null
+                and phase in (
+                    'PLANNED',
+                    'FREEZE_REQUESTED',
+                    'FROZEN',
+                    'BUILDING',
+                    'VERIFIED',
+                    'CUTOVER_REQUESTED',
+                    'CUTOVER_OBSERVED',
+                    'UNFREEZE_REQUESTED',
+                    'COMPLETED',
+                    'FAILED'
+                )
+            )
+            or
+            (
+                operation_kind = 'CLEANUP'
+                and base_generation_id is null
+                and target_generation_id is null
+                and cleanup_generation_id is not null
+                and phase in (
+                    'PLANNED',
+                    'CLEANUP_PENDING',
+                    'DELETE_REQUESTED',
+                    'COMPLETED',
+                    'FAILED'
+                )
+            )
+        ),
+    constraint ck_index_maintenance_operations_repair_cause
+        check (
+            repair_cause is null
+            or repair_cause ~ '^[A-Z][A-Z0-9_]{0,63}$'
+        ),
+    constraint ck_index_maintenance_operations_plan
+        check (
+            (
+                plan_fingerprint is null
+                and plan_expires_at is null
+                and actor is null
+                and reason_code is null
+            )
+            or
+            (
+                plan_fingerprint is not null
+                and plan_fingerprint ~ '^[0-9a-f]{64}$'
+                and plan_expires_at is not null
+                and actor is not null
+                and actor ~ '^[A-Za-z0-9._-]{1,64}$'
+                and reason_code is not null
+                and reason_code ~ '^[A-Z][A-Z0-9_]{0,63}$'
+            )
+        ),
+    constraint ck_index_maintenance_operations_error_code
+        check (
+            last_error_code is null
+            or last_error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'
+        ),
+    constraint ck_index_maintenance_operations_terminal
+        check (
+            (
+                phase = 'COMPLETED'
+                and completed_at is not null
+                and failed_at is null
+                and last_error_code is null
+            )
+            or
+            (
+                phase = 'FAILED'
+                and completed_at is null
+                and failed_at is not null
+                and last_error_code is not null
+            )
+            or
+            (
+                phase not in ('COMPLETED', 'FAILED')
+                and completed_at is null
+                and failed_at is null
+                and last_error_code is null
             )
         )
 );
@@ -180,6 +1046,14 @@ create index ix_ingestion_runs_status
 create index ix_ingestion_runs_source_update_time
     on ingestion_runs (source_update_time);
 
+create index ix_ingestion_source_poll_due
+    on ingestion_source_poll_state (retry_not_before)
+    where status = 'FAILED' and last_error_retryable;
+
+create index ix_ingestion_source_poll_lease
+    on ingestion_source_poll_state (lease_expires_at)
+    where status = 'POLLING';
+
 create index ix_ingestion_archives_status
     on ingestion_archives (status);
 
@@ -189,6 +1063,55 @@ create index ix_ingestion_archives_archive_type
 create index ix_ingestion_archives_first_seen_at
     on ingestion_archives (first_seen_at);
 
-create index ix_ingestion_archives_lease_expires_at
+create index ix_ingestion_archives_due
+    on ingestion_archives (retry_not_before)
+    where status = 'FAILED' and last_error_retryable;
+
+create index ix_ingestion_archives_lease
     on ingestion_archives (lease_expires_at)
     where status = 'PROCESSING';
+
+create unique index uq_index_generations_active_partition
+    on index_generations (partition_key)
+    where state = 'ACTIVE';
+
+create unique index uq_index_generations_building_partition
+    on index_generations (partition_key)
+    where state = 'BUILDING';
+
+create unique index uq_index_generations_event_uuid
+    on index_generations (event_index_uuid)
+    where event_index_uuid is not null;
+
+create unique index uq_index_generations_mention_uuid
+    on index_generations (mention_index_uuid)
+    where mention_index_uuid is not null;
+
+create index ix_index_generations_state
+    on index_generations (state);
+
+create index ix_index_generations_heartbeat
+    on index_generations (heartbeat_at)
+    where state = 'BUILDING';
+
+create index ix_ingestion_archive_processing_status
+    on ingestion_archive_processing (status);
+
+create index ix_ingestion_archive_processing_partition
+    on ingestion_archive_processing (logical_partition_key);
+
+create index ix_ingestion_archive_processing_due
+    on ingestion_archive_processing (retry_not_before)
+    where status = 'FAILED' and last_error_retryable;
+
+create index ix_ingestion_archive_processing_lease
+    on ingestion_archive_processing (lease_expires_at)
+    where status = 'PROCESSING';
+
+create unique index uq_index_maintenance_operations_open_partition
+    on index_maintenance_operations (partition_key)
+    where phase not in ('COMPLETED', 'FAILED');
+
+create index ix_index_maintenance_operations_recovery
+    on index_maintenance_operations (phase, lease_expires_at)
+    where phase not in ('COMPLETED', 'FAILED');

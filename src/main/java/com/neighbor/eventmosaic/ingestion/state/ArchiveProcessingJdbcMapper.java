@@ -6,6 +6,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFingerprint;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingStatus;
+import com.neighbor.eventmosaic.ingestion.api.AutomaticRetryState;
 import com.neighbor.eventmosaic.ingestion.api.RecordedArchiveProcessingFailure;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -27,37 +28,69 @@ final class ArchiveProcessingJdbcMapper {
 
 	private static ArchiveProcessingState mapState(ResultSet resultSet, int rowNumber)
 			throws SQLException {
+		ArchiveProcessingStatus status = ArchiveProcessingStatus.valueOf(
+				resultSet.getString("status"));
 		return new ArchiveProcessingState(
 				resultSet.getString("archive_idempotency_key"),
 				new ArchiveProcessingFingerprint(
 						resultSet.getString("source_fingerprint"),
 						resultSet.getString("projection_revision"),
 						resultSet.getString("processing_fingerprint")),
-				ArchiveProcessingStatus.valueOf(resultSet.getString("status")),
+				status,
 				new ArchiveProcessingAttemptState(
-						resultSet.getInt("attempt_count"),
+						resultSet.getInt("total_attempt_count"),
 						resultSet.getObject("attempt_token", UUID.class),
 						nullableInstant(resultSet, "last_attempt_at"),
-						nullableInstant(resultSet, "lease_expires_at")),
-				mapProgress(resultSet),
+						nullableInstant(resultSet, "lease_expires_at"),
+						new AutomaticRetryState(
+								resultSet.getInt("automatic_retries_used"),
+								resultSet.getInt("consecutive_retryable_failures"),
+								resultSet.getInt("automatic_retry_limit"),
+								nullableInstant(resultSet, "retry_not_before"))),
+				mapProgress(resultSet, status),
 				mapFailure(resultSet),
 				instant(resultSet, "first_seen_at"),
 				nullableInstant(resultSet, "completed_at")
 		);
 	}
 
-	private static ArchiveProcessingProgress mapProgress(ResultSet resultSet)
+	private static ArchiveProcessingProgress mapProgress(
+			ResultSet resultSet,
+			ArchiveProcessingStatus status
+	)
 			throws SQLException {
+		Long actualDocumentCount = resultSet.getObject("actual_document_count", Long.class);
+		long succeededOperations = resultSet.getLong("succeeded_operations");
+		long receiptDocuments = actualDocumentCount == null
+				? transitionalReceiptDocuments(resultSet, status, succeededOperations)
+				: actualDocumentCount;
 		return new ArchiveProcessingProgress(
 				resultSet.getLong("delivered_records"),
 				resultSet.getLong("source_invalid_records"),
 				resultSet.getLong("mapping_rejected_records"),
 				resultSet.getLong("submitted_operations"),
-				resultSet.getLong("succeeded_operations"),
+				succeededOperations,
 				resultSet.getLong("failed_operations"),
-				resultSet.getLong("receipt_documents"),
+				receiptDocuments,
 				resultSet.getObject("first_failed_line", Long.class)
 		);
+	}
+
+	private static long transitionalReceiptDocuments(
+			ResultSet resultSet,
+			ArchiveProcessingStatus status,
+			long succeededOperations
+	) throws SQLException {
+		if (status == ArchiveProcessingStatus.INDEXED) {
+			return succeededOperations;
+		}
+		String errorCode = resultSet.getString("last_error_code");
+		if (status == ArchiveProcessingStatus.FAILED
+				&& ("INDEX_RECEIPT_MISMATCH".equals(errorCode)
+				|| "INDEX_RECEIPT_SURPLUS".equals(errorCode))) {
+			return succeededOperations;
+		}
+		return 0;
 	}
 
 	private static RecordedArchiveProcessingFailure mapFailure(ResultSet resultSet)

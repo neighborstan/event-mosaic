@@ -1,18 +1,19 @@
 package com.neighbor.eventmosaic.ingestion.api;
 
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Сохраненное состояние попыток и текущего lease архива.
+ * Durable ownership и retry state latest source poll.
  *
- * @param count количество начатых попыток
+ * @param count общее число начатых poll attempts
  * @param token token текущего owner или {@code null}
  * @param lastAttemptAt время последнего claim или {@code null}
- * @param leaseExpiresAt окончание lease или {@code null}
+ * @param leaseExpiresAt окончание текущего lease или {@code null}
  * @param retry automatic retry counters и due boundary
  */
-public record ArchiveAttemptState(
+public record SourcePollAttemptState(
 		int count,
 		UUID token,
 		Instant lastAttemptAt,
@@ -20,16 +21,12 @@ public record ArchiveAttemptState(
 		AutomaticRetryState retry
 ) {
 
-	/**
-	 * Проверяет, что сохраненный счетчик попыток неотрицателен.
-	 */
-	public ArchiveAttemptState {
+	/** Проверяет ownership, attempt history и retry state. */
+	public SourcePollAttemptState {
 		if (count < 0) {
 			throw new IllegalArgumentException("count must not be negative");
 		}
-		if (retry == null) {
-			throw new NullPointerException("retry must not be null");
-		}
+		Objects.requireNonNull(retry, "retry must not be null");
 		if (retry.automaticRetriesUsed() > Math.max(count - 1, 0)) {
 			throw new IllegalArgumentException(
 					"automaticRetriesUsed must not exceed completed automatic claims");
@@ -51,7 +48,7 @@ public record ArchiveAttemptState(
 			throw new IllegalArgumentException("leaseExpiresAt must be after lastAttemptAt");
 		}
 		if (token != null && retry.retryNotBefore() != null) {
-			throw new IllegalArgumentException("active attempt must not contain retryNotBefore");
+			throw new IllegalArgumentException("active poll must not contain retryNotBefore");
 		}
 	}
 }

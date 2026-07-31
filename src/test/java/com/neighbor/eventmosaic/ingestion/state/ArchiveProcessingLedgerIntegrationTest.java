@@ -143,6 +143,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 
 		assertThat(recovered.recovered()).isTrue();
 		assertThat(recovered.attemptCount()).isEqualTo(2);
+		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow().attempt().retry().automaticRetriesUsed()).isEqualTo(1);
 		assertThat(processingLedger.checkpoint(
 				events.idempotencyKey(),
 				first.token(),
@@ -204,12 +206,18 @@ class ArchiveProcessingLedgerIntegrationTest {
 					assertThat(state.failure().failure()).isEqualTo(retryable);
 					assertThat(state.failure().occurredAt())
 							.isEqualTo(FixedClockTestConfiguration.NOW);
+					assertThat(state.attempt().retry().consecutiveRetryableFailures())
+							.isEqualTo(1);
+					assertThat(state.attempt().retry().retryNotBefore())
+							.isEqualTo(FixedClockTestConfiguration.NOW);
 				});
 
 		ArchiveProcessingAttempt retry = processingLedger.claim(
 				mentions.idempotencyKey(),
 				Duration.ofMinutes(10)).orElseThrow();
 		assertThat(retry.attemptCount()).isEqualTo(2);
+		assertThat(processingLedger.findByArchiveIdempotencyKey(mentions.idempotencyKey())
+				.orElseThrow().attempt().retry().automaticRetriesUsed()).isEqualTo(1);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(mentions.idempotencyKey())
 				.orElseThrow().progress())
 				.isEqualTo(ArchiveProcessingProgress.empty());
@@ -257,7 +265,64 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
 				.orElseThrow().progress())
-				.isEqualTo(extraDocuments);
+				.satisfies(progress -> {
+					assertThat(progress.deliveredRecords()).isEqualTo(2);
+					assertThat(progress.submittedOperations()).isEqualTo(2);
+					assertThat(progress.succeededOperations()).isEqualTo(2);
+				});
+	}
+
+	@Test
+	@DisplayName("Future retry и исчерпанный budget не создают processing token")
+	void futureRetryAndExhaustedBudgetDoNotCreateProcessingToken() {
+		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
+		processingLedger.register(events.idempotencyKey(), fingerprint("e"));
+		ArchiveProcessingAttempt attempt = processingLedger.claim(
+				events.idempotencyKey(),
+				Duration.ofMinutes(10)).orElseThrow();
+		assertThat(processingLedger.markFailed(
+				events.idempotencyKey(),
+				attempt.token(),
+				new ArchiveProcessingFailure(BULK_PARTIAL_FAILURE, true),
+				ArchiveProcessingProgress.empty()))
+				.isEqualTo(AttemptTransitionResult.APPLIED);
+
+		jdbcClient.sql("""
+				update ingestion_archive_processing
+				set retry_not_before = :retryNotBefore
+				where archive_idempotency_key = :archiveIdempotencyKey
+				""")
+				.param(
+						"retryNotBefore",
+						Timestamp.from(FixedClockTestConfiguration.NOW.plusSeconds(60)))
+				.param("archiveIdempotencyKey", events.idempotencyKey())
+				.update();
+
+		assertThat(processingLedger.claim(events.idempotencyKey(), Duration.ofMinutes(10)))
+				.isEmpty();
+		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow().attempt().count()).isEqualTo(1);
+
+		jdbcClient.sql("""
+				update ingestion_archive_processing
+				set retry_not_before = :retryNotBefore,
+				    automatic_retries_used = automatic_retry_limit,
+				    total_attempt_count = automatic_retry_limit + 1
+				where archive_idempotency_key = :archiveIdempotencyKey
+				""")
+				.param("retryNotBefore", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("archiveIdempotencyKey", events.idempotencyKey())
+				.update();
+
+		assertThat(processingLedger.claim(events.idempotencyKey(), Duration.ofMinutes(10)))
+				.isEmpty();
+		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow())
+				.satisfies(state -> {
+					assertThat(state.attempt().count()).isEqualTo(4);
+					assertThat(state.attempt().token()).isNull();
+					assertThat(state.attempt().retry().exhausted()).isTrue();
+				});
 	}
 
 	@Test

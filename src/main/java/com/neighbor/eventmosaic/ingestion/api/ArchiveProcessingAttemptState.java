@@ -10,12 +10,14 @@ import java.util.UUID;
  * @param token token текущего owner или {@code null}
  * @param lastAttemptAt время последнего claim или {@code null}
  * @param leaseExpiresAt окончание текущего lease или {@code null}
+ * @param retry automatic retry counters и due boundary
  */
 public record ArchiveProcessingAttemptState(
 		int count,
 		UUID token,
 		Instant lastAttemptAt,
-		Instant leaseExpiresAt
+		Instant leaseExpiresAt,
+		AutomaticRetryState retry
 ) {
 
 	/**
@@ -24,6 +26,17 @@ public record ArchiveProcessingAttemptState(
 	public ArchiveProcessingAttemptState {
 		if (count < 0) {
 			throw new IllegalArgumentException("count must not be negative");
+		}
+		if (retry == null) {
+			throw new NullPointerException("retry must not be null");
+		}
+		if (retry.automaticRetriesUsed() > Math.max(count - 1, 0)) {
+			throw new IllegalArgumentException(
+					"automaticRetriesUsed must not exceed completed automatic claims");
+		}
+		if (retry.consecutiveRetryableFailures() > count) {
+			throw new IllegalArgumentException(
+					"consecutiveRetryableFailures must not exceed attempt count");
 		}
 		if ((token == null) != (leaseExpiresAt == null)) {
 			throw new IllegalArgumentException("token and leaseExpiresAt must be present together");
@@ -36,6 +49,9 @@ public record ArchiveProcessingAttemptState(
 		}
 		if (token != null && !leaseExpiresAt.isAfter(lastAttemptAt)) {
 			throw new IllegalArgumentException("leaseExpiresAt must be after lastAttemptAt");
+		}
+		if (token != null && retry.retryNotBefore() != null) {
+			throw new IllegalArgumentException("active attempt must not contain retryNotBefore");
 		}
 	}
 }

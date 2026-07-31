@@ -9,10 +9,14 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionFailure;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
+import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.error.SourceDataViolationException;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -26,9 +30,14 @@ import org.springframework.stereotype.Repository;
 class JdbcIngestionArchiveRepository {
 
 	private final JdbcClient jdbcClient;
+	private final int automaticRetryLimit;
 
-	JdbcIngestionArchiveRepository(JdbcClient jdbcClient) {
+	JdbcIngestionArchiveRepository(
+			JdbcClient jdbcClient,
+			BackendDataProperties properties
+	) {
 		this.jdbcClient = jdbcClient;
+		this.automaticRetryLimit = properties.retry().automaticRetryLimit();
 	}
 
 	void register(long runId, DiscoveredArchive archive, Instant now) {
@@ -36,12 +45,14 @@ class JdbcIngestionArchiveRepository {
 				insert into ingestion_archives (
 				    idempotency_key, run_id, source_update_time, archive_name,
 				    metadata_url, expected_md5, archive_type,
-				    status, file_size_bytes, first_seen_at, created_at, updated_at
+				    status, file_size_bytes, first_seen_at, automatic_retry_limit,
+				    created_at, updated_at
 				)
 				values (
 				    :idempotencyKey, :runId, :sourceUpdateTime, :archiveName,
 				    :metadataUrl, :expectedMd5, :archiveType,
-				    :status, :fileSizeBytes, :firstSeenAt, :createdAt, :updatedAt
+				    :status, :fileSizeBytes, :firstSeenAt, :automaticRetryLimit,
+				    :createdAt, :updatedAt
 				)
 				on conflict do nothing
 				""")
@@ -55,6 +66,7 @@ class JdbcIngestionArchiveRepository {
 				.param("status", IngestionArchiveStatus.DISCOVERED.name())
 				.param("fileSizeBytes", archive.expectedSizeBytes())
 				.param("firstSeenAt", Timestamp.from(now))
+				.param("automaticRetryLimit", automaticRetryLimit)
 				.param("createdAt", Timestamp.from(now))
 				.param("updatedAt", Timestamp.from(now))
 				.update();
@@ -66,6 +78,10 @@ class JdbcIngestionArchiveRepository {
 				.orElseThrow(() -> new SourceDataViolationException(
 						IngestionErrorCode.ARCHIVE_METADATA_CONFLICT));
 		verifyMetadata(existing.archive(), archive);
+		if (existing.attempt().retry().automaticRetryLimit() != automaticRetryLimit) {
+			throw new IllegalStateException(
+					"Configured acquisition retry limit conflicts with durable state");
+		}
 	}
 
 	Optional<ClaimedArchive> claim(String idempotencyKey, Duration leaseDuration, Instant now) {
@@ -84,6 +100,7 @@ class JdbcIngestionArchiveRepository {
 
 		IngestionArchiveState state = locked.orElseThrow();
 		boolean recovered = state.status() == IngestionArchiveStatus.PROCESSING;
+		boolean automaticRetry = state.status() == IngestionArchiveStatus.FAILED || recovered;
 		UUID token = UUID.randomUUID();
 		Instant leaseExpiresAt = now.plus(leaseDuration);
 		jdbcClient.sql("""
@@ -93,9 +110,12 @@ class JdbcIngestionArchiveRepository {
 				    attempt_token = :attemptToken,
 				    lease_expires_at = :leaseExpiresAt,
 				    last_attempt_at = :lastAttemptAt,
-				    attempt_count = attempt_count + 1,
+				    total_attempt_count = total_attempt_count + 1,
+				    automatic_retries_used = automatic_retries_used + :automaticRetryIncrement,
+				    retry_not_before = null,
 				    last_error_code = null,
 				    last_error_retryable = null,
+				    state_version = state_version + 1,
 				    updated_at = :updatedAt
 				where idempotency_key = :idempotencyKey
 				""")
@@ -103,6 +123,7 @@ class JdbcIngestionArchiveRepository {
 				.param("attemptToken", token)
 				.param("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
 				.param("lastAttemptAt", Timestamp.from(now))
+				.param("automaticRetryIncrement", automaticRetry ? 1 : 0)
 				.param("updatedAt", Timestamp.from(now))
 				.param("idempotencyKey", idempotencyKey)
 				.update();
@@ -137,8 +158,12 @@ class JdbcIngestionArchiveRepository {
 				    completed_at = :completedAt,
 				    attempt_token = null,
 				    lease_expires_at = null,
+				    automatic_retries_used = 0,
+				    consecutive_retryable_failures = 0,
+				    retry_not_before = null,
 				    last_error_code = null,
 				    last_error_retryable = null,
+				    state_version = state_version + 1,
 				    updated_at = :updatedAt
 				where idempotency_key = :idempotencyKey
 				  and status = :processingStatus
@@ -165,14 +190,23 @@ class JdbcIngestionArchiveRepository {
 			Instant now
 	) {
 		long runId = requireRunId(idempotencyKey);
+		OffsetDateTime retryNotBefore = failure.retryable()
+				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
+				: null;
 		int updated = jdbcClient.sql("""
 				update ingestion_archives
 				set status = :status,
 				    failed_at = :failedAt,
 				    attempt_token = null,
 				    lease_expires_at = null,
+				    consecutive_retryable_failures = case
+				        when :retryable then consecutive_retryable_failures + 1
+				        else 0
+				    end,
+				    retry_not_before = :retryNotBefore,
 				    last_error_code = :errorCode,
 				    last_error_retryable = :retryable,
+				    state_version = state_version + 1,
 				    updated_at = :updatedAt
 				where idempotency_key = :idempotencyKey
 				  and status = :processingStatus
@@ -182,6 +216,7 @@ class JdbcIngestionArchiveRepository {
 				.param("failedAt", Timestamp.from(now))
 				.param("errorCode", failure.code().code())
 				.param("retryable", failure.retryable())
+				.param("retryNotBefore", retryNotBefore, Types.TIMESTAMP_WITH_TIMEZONE)
 				.param("updatedAt", Timestamp.from(now))
 				.param("idempotencyKey", idempotencyKey)
 				.param("processingStatus", IngestionArchiveStatus.PROCESSING.name())
@@ -241,11 +276,14 @@ class JdbcIngestionArchiveRepository {
 			return false;
 		}
 		if (state.status() == IngestionArchiveStatus.PROCESSING) {
-			return state.attempt().leaseExpiresAt() == null || !state.attempt().leaseExpiresAt().isAfter(now);
+			return !state.attempt().retry().exhausted()
+					&& !state.attempt().leaseExpiresAt().isAfter(now);
 		}
 		if (state.status() == IngestionArchiveStatus.FAILED) {
 			return state.failure() != null
-					&& state.failure().failure().retryable();
+					&& state.failure().failure().retryable()
+					&& !state.attempt().retry().exhausted()
+					&& !state.attempt().retry().retryNotBefore().isAfter(now);
 		}
 		return state.status() == IngestionArchiveStatus.DISCOVERED;
 	}

@@ -11,6 +11,7 @@ import com.neighbor.eventmosaic.shared.error.RetryableException;
 import java.net.URI;
 import java.time.Instant;
 import java.util.List;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -114,6 +115,44 @@ class IngestionContractsTest {
 		assertThatThrownBy(() -> AttemptTransitionResult.fromUpdatedRows(2))
 				.isInstanceOf(IllegalStateException.class)
 				.hasMessageContaining("unexpected number of rows");
+	}
+
+	@Test
+	@DisplayName("Attempt state отклоняет retry counters без соответствующих claims")
+	void attemptStateRejectsRetryCountersWithoutClaims() {
+		Instant now = Instant.parse("2026-07-20T12:00:00Z");
+		AutomaticRetryState impossibleAutomaticRetry =
+				new AutomaticRetryState(1, 0, 3, null);
+		AutomaticRetryState impossibleFailureSequence =
+				new AutomaticRetryState(0, 2, 3, now);
+
+		assertInvalidAttempt(
+				() -> new ArchiveAttemptState(1, null, now, null, impossibleAutomaticRetry),
+				"automaticRetriesUsed");
+		assertInvalidAttempt(
+				() -> new ArchiveProcessingAttemptState(
+						1, null, now, null, impossibleAutomaticRetry),
+				"automaticRetriesUsed");
+		assertInvalidAttempt(
+				() -> new SourcePollAttemptState(1, null, now, null, impossibleAutomaticRetry),
+				"automaticRetriesUsed");
+
+		assertInvalidAttempt(
+				() -> new ArchiveAttemptState(1, null, now, null, impossibleFailureSequence),
+				"consecutiveRetryableFailures");
+		assertInvalidAttempt(
+				() -> new ArchiveProcessingAttemptState(
+						1, null, now, null, impossibleFailureSequence),
+				"consecutiveRetryableFailures");
+		assertInvalidAttempt(
+				() -> new SourcePollAttemptState(1, null, now, null, impossibleFailureSequence),
+				"consecutiveRetryableFailures");
+	}
+
+	private static void assertInvalidAttempt(Supplier<?> constructor, String messagePart) {
+		assertThatThrownBy(constructor::get)
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining(messagePart);
 	}
 
 }

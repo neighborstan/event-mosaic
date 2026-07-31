@@ -182,9 +182,13 @@ class IngestionArchiveLedgerIntegrationTest {
 
 		jdbcClient.sql("""
 				update ingestion_archives
-				set lease_expires_at = :expiredAt
+				set last_attempt_at = :lastAttemptAt,
+				    lease_expires_at = :expiredAt
 				where idempotency_key = :idempotencyKey
 				""")
+				.param(
+						"lastAttemptAt",
+						java.sql.Timestamp.from(FixedClockTestConfiguration.NOW.minusSeconds(2)))
 				.param("expiredAt", java.sql.Timestamp.from(FixedClockTestConfiguration.NOW.minusSeconds(1)))
 				.param("idempotencyKey", events.idempotencyKey())
 				.update();
@@ -192,6 +196,8 @@ class IngestionArchiveLedgerIntegrationTest {
 
 		assertThat(recovered.recovered()).isTrue();
 		assertThat(recovered.attemptCount()).isEqualTo(2);
+		assertThat(archiveLedger.findByIdempotencyKey(events.idempotencyKey()).orElseThrow()
+				.attempt().retry().automaticRetriesUsed()).isEqualTo(1);
 		assertThat(archiveLedger.markStaged(
 				events.idempotencyKey(),
 				firstClaim.token(),
@@ -214,6 +220,53 @@ class IngestionArchiveLedgerIntegrationTest {
 				events.idempotencyKey(),
 				recovered.token(),
 				staged(events))).isEqualTo(AttemptTransitionResult.APPLIED);
+	}
+
+	@Test
+	@DisplayName("Future retry и исчерпанный budget не создают acquisition token")
+	void futureRetryAndExhaustedBudgetDoNotCreateAcquisitionToken() {
+		DiscoveredArchive events = update(Instant.parse("2026-07-20T12:00:00Z")).archives().getFirst();
+		archiveLedger.registerDiscoveredUpdate(update(events.sourceUpdateTime()), FirstRunPolicy.LATEST, null);
+		var attempt = archiveLedger.claimArchive(events.idempotencyKey(), Duration.ofMinutes(15)).orElseThrow();
+		assertThat(archiveLedger.markFailed(
+				events.idempotencyKey(),
+				attempt.token(),
+				new IngestionFailure(IngestionErrorCode.DOWNLOAD_HTTP_ERROR, true)))
+				.isEqualTo(AttemptTransitionResult.APPLIED);
+
+		jdbcClient.sql("""
+				update ingestion_archives
+				set retry_not_before = :retryNotBefore
+				where idempotency_key = :idempotencyKey
+				""")
+				.param(
+						"retryNotBefore",
+						java.sql.Timestamp.from(FixedClockTestConfiguration.NOW.plusSeconds(60)))
+				.param("idempotencyKey", events.idempotencyKey())
+				.update();
+
+		assertThat(archiveLedger.claimArchive(events.idempotencyKey(), Duration.ofMinutes(15))).isEmpty();
+		assertThat(archiveLedger.findByIdempotencyKey(events.idempotencyKey()).orElseThrow()
+				.attempt().count()).isEqualTo(1);
+
+		jdbcClient.sql("""
+				update ingestion_archives
+				set retry_not_before = :retryNotBefore,
+				    automatic_retries_used = automatic_retry_limit,
+				    total_attempt_count = automatic_retry_limit + 1
+				where idempotency_key = :idempotencyKey
+				""")
+				.param("retryNotBefore", java.sql.Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("idempotencyKey", events.idempotencyKey())
+				.update();
+
+		assertThat(archiveLedger.claimArchive(events.idempotencyKey(), Duration.ofMinutes(15))).isEmpty();
+		assertThat(archiveLedger.findByIdempotencyKey(events.idempotencyKey()).orElseThrow())
+				.satisfies(state -> {
+					assertThat(state.attempt().count()).isEqualTo(4);
+					assertThat(state.attempt().token()).isNull();
+					assertThat(state.attempt().retry().exhausted()).isTrue();
+				});
 	}
 
 	@Test

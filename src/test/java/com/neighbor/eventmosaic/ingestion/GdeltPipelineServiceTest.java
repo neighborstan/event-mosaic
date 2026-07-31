@@ -29,6 +29,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingLedger;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingStatus;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
+import com.neighbor.eventmosaic.ingestion.api.AutomaticRetryState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
@@ -557,7 +558,12 @@ class GdeltPipelineServiceTest {
 						1,
 						archive,
 						IngestionArchiveStatus.STAGED,
-						new ArchiveAttemptState(1, null, NOW, null),
+						new ArchiveAttemptState(
+								1,
+								null,
+								NOW,
+								null,
+								AutomaticRetryState.initial(3)),
 						new StagedArchive(
 								tempDir.resolve(archive.archiveType() + ".zip"),
 								tempDir.resolve(archive.archiveType() + ".csv"),
@@ -585,7 +591,12 @@ class GdeltPipelineServiceTest {
 				archiveKey,
 				fingerprint,
 				ArchiveProcessingStatus.PENDING,
-				new ArchiveProcessingAttemptState(0, null, null, null),
+				new ArchiveProcessingAttemptState(
+						0,
+						null,
+						null,
+						null,
+						AutomaticRetryState.initial(3)),
 				com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress.empty(),
 				null,
 				NOW,
@@ -600,7 +611,12 @@ class GdeltPipelineServiceTest {
 				archive.archive().idempotencyKey(),
 				fingerprint,
 				ArchiveProcessingStatus.INDEXED,
-				new ArchiveProcessingAttemptState(1, null, NOW, null),
+				new ArchiveProcessingAttemptState(
+						1,
+						null,
+						NOW,
+						null,
+						AutomaticRetryState.initial(3)),
 				new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress(
 						1, 0, 0, 1, 1, 0, 1, null),
 				null,

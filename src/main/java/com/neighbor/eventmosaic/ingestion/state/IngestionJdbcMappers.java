@@ -2,6 +2,7 @@ package com.neighbor.eventmosaic.ingestion.state;
 
 import com.neighbor.eventmosaic.ingestion.api.ArchiveAttemptState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
+import com.neighbor.eventmosaic.ingestion.api.AutomaticRetryState;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredArchive;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
@@ -44,10 +45,15 @@ final class IngestionJdbcMappers {
 				archive,
 				IngestionArchiveStatus.valueOf(resultSet.getString("status")),
 				new ArchiveAttemptState(
-						resultSet.getInt("attempt_count"),
+						resultSet.getInt("total_attempt_count"),
 						resultSet.getObject("attempt_token", UUID.class),
 						nullableInstant(resultSet, "last_attempt_at"),
-						nullableInstant(resultSet, "lease_expires_at")
+						nullableInstant(resultSet, "lease_expires_at"),
+						new AutomaticRetryState(
+								resultSet.getInt("automatic_retries_used"),
+								resultSet.getInt("consecutive_retryable_failures"),
+								resultSet.getInt("automatic_retry_limit"),
+								nullableInstant(resultSet, "retry_not_before"))
 				),
 				mapStagedArchive(resultSet),
 				mapRecordedFailure(resultSet, "failed_at"),
