@@ -9,6 +9,7 @@ import co.elastic.clients.elasticsearch.indices.IndexSettings;
 import co.elastic.clients.elasticsearch.indices.IndexState;
 import co.elastic.clients.elasticsearch.indices.UpdateAliasesRequest;
 import co.elastic.clients.elasticsearch.indices.UpdateAliasesResponse;
+import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
@@ -23,8 +24,6 @@ import org.springframework.stereotype.Component;
 @Component
 final class ElasticsearchIndexLifecycleGateway implements IndexLifecycleElasticsearchGateway {
 
-	static final String EVENT_READ_ALIAS = "gdelt-events-read";
-	static final String MENTION_READ_ALIAS = "gdelt-mentions-read";
 	private static final String INDEX_NOT_FOUND = "index_not_found_exception";
 	private static final String INDEX_ALREADY_EXISTS = "resource_already_exists_exception";
 
@@ -97,8 +96,8 @@ final class ElasticsearchIndexLifecycleGateway implements IndexLifecycleElastics
 	@Override
 	public IndexAliasMembership readStableAliases() throws IOException {
 		return new IndexAliasMembership(
-				readAlias(EVENT_READ_ALIAS),
-				readAlias(MENTION_READ_ALIAS));
+				readAlias(GdeltIndexKind.EVENT.readAlias()),
+				readAlias(GdeltIndexKind.MENTION.readAlias()));
 	}
 
 	private Set<String> readAlias(String aliasName) throws IOException {
@@ -139,12 +138,12 @@ final class ElasticsearchIndexLifecycleGateway implements IndexLifecycleElastics
 		if (addEvent) {
 			request.actions(action -> action.add(add -> add
 					.index(eventIndexName)
-					.alias(EVENT_READ_ALIAS)));
+					.alias(GdeltIndexKind.EVENT.readAlias())));
 		}
 		if (addMention) {
 			request.actions(action -> action.add(add -> add
 					.index(mentionIndexName)
-					.alias(MENTION_READ_ALIAS)));
+					.alias(GdeltIndexKind.MENTION.readAlias())));
 		}
 		UpdateAliasesResponse response = client.indices().updateAliases(request.build());
 		if (!response.acknowledged()) {

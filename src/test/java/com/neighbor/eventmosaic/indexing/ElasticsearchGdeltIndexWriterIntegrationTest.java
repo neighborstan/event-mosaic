@@ -569,6 +569,45 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	}
 
 	@Test
+	@DisplayName("Равное количество документов не скрывает замену Event")
+	void detectsReplacedIdentityWithEqualDocumentCount() throws IOException {
+		createPhysicalIndices();
+		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
+		IndexedEventDocument expected = event(3051, 9, "Expected event");
+		IndexedEventDocument replacement = event(3052, 9, "Replacement event");
+		ArchiveIdentityDigest expectedDigest = digestOfIds(expected.documentId());
+
+		writer.write(new BulkIndexCommand<>(EVENT, eventTarget, List.of(expected)));
+		writer.refresh(EVENT, eventTarget);
+		client.delete(request -> request
+				.index(EVENT_GENERATION)
+				.id(expected.documentId())
+				.refresh(Refresh.WaitFor));
+		client.index(request -> request
+				.index(EVENT_GENERATION)
+				.id(replacement.documentId())
+				.refresh(Refresh.WaitFor)
+				.document(replacement));
+
+		var verification = writer.verifyReceipt(new ArchiveReceiptQuery(
+				EVENT,
+				eventTarget,
+				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
+				1,
+				expectedDigest,
+				RECEIPT_PAGE_SIZE));
+
+		assertThat(verification.status())
+				.isEqualTo(ArchiveReceiptStatus.IDENTITY_MISMATCH);
+		assertThat(verification.expectedDocumentCount()).isEqualTo(1);
+		assertThat(verification.actualDocumentCount()).isEqualTo(1);
+		assertThat(verification.expectedDigest()).isEqualTo(expectedDigest);
+		assertThat(verification.actualDigest())
+				.isEqualTo(digestOfIds(replacement.documentId()));
+	}
+
+	@Test
 	@DisplayName("Receipt считает archive только в exact physical generation")
 	void countsReceiptOnlyInExactTargetGeneration() throws IOException {
 		client.indices().create(request -> request.index(EVENT_GENERATION));

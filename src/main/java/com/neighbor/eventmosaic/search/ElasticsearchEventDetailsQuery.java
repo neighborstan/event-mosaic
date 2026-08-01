@@ -4,10 +4,11 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.ShardStatistics;
 import co.elastic.clients.elasticsearch._types.SortOrder;
-import co.elastic.clients.elasticsearch.core.GetRequest;
-import co.elastic.clients.elasticsearch.core.GetResponse;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.elasticsearch.core.search.Hit;
+import co.elastic.clients.elasticsearch.core.search.TotalHits;
+import co.elastic.clients.elasticsearch.core.search.TotalHitsRelation;
 import co.elastic.clients.json.JsonpMappingException;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
@@ -21,7 +22,7 @@ import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 /**
- * Читает минимальные Event details из версионированных индексов Elasticsearch.
+ * Читает Event details через стабильные aliases текущих поколений Elasticsearch.
  */
 @Component
 public class ElasticsearchEventDetailsQuery implements EventDetailsQuery {
@@ -58,18 +59,11 @@ public class ElasticsearchEventDetailsQuery implements EventDetailsQuery {
 			throw new IllegalArgumentException("eventId must be positive");
 		}
 		try {
-			GetRequest request = GetRequest.of(builder -> builder
-					.index(GdeltIndexKind.EVENT.indexName())
-					.id(Long.toString(eventId)));
-			GetResponse<IndexedEventDocument> response = elasticsearchClient.get(
-					request,
-					IndexedEventDocument.class);
-			if (!response.found()) {
+			Optional<IndexedEventDocument> event = findEvent(eventId);
+			if (event.isEmpty()) {
 				return Optional.empty();
 			}
-			IndexedEventDocument event = requireEventSource(response.source());
-			return findSources(eventId)
-					.map(sources -> toDetails(event, sources));
+			return Optional.of(toDetails(event.orElseThrow(), findSources(eventId)));
 		} catch (ElasticsearchException exception) {
 			if (isIndexNotFound(exception)) {
 				return Optional.empty();
@@ -80,42 +74,54 @@ public class ElasticsearchEventDetailsQuery implements EventDetailsQuery {
 		}
 	}
 
-	private Optional<List<MentionSourceProjection>> findSources(long eventId)
+	private Optional<IndexedEventDocument> findEvent(long eventId)
 			throws IOException {
-		try {
-			SearchRequest request = SearchRequest.of(builder -> builder
-					.index(GdeltIndexKind.MENTION.indexName())
-					.size(properties.maxSourcesPerEvent())
-					.allowPartialSearchResults(false)
-					.source(source -> source.filter(filter -> filter
-							.includes(MENTION_SOURCE_FIELDS)))
-					.trackTotalHits(track -> track.enabled(false))
-					.query(query -> query.term(term -> term
-							.field("globalEventId")
-							.value(eventId)))
-					.collapse(collapse -> collapse
-							.field("sourceDocumentKey"))
-					.sort(sort -> sort.field(field -> field
-							.field("mentionTimeDate")
-							.order(SortOrder.Desc)))
-					.sort(sort -> sort.field(field -> field
-							.field("rawMentionId")
-							.order(SortOrder.Asc))));
-			SearchResponse<MentionSourceProjection> response =
-					elasticsearchClient.search(
-							request,
-							MentionSourceProjection.class);
-			requireComplete(response);
-			List<MentionSourceProjection> sources = response.hits().hits().stream()
-					.map(hit -> requireMentionSource(hit.source()))
-					.toList();
-			return Optional.of(sources);
-		} catch (ElasticsearchException exception) {
-			if (isIndexNotFound(exception)) {
-				return Optional.empty();
-			}
-			throw exception;
-		}
+		SearchRequest request = SearchRequest.of(builder -> builder
+				.index(GdeltIndexKind.EVENT.readAlias())
+				.size(2)
+				.allowNoIndices(false)
+				.ignoreUnavailable(false)
+				.allowPartialSearchResults(false)
+				.trackTotalHits(track -> track.enabled(true))
+				.query(query -> query.ids(ids -> ids
+						.values(Long.toString(eventId)))));
+		SearchResponse<IndexedEventDocument> response = elasticsearchClient.search(
+				request,
+				IndexedEventDocument.class);
+		requireComplete(response, "event");
+		return requireSingleEvent(eventId, response);
+	}
+
+	private List<MentionSourceProjection> findSources(long eventId)
+			throws IOException {
+		SearchRequest request = SearchRequest.of(builder -> builder
+				.index(GdeltIndexKind.MENTION.readAlias())
+				.size(properties.maxSourcesPerEvent())
+				.allowNoIndices(false)
+				.ignoreUnavailable(false)
+				.allowPartialSearchResults(false)
+				.source(source -> source.filter(filter -> filter
+						.includes(MENTION_SOURCE_FIELDS)))
+				.trackTotalHits(track -> track.enabled(false))
+				.query(query -> query.term(term -> term
+						.field("globalEventId")
+						.value(eventId)))
+				.collapse(collapse -> collapse
+						.field("sourceDocumentKey"))
+				.sort(sort -> sort.field(field -> field
+						.field("mentionTimeDate")
+						.order(SortOrder.Desc)))
+				.sort(sort -> sort.field(field -> field
+						.field("rawMentionId")
+						.order(SortOrder.Asc))));
+		SearchResponse<MentionSourceProjection> response =
+				elasticsearchClient.search(
+						request,
+						MentionSourceProjection.class);
+		requireComplete(response, "mention");
+		return response.hits().hits().stream()
+				.map(hit -> requireMentionSource(hit.source()))
+				.toList();
 	}
 
 	private static boolean isIndexNotFound(ElasticsearchException exception) {
@@ -124,13 +130,32 @@ public class ElasticsearchEventDetailsQuery implements EventDetailsQuery {
 				&& INDEX_NOT_FOUND_ERROR_TYPE.equals(exception.error().type());
 	}
 
-	private static IndexedEventDocument requireEventSource(
-			IndexedEventDocument source
+	private static Optional<IndexedEventDocument> requireSingleEvent(
+			long eventId,
+			SearchResponse<IndexedEventDocument> response
 	) {
-		if (source == null) {
-			throw invalidResponse("Found Elasticsearch event response has no source");
+		TotalHits total = response.hits().total();
+		List<Hit<IndexedEventDocument>> hits = response.hits().hits();
+		if (total == null || total.relation() != TotalHitsRelation.Eq) {
+			throw invalidResponse("Elasticsearch event search has inconsistent hits");
 		}
-		return source;
+		if (total.value() == 0 && hits.isEmpty()) {
+			return Optional.empty();
+		}
+		if (total.value() != 1) {
+			throw invalidResponse("Elasticsearch event identity is ambiguous");
+		}
+		if (hits.size() != 1) {
+			throw invalidResponse("Elasticsearch event search has inconsistent hits");
+		}
+		Hit<IndexedEventDocument> hit = hits.getFirst();
+		IndexedEventDocument source = hit.source();
+		if (!Long.toString(eventId).equals(hit.id())
+				|| source == null
+				|| source.globalEventId() != eventId) {
+			throw invalidResponse("Elasticsearch event hit does not match request");
+		}
+		return Optional.of(source);
 	}
 
 	private static MentionSourceProjection requireMentionSource(
@@ -147,11 +172,19 @@ public class ElasticsearchEventDetailsQuery implements EventDetailsQuery {
 	}
 
 	private static void requireComplete(
-			SearchResponse<MentionSourceProjection> response
+			SearchResponse<?> response,
+			String documentKind
 	) {
+		if (response == null) {
+			throw invalidResponse("Elasticsearch " + documentKind + " search has no response");
+		}
 		ShardStatistics shards = response.shards();
-		if (response.timedOut() || shards.failed().longValue() > 0) {
-			throw invalidResponse("Elasticsearch mention search response is partial");
+		if (response.timedOut()
+				|| Boolean.TRUE.equals(response.terminatedEarly())
+				|| shards == null
+				|| shards.failed().longValue() > 0) {
+			throw invalidResponse(
+					"Elasticsearch " + documentKind + " search response is partial");
 		}
 	}
 

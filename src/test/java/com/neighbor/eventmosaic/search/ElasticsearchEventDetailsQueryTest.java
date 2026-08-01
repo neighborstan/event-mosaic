@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -12,11 +13,10 @@ import static org.mockito.Mockito.when;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.ErrorResponse;
-import co.elastic.clients.elasticsearch.core.GetRequest;
-import co.elastic.clients.elasticsearch.core.GetResponse;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
+import co.elastic.clients.elasticsearch.core.search.TotalHitsRelation;
 import co.elastic.clients.json.JsonpMappingException;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
@@ -50,7 +50,7 @@ class ElasticsearchEventDetailsQueryTest {
 	@Test
 	@DisplayName("Преобразует transport failure в безопасную search exception")
 	void convertsTransportFailureToSafeException() throws IOException {
-		when(client.get(any(GetRequest.class), eq(IndexedEventDocument.class)))
+		when(client.search(any(SearchRequest.class), eq(IndexedEventDocument.class)))
 				.thenThrow(new IOException("secret transport detail"));
 
 		assertThatThrownBy(() -> query.findById(42))
@@ -70,7 +70,7 @@ class ElasticsearchEventDetailsQueryTest {
 						.error(error -> error
 								.type("resource_not_found_exception")
 								.reason("secret backend detail"))));
-		when(client.get(any(GetRequest.class), eq(IndexedEventDocument.class)))
+		when(client.search(any(SearchRequest.class), eq(IndexedEventDocument.class)))
 				.thenThrow(responseFailure);
 
 		assertThatThrownBy(() -> query.findById(42))
@@ -86,7 +86,7 @@ class ElasticsearchEventDetailsQueryTest {
 		JsonpMappingException mappingFailure = new JsonpMappingException(
 				"secret schema detail",
 				mock(JsonLocation.class));
-		when(client.get(any(GetRequest.class), eq(IndexedEventDocument.class)))
+		when(client.search(any(SearchRequest.class), eq(IndexedEventDocument.class)))
 				.thenThrow(mappingFailure);
 
 		assertThatThrownBy(() -> query.findById(42))
@@ -100,7 +100,7 @@ class ElasticsearchEventDetailsQueryTest {
 	@DisplayName("Не маскирует неожиданный runtime defect как доступность поиска")
 	void propagatesUnexpectedRuntimeFailure() throws IOException {
 		IllegalStateException defect = new IllegalStateException("unexpected defect");
-		when(client.get(any(GetRequest.class), eq(IndexedEventDocument.class)))
+		when(client.search(any(SearchRequest.class), eq(IndexedEventDocument.class)))
 				.thenThrow(defect);
 
 		assertThatThrownBy(() -> query.findById(42))
@@ -114,7 +114,7 @@ class ElasticsearchEventDetailsQueryTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(MentionSourceProjection.class)))
-				.thenReturn(searchResponse(
+				.thenReturn(mentionSearchResponse(
 						false,
 						0,
 						List.of(new MentionSourceProjection(
@@ -125,22 +125,42 @@ class ElasticsearchEventDetailsQueryTest {
 
 		var details = query.findById(42).orElseThrow();
 
-		ArgumentCaptor<SearchRequest> requestCaptor =
+		ArgumentCaptor<SearchRequest> eventRequestCaptor =
 				ArgumentCaptor.forClass(SearchRequest.class);
 		verify(client).search(
-				requestCaptor.capture(),
+				eventRequestCaptor.capture(),
+				eq(IndexedEventDocument.class));
+		SearchRequest eventRequest = eventRequestCaptor.getValue();
+		assertThat(eventRequest.index())
+				.containsExactly(GdeltIndexKind.EVENT.readAlias());
+		assertThat(eventRequest.size()).isEqualTo(2);
+		assertThat(eventRequest.allowNoIndices()).isFalse();
+		assertThat(eventRequest.ignoreUnavailable()).isFalse();
+		assertThat(eventRequest.allowPartialSearchResults()).isFalse();
+		assertThat(eventRequest.trackTotalHits().isEnabled()).isTrue();
+		assertThat(eventRequest.trackTotalHits().enabled()).isTrue();
+		assertThat(eventRequest.query().ids().values()).containsExactly("42");
+
+		ArgumentCaptor<SearchRequest> mentionRequestCaptor =
+				ArgumentCaptor.forClass(SearchRequest.class);
+		verify(client).search(
+				mentionRequestCaptor.capture(),
 				eq(MentionSourceProjection.class));
-		SearchRequest request = requestCaptor.getValue();
-		assertThat(request.allowPartialSearchResults()).isFalse();
-		assertThat(request.source().isFilter()).isTrue();
-		assertThat(request.source().filter().includes())
+		SearchRequest mentionRequest = mentionRequestCaptor.getValue();
+		assertThat(mentionRequest.index())
+				.containsExactly(GdeltIndexKind.MENTION.readAlias());
+		assertThat(mentionRequest.allowNoIndices()).isFalse();
+		assertThat(mentionRequest.ignoreUnavailable()).isFalse();
+		assertThat(mentionRequest.allowPartialSearchResults()).isFalse();
+		assertThat(mentionRequest.source().isFilter()).isTrue();
+		assertThat(mentionRequest.source().filter().includes())
 				.containsExactly(
 						"mentionSourceName",
 						"mentionIdentifier",
 						"mentionTimeDate",
 						"mentionDocTone");
-		assertThat(request.trackTotalHits().isEnabled()).isTrue();
-		assertThat(request.trackTotalHits().enabled()).isFalse();
+		assertThat(mentionRequest.trackTotalHits().isEnabled()).isTrue();
+		assertThat(mentionRequest.trackTotalHits().enabled()).isFalse();
 		assertThat(details.sources()).singleElement().satisfies(source -> {
 			assertThat(source.sourceName()).isEqualTo("example.test");
 			assertThat(source.identifier()).isEqualTo("https://example.test/article");
@@ -151,13 +171,51 @@ class ElasticsearchEventDetailsQueryTest {
 	}
 
 	@Test
+	@DisplayName("Не выбирает произвольный Event при одинаковом ID в двух разделах")
+	void rejectsAmbiguousEventAcrossPartitions() throws IOException {
+		when(client.search(
+				any(SearchRequest.class),
+				eq(IndexedEventDocument.class)))
+				.thenReturn(eventSearchResponse(List.of(
+						eventHit("gdelt-events-v1-p20260720-g0001", event()),
+						eventHit("gdelt-events-v1-p20260727-g0001", event()))));
+
+		assertThatThrownBy(() -> query.findById(42))
+				.isInstanceOf(SearchAccessException.class)
+				.hasMessage("Сервис поиска временно недоступен")
+				.hasCauseInstanceOf(IllegalStateException.class);
+
+		verify(client, never()).search(
+				any(SearchRequest.class),
+				eq(MentionSourceProjection.class));
+	}
+
+	@Test
+	@DisplayName("Отклоняет неполный Event search до запроса связанных источников")
+	void rejectsIncompleteEventSearchBeforeMentionQuery() throws IOException {
+		when(client.search(
+				any(SearchRequest.class),
+				eq(IndexedEventDocument.class)))
+				.thenReturn(eventSearchResponse(true, 0, List.of()));
+
+		assertThatThrownBy(() -> query.findById(42))
+				.isInstanceOf(SearchAccessException.class)
+				.hasMessage("Сервис поиска временно недоступен")
+				.hasCauseInstanceOf(IllegalStateException.class);
+
+		verify(client, never()).search(
+				any(SearchRequest.class),
+				eq(MentionSourceProjection.class));
+	}
+
+	@Test
 	@DisplayName("Отклоняет timed out Mention search как временную недоступность")
 	void rejectsTimedOutMentionSearch() throws IOException {
 		stubFoundEvent();
 		when(client.search(
 				any(SearchRequest.class),
 				eq(MentionSourceProjection.class)))
-				.thenReturn(searchResponse(true, 0, List.of()));
+				.thenReturn(mentionSearchResponse(true, 0, List.of()));
 
 		assertThatThrownBy(() -> query.findById(42))
 				.isInstanceOf(SearchAccessException.class)
@@ -172,7 +230,7 @@ class ElasticsearchEventDetailsQueryTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(MentionSourceProjection.class)))
-				.thenReturn(searchResponse(false, 1, List.of()));
+				.thenReturn(mentionSearchResponse(false, 1, List.of()));
 
 		assertThatThrownBy(() -> query.findById(42))
 				.isInstanceOf(SearchAccessException.class)
@@ -181,22 +239,57 @@ class ElasticsearchEventDetailsQueryTest {
 	}
 
 	private void stubFoundEvent() throws IOException {
-		when(client.get(any(GetRequest.class), eq(IndexedEventDocument.class)))
-				.thenReturn(GetResponse.of(response -> response
-						.index(GdeltIndexKind.EVENT.indexName())
-						.id("42")
-						.found(true)
-						.source(event())));
+		when(client.search(
+				any(SearchRequest.class),
+				eq(IndexedEventDocument.class)))
+				.thenReturn(eventSearchResponse(List.of(eventHit(
+						"gdelt-events-v1-p20260720-g0001",
+						event()))));
 	}
 
-	private static SearchResponse<MentionSourceProjection> searchResponse(
+	private static SearchResponse<IndexedEventDocument> eventSearchResponse(
+			List<Hit<IndexedEventDocument>> hits
+	) {
+		return eventSearchResponse(false, 0, hits);
+	}
+
+	private static SearchResponse<IndexedEventDocument> eventSearchResponse(
+			boolean timedOut,
+			int failedShards,
+			List<Hit<IndexedEventDocument>> hits
+	) {
+		return SearchResponse.of(response -> response
+				.took(1)
+				.timedOut(timedOut)
+				.shards(shards -> shards
+						.total(2)
+						.successful(failedShards == 0 ? 2 : 1)
+						.failed(failedShards))
+				.hits(metadata -> metadata
+						.total(total -> total
+								.value(hits.size())
+								.relation(TotalHitsRelation.Eq))
+						.hits(hits)));
+	}
+
+	private static Hit<IndexedEventDocument> eventHit(
+			String indexName,
+			IndexedEventDocument source
+	) {
+		return Hit.of(hit -> hit
+				.index(indexName)
+				.id(source.documentId())
+				.source(source));
+	}
+
+	private static SearchResponse<MentionSourceProjection> mentionSearchResponse(
 			boolean timedOut,
 			int failedShards,
 			List<MentionSourceProjection> sources
 	) {
 		List<Hit<MentionSourceProjection>> hits = sources.stream()
 				.map(source -> Hit.<MentionSourceProjection>of(hit -> hit
-						.index(GdeltIndexKind.MENTION.indexName())
+						.index("gdelt-mentions-v1-p20260720-g0001")
 						.id(source.mentionIdentifier())
 						.source(source)))
 				.toList();

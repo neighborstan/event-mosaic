@@ -33,7 +33,6 @@ import java.util.Set;
  */
 final class ElasticsearchEventIdentityGuard {
 
-	private static final String EVENT_READ_ALIAS = "gdelt-events-read";
 	private static final List<String> PROVENANCE_SOURCE_FIELDS = List.of(
 			"sourceArchiveKey",
 			"sourceLineNumber",
@@ -86,7 +85,7 @@ final class ElasticsearchEventIdentityGuard {
 
 	private SearchResponse<EventIdentityProjection> search(List<String> ids) {
 		SearchRequest request = SearchRequest.of(builder -> builder
-				.index(EVENT_READ_ALIAS)
+				.index(GdeltIndexKind.EVENT.readAlias())
 				.allowNoIndices(false)
 				.ignoreUnavailable(false)
 				.allowPartialSearchResults(false)

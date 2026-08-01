@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import com.neighbor.eventmosaic.TestcontainersConfiguration;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
@@ -41,6 +42,21 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 			"gdelt-events-v1-p20260720-g9999";
 	private static final String MENTION_PHYSICAL =
 			"gdelt-mentions-v1-p20260720-g9999";
+	private static final String SECOND_EVENT_PHYSICAL =
+			"gdelt-events-v1-p20260727-g9999";
+	private static final String SECOND_MENTION_PHYSICAL =
+			"gdelt-mentions-v1-p20260727-g9999";
+	private static final String SHADOW_EVENT_PHYSICAL =
+			"gdelt-events-v1-p20260727-g10000";
+	private static final String SHADOW_MENTION_PHYSICAL =
+			"gdelt-mentions-v1-p20260727-g10000";
+	private static final List<String> TEST_INDEX_NAMES = List.of(
+			EVENT_PHYSICAL,
+			MENTION_PHYSICAL,
+			SECOND_EVENT_PHYSICAL,
+			SECOND_MENTION_PHYSICAL,
+			SHADOW_EVENT_PHYSICAL,
+			SHADOW_MENTION_PHYSICAL);
 
 	@Autowired
 	private ElasticsearchClient client;
@@ -54,44 +70,20 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 
 	@BeforeEach
 	void resetReadModel() throws IOException {
-		client.indices().delete(request -> request
-				.index(
-						EVENT_PHYSICAL,
-						MENTION_PHYSICAL)
-				.allowNoIndices(true)
-				.ignoreUnavailable(true));
-		client.indices().delete(request -> request
-				.index(
-						GdeltIndexKind.EVENT.indexName(),
-						GdeltIndexKind.MENTION.indexName())
-				.allowNoIndices(true)
-				.ignoreUnavailable(true));
+		removeStableAliasMemberships();
+		deleteTestIndices();
 		indexWriter.prepareReadModel();
-		client.indices().create(request -> request.index(EVENT_PHYSICAL));
-		client.indices().create(request -> request.index(MENTION_PHYSICAL));
-		eventTarget = target(EVENT_PHYSICAL);
-		mentionTarget = target(MENTION_PHYSICAL);
-		client.indices().updateAliases(request -> request
-				.actions(action -> action.add(add -> add
-						.index(EVENT_PHYSICAL)
-						.alias(GdeltIndexKind.EVENT.indexName())))
-				.actions(action -> action.add(add -> add
-						.index(MENTION_PHYSICAL)
-						.alias(GdeltIndexKind.MENTION.indexName()))));
+		eventTarget = createTarget(EVENT_PHYSICAL);
+		mentionTarget = createTarget(MENTION_PHYSICAL);
+		addStableAliases(EVENT_PHYSICAL, MENTION_PHYSICAL);
 		eventDetailsQuery =
 				new ElasticsearchEventDetailsQuery(client, new EventSearchProperties(2));
 	}
 
 	@AfterEach
 	void cleanReadModel() throws IOException {
-		removeCompatibilityAlias(EVENT_PHYSICAL, GdeltIndexKind.EVENT.indexName());
-		removeCompatibilityAlias(MENTION_PHYSICAL, GdeltIndexKind.MENTION.indexName());
-		client.indices().delete(request -> request
-				.index(
-						EVENT_PHYSICAL,
-						MENTION_PHYSICAL)
-				.allowNoIndices(true)
-				.ignoreUnavailable(true));
+		removeStableAliasMemberships();
+		deleteTestIndices();
 	}
 
 	@Test
@@ -159,6 +151,113 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 	}
 
 	@Test
+	@DisplayName("Для двух разделов читает только текущие поколения и не видит теневое")
+	void readsOnlyCurrentGenerationsAcrossTwoPartitions() throws IOException {
+		ExactIndexTarget secondEventTarget = createTarget(SECOND_EVENT_PHYSICAL);
+		ExactIndexTarget secondMentionTarget = createTarget(SECOND_MENTION_PHYSICAL);
+		ExactIndexTarget shadowEventTarget = createTarget(SHADOW_EVENT_PHYSICAL);
+		ExactIndexTarget shadowMentionTarget = createTarget(SHADOW_MENTION_PHYSICAL);
+
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.EVENT,
+				shadowEventTarget,
+				List.of(event(
+						EVENT_ID,
+						"SHADOW EVENT",
+						"shadow-event-archive",
+						3))));
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.EVENT,
+				eventTarget,
+				List.of(event())));
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.EVENT,
+				secondEventTarget,
+				List.of(event(
+						EVENT_ID + 1,
+						"SECOND ACTIVE EVENT",
+						"second-event-archive",
+						2))));
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.MENTION,
+				mentionTarget,
+				List.of(mention(
+						"rm-active-first",
+						"sd-active-first",
+						"https://example.test/active-first",
+						"2026-07-21T14:40:00Z",
+						1.0,
+						1))));
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.MENTION,
+				secondMentionTarget,
+				List.of(mention(
+						"rm-active-second",
+						"sd-active-second",
+						"https://example.test/active-second",
+						"2026-07-28T14:40:00Z",
+						2.0,
+						2))));
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.MENTION,
+				shadowMentionTarget,
+				List.of(mention(
+						"rm-shadow",
+						"sd-shadow",
+						"https://example.test/shadow",
+						"2026-07-29T14:40:00Z",
+						3.0,
+						3))));
+		indexWriter.refresh(GdeltIndexKind.EVENT, eventTarget);
+		indexWriter.refresh(GdeltIndexKind.EVENT, secondEventTarget);
+		indexWriter.refresh(GdeltIndexKind.EVENT, shadowEventTarget);
+		indexWriter.refresh(GdeltIndexKind.MENTION, mentionTarget);
+		indexWriter.refresh(GdeltIndexKind.MENTION, secondMentionTarget);
+		indexWriter.refresh(GdeltIndexKind.MENTION, shadowMentionTarget);
+		addStableAliases(SECOND_EVENT_PHYSICAL, SECOND_MENTION_PHYSICAL);
+
+		var details = eventDetailsQuery.findById(EVENT_ID).orElseThrow();
+
+		assertThat(stableAliasIndices(GdeltIndexKind.EVENT))
+				.containsExactly(EVENT_PHYSICAL, SECOND_EVENT_PHYSICAL);
+		assertThat(stableAliasIndices(GdeltIndexKind.MENTION))
+				.containsExactly(MENTION_PHYSICAL, SECOND_MENTION_PHYSICAL);
+		assertThat(details.actors().actor1().name()).isEqualTo("UNITED STATES");
+		assertThat(details.sources())
+				.extracting(EventDetails.SourceDocument::identifier)
+				.containsExactly(
+						"https://example.test/active-second",
+						"https://example.test/active-first")
+				.doesNotContain("https://example.test/shadow");
+	}
+
+	@Test
+	@DisplayName("Возвращает безопасную ошибку, если один Event виден в двух разделах")
+	void rejectsEventVisibleInTwoPartitions() throws IOException {
+		ExactIndexTarget secondEventTarget = createTarget(SECOND_EVENT_PHYSICAL);
+		createTarget(SECOND_MENTION_PHYSICAL);
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.EVENT,
+				secondEventTarget,
+				List.of(event(
+						EVENT_ID,
+						"DUPLICATE EVENT",
+						"duplicate-event-archive",
+						2))));
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.EVENT,
+				eventTarget,
+				List.of(event())));
+		indexWriter.refresh(GdeltIndexKind.EVENT, eventTarget);
+		indexWriter.refresh(GdeltIndexKind.EVENT, secondEventTarget);
+		addStableAliases(SECOND_EVENT_PHYSICAL, SECOND_MENTION_PHYSICAL);
+
+		assertThatThrownBy(() -> eventDetailsQuery.findById(EVENT_ID))
+				.isInstanceOf(SearchAccessException.class)
+				.hasMessage("Сервис поиска временно недоступен");
+	}
+
+	@Test
 	@DisplayName("Отсутствующий Event index возвращает not found")
 	void returnsNotFoundWhenEventIndexIsAbsent() throws IOException {
 		client.indices().delete(request -> request.index(EVENT_PHYSICAL));
@@ -211,6 +310,11 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 		}
 	}
 
+	private ExactIndexTarget createTarget(String indexName) throws IOException {
+		client.indices().create(request -> request.index(indexName));
+		return target(indexName);
+	}
+
 	private ExactIndexTarget target(String indexName) throws IOException {
 		var settings = client.indices()
 				.get(request -> request.index(indexName))
@@ -220,23 +324,70 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 		return new ExactIndexTarget(indexName, indexSettings.uuid());
 	}
 
-	private void removeCompatibilityAlias(String indexName, String aliasName) throws IOException {
-		if (client.indices().existsAlias(request -> request
-				.index(indexName)
-				.name(aliasName)).value()) {
-			client.indices().deleteAlias(request -> request
-					.index(indexName)
-					.name(aliasName));
+	private void addStableAliases(String eventIndexName, String mentionIndexName)
+			throws IOException {
+		client.indices().updateAliases(request -> request
+				.actions(action -> action.add(add -> add
+						.index(eventIndexName)
+						.alias(GdeltIndexKind.EVENT.readAlias())))
+				.actions(action -> action.add(add -> add
+						.index(mentionIndexName)
+						.alias(GdeltIndexKind.MENTION.readAlias()))));
+	}
+
+	private void removeStableAliasMemberships() throws IOException {
+		for (GdeltIndexKind kind : GdeltIndexKind.values()) {
+			for (String indexName : stableAliasIndices(kind)) {
+				client.indices().deleteAlias(request -> request
+						.index(indexName)
+						.name(kind.readAlias()));
+			}
 		}
 	}
 
+	private List<String> stableAliasIndices(GdeltIndexKind kind) throws IOException {
+		try {
+			var response = client.indices().getAlias(request -> request
+					.name(kind.readAlias())
+					.allowNoIndices(true)
+					.ignoreUnavailable(true));
+			return response.aliases().entrySet().stream()
+					.filter(entry -> entry.getValue().aliases().containsKey(kind.readAlias()))
+					.map(java.util.Map.Entry::getKey)
+					.sorted()
+					.toList();
+		}
+		catch (ElasticsearchException exception) {
+			if (exception.status() == 404) {
+				return List.of();
+			}
+			throw exception;
+		}
+	}
+
+	private void deleteTestIndices() throws IOException {
+		client.indices().delete(request -> request
+				.index(TEST_INDEX_NAMES)
+				.allowNoIndices(true)
+				.ignoreUnavailable(true));
+	}
+
 	private static IndexedEventDocument event() {
+		return event(EVENT_ID, "UNITED STATES", EVENT_ARCHIVE, 1);
+	}
+
+	private static IndexedEventDocument event(
+			long eventId,
+			String actor1Name,
+			String sourceArchiveKey,
+			long sourceLineNumber
+	) {
 		return new IndexedEventDocument(
-				EVENT_ID,
+				eventId,
 				LocalDate.of(2026, 7, 21),
 				UPDATE_TIME,
 				"USA",
-				"UNITED STATES",
+				actor1Name,
 				"US",
 				"",
 				"",
@@ -276,8 +427,8 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 						new IndexedGeoPoint(55.7558, 37.6173)),
 				"https://example.test/event",
 				UPDATE_TIME,
-				EVENT_ARCHIVE,
-				1,
+				sourceArchiveKey,
+				sourceLineNumber,
 				"e".repeat(64));
 	}
 

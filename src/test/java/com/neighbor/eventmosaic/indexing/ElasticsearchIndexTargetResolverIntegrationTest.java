@@ -36,9 +36,24 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 class ElasticsearchIndexTargetResolverIntegrationTest {
 
 	private static final Instant SOURCE_TIME = Instant.parse("2026-07-30T10:15:00Z");
+	private static final Instant EARLIER_SOURCE_TIME =
+			Instant.parse("2026-07-20T10:15:00Z");
 	private static final String PARTITION_KEY = "p20260727";
+	private static final String EARLIER_PARTITION_KEY = "p20260720";
 	private static final String EVENT_INDEX = "gdelt-events-v1-p20260727-g0001";
 	private static final String MENTION_INDEX = "gdelt-mentions-v1-p20260727-g0001";
+	private static final String EARLIER_EVENT_INDEX =
+			"gdelt-events-v1-p20260720-g0001";
+	private static final String EARLIER_MENTION_INDEX =
+			"gdelt-mentions-v1-p20260720-g0001";
+	private static final String NEXT_EVENT_INDEX =
+			"gdelt-events-v1-p20260727-g0002";
+	private static final String NEXT_MENTION_INDEX =
+			"gdelt-mentions-v1-p20260727-g0002";
+	private static final String EARLIER_NEXT_EVENT_INDEX =
+			"gdelt-events-v1-p20260720-g0002";
+	private static final String EARLIER_NEXT_MENTION_INDEX =
+			"gdelt-mentions-v1-p20260720-g0002";
 	private static final String LEGACY_EVENT_INDEX = "gdelt-events-v1";
 	private static final String LEGACY_MENTION_INDEX = "gdelt-mentions-v1";
 	private static final Duration LEASE = Duration.ofMinutes(15);
@@ -70,6 +85,12 @@ class ElasticsearchIndexTargetResolverIntegrationTest {
 				.index(
 						EVENT_INDEX,
 						MENTION_INDEX,
+						EARLIER_EVENT_INDEX,
+						EARLIER_MENTION_INDEX,
+						NEXT_EVENT_INDEX,
+						NEXT_MENTION_INDEX,
+						EARLIER_NEXT_EVENT_INDEX,
+						EARLIER_NEXT_MENTION_INDEX,
 						LEGACY_EVENT_INDEX,
 						LEGACY_MENTION_INDEX)
 				.ignoreUnavailable(true)
@@ -124,6 +145,56 @@ class ElasticsearchIndexTargetResolverIntegrationTest {
 		assertThat(replay.status()).isEqualTo(IndexTargetResolutionStatus.READY);
 		assertThat(replay.targets()).isEqualTo(first.targets());
 		assertThat(lifecycleLedger.findGenerations(PARTITION_KEY)).hasSize(1);
+	}
+
+	@Test
+	@DisplayName("Две недельные partition сохраняют по одному текущему поколению при повторе")
+	void keepsOneCurrentGenerationPerPartitionOnReplay() throws IOException {
+		var current = targetResolver.resolve(SOURCE_TIME);
+		var earlier = targetResolver.resolve(EARLIER_SOURCE_TIME);
+
+		assertThat(current.status()).isEqualTo(IndexTargetResolutionStatus.READY);
+		assertThat(earlier.status()).isEqualTo(IndexTargetResolutionStatus.READY);
+		assertThat(current.targets().event().indexName()).isEqualTo(EVENT_INDEX);
+		assertThat(current.targets().mention().indexName()).isEqualTo(MENTION_INDEX);
+		assertThat(earlier.targets().event().indexName()).isEqualTo(EARLIER_EVENT_INDEX);
+		assertThat(earlier.targets().mention().indexName()).isEqualTo(EARLIER_MENTION_INDEX);
+
+		IndexAliasMembership membership = elasticsearch.readStableAliases();
+		assertThat(membership.eventIndices())
+				.filteredOn(index -> index.contains("-" + PARTITION_KEY + "-"))
+				.containsExactly(EVENT_INDEX);
+		assertThat(membership.mentionIndices())
+				.filteredOn(index -> index.contains("-" + PARTITION_KEY + "-"))
+				.containsExactly(MENTION_INDEX);
+		assertThat(membership.eventIndices())
+				.filteredOn(index -> index.contains("-" + EARLIER_PARTITION_KEY + "-"))
+				.containsExactly(EARLIER_EVENT_INDEX);
+		assertThat(membership.mentionIndices())
+				.filteredOn(index -> index.contains("-" + EARLIER_PARTITION_KEY + "-"))
+				.containsExactly(EARLIER_MENTION_INDEX);
+
+		var currentReplay = targetResolver.resolve(SOURCE_TIME);
+		var earlierReplay = targetResolver.resolve(EARLIER_SOURCE_TIME);
+
+		assertThat(currentReplay.targets()).isEqualTo(current.targets());
+		assertThat(earlierReplay.targets()).isEqualTo(earlier.targets());
+		assertThat(lifecycleLedger.findGenerations(PARTITION_KEY))
+				.singleElement()
+				.extracting(IndexGeneration::status)
+				.isEqualTo(IndexGenerationStatus.ACTIVE);
+		assertThat(lifecycleLedger.findGenerations(EARLIER_PARTITION_KEY))
+				.singleElement()
+				.extracting(IndexGeneration::status)
+				.isEqualTo(IndexGenerationStatus.ACTIVE);
+		assertThat(client.indices().exists(request -> request.index(NEXT_EVENT_INDEX)).value())
+				.isFalse();
+		assertThat(client.indices().exists(request -> request.index(NEXT_MENTION_INDEX)).value())
+				.isFalse();
+		assertThat(client.indices().exists(request -> request
+				.index(EARLIER_NEXT_EVENT_INDEX)).value()).isFalse();
+		assertThat(client.indices().exists(request -> request
+				.index(EARLIER_NEXT_MENTION_INDEX)).value()).isFalse();
 	}
 
 	@Test

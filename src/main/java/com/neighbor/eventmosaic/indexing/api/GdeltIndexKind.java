@@ -8,29 +8,41 @@ public enum GdeltIndexKind {
 	/**
 	 * Событие GDELT.
 	 */
-	EVENT("gdelt-events-v1", "globalEventId"),
+	EVENT("gdelt-events-v1", "gdelt-events-read", "globalEventId"),
 
 	/**
 	 * Упоминание события GDELT.
 	 */
-	MENTION("gdelt-mentions-v1", "rawMentionId");
+	MENTION("gdelt-mentions-v1", "gdelt-mentions-read", "rawMentionId");
 
-	/** Фиксированное имя физического индекса. */
+	/** Базовое schema-v1 имя для physical generations и legacy fixed index. */
 	private final String indexName;
+	private final String readAlias;
 	private final String identityField;
 
-	GdeltIndexKind(String indexName, String identityField) {
+	GdeltIndexKind(String indexName, String readAlias, String identityField) {
 		this.indexName = indexName;
+		this.readAlias = readAlias;
 		this.identityField = identityField;
 	}
 
 	/**
-	 * Возвращает фиксированное имя версионированного индекса.
+	 * Возвращает базовое schema-v1 имя для проверки physical generation.
 	 *
-	 * @return имя индекса Elasticsearch
+	 * @return префикс physical generation Elasticsearch
 	 */
 	public String indexName() {
 		return indexName;
+	}
+
+	/**
+	 * Возвращает стабильное имя, через которое поиск читает текущие поколения
+	 * всех временных разделов этого вида документов.
+	 *
+	 * @return имя read alias Elasticsearch
+	 */
+	public String readAlias() {
+		return readAlias;
 	}
 
 	/**
