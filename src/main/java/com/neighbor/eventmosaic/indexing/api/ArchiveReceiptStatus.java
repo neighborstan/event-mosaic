@@ -1,18 +1,28 @@
 package com.neighbor.eventmosaic.indexing.api;
 
 /**
- * Результат проверки числа документов точного исходного архива.
+ * Результат проверки count и identity digest точного исходного архива.
  */
 public enum ArchiveReceiptStatus {
 
 	/**
-	 * Фактическое число совпадает с ожидаемым.
+	 * Count и digest совпадают.
 	 */
 	MATCHED,
 
 	/**
-	 * Индекс существует, но число документов отличается.
+	 * Фактических документов меньше ожидаемого.
 	 */
-	MISMATCHED
+	SHORTAGE,
+
+	/**
+	 * Фактических документов больше ожидаемого.
+	 */
+	SURPLUS,
+
+	/**
+	 * Count совпадает, но состав identities отличается.
+	 */
+	IDENTITY_MISMATCH
 
 }

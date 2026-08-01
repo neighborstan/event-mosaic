@@ -2,7 +2,9 @@ package com.neighbor.eventmosaic.ingestion;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
+import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
+import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
@@ -29,6 +31,7 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunState;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
+import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgress;
@@ -68,6 +71,7 @@ public class GdeltPipelineService {
 	private final GdeltIndexWriter indexWriter;
 	private final IndexTargetResolver indexTargetResolver;
 	private final GdeltIngestionProperties properties;
+	private final BackendDataProperties backendDataProperties;
 
 	/**
 	 * Создает сквозной orchestration service поверх module API boundaries.
@@ -79,6 +83,7 @@ public class GdeltPipelineService {
 	 * @param indexWriter проверка Elasticsearch receipts
 	 * @param indexTargetResolver lifecycle exact ACTIVE generation
 	 * @param properties runtime lease policy
+	 * @param backendDataProperties bounded backend-data verification policy
 	 */
 	public GdeltPipelineService(
 			IngestionRunService ingestionRunService,
@@ -87,7 +92,8 @@ public class GdeltPipelineService {
 			ProcessingFingerprintFactory fingerprintFactory,
 			GdeltIndexWriter indexWriter,
 			IndexTargetResolver indexTargetResolver,
-			GdeltIngestionProperties properties
+			GdeltIngestionProperties properties,
+			BackendDataProperties backendDataProperties
 	) {
 		this.ingestionRunService = ingestionRunService;
 		this.processingLedger = processingLedger;
@@ -96,6 +102,7 @@ public class GdeltPipelineService {
 		this.indexWriter = indexWriter;
 		this.indexTargetResolver = indexTargetResolver;
 		this.properties = properties;
+		this.backendDataProperties = backendDataProperties;
 	}
 
 	/**
@@ -213,18 +220,33 @@ public class GdeltPipelineService {
 			ActiveIndexTargets indexTargets,
 			ArchiveProcessingState processingState
 	) {
+		var persistedReceipt = processingState.receipt();
 		var query = new ArchiveReceiptQuery(
 				toIndexKind(kind),
 				indexTargets.target(toIndexKind(kind)),
 				archiveState.archive().idempotencyKey(),
 				processingState.fingerprint().processingFingerprint(),
-				processingState.progress().receiptDocuments());
+				persistedReceipt.expectedDocumentCount(),
+				new ArchiveIdentityDigest(persistedReceipt.expectedIdentityDigest()),
+				backendDataProperties.receiptPageSize());
 		var verification = indexWriter.verifyReceipt(query);
+		ArchiveProcessingTargetBinding currentTargetBinding = toTargetBinding(
+				indexTargets,
+				toIndexKind(kind));
 		if (verification.matched()) {
-			return ReceiptDecision.MATCHED;
+			AttemptTransitionResult transition = processingLedger.recordReceiptMatch(
+					archiveState.archive().idempotencyKey(),
+					processingState.fingerprint().processingFingerprint(),
+					processingState.attempt().count(),
+					processingState.stateVersion(),
+					processingState.targetBinding(),
+					currentTargetBinding,
+					verification);
+			return transition == AttemptTransitionResult.APPLIED
+					? ReceiptDecision.MATCHED
+					: ReceiptDecision.OWNERSHIP_LOST;
 		}
-		boolean surplus =
-				verification.actualDocumentCount() > verification.expectedDocumentCount();
+		boolean surplus = verification.status() == ArchiveReceiptStatus.SURPLUS;
 		ArchiveProcessingErrorCode receiptCode = surplus
 				? ArchiveProcessingErrorCode.INDEX_RECEIPT_SURPLUS
 				: ArchiveProcessingErrorCode.INDEX_RECEIPT_MISMATCH;
@@ -232,7 +254,10 @@ public class GdeltPipelineService {
 				archiveState.archive().idempotencyKey(),
 				processingState.fingerprint().processingFingerprint(),
 				processingState.attempt().count(),
+				processingState.stateVersion(),
 				processingState.targetBinding(),
+				currentTargetBinding,
+				verification,
 				new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 						receiptCode.code(),
 						!surplus));
@@ -258,7 +283,8 @@ public class GdeltPipelineService {
 				archiveState.archive().idempotencyKey(),
 				processingFingerprint,
 				indexTargets,
-				archiveState.stagedArchive().csvPath());
+				archiveState.stagedArchive().csvPath(),
+				backendDataProperties.receiptPageSize());
 		ArchiveProcessingResult result;
 		try {
 			result = archiveProcessor.process(
@@ -303,7 +329,8 @@ public class GdeltPipelineService {
 	) {
 		AttemptTransitionResult transition = processingLedger.markIndexed(
 				attempt,
-				toLedgerProgress(result.progress()));
+				toLedgerProgress(result.progress()),
+				result.receipt());
 		logOutcome(
 				archiveState,
 				kind,
@@ -336,7 +363,8 @@ public class GdeltPipelineService {
 					new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 							failure.code().code(),
 							failure.retryable()),
-					toLedgerProgress(result.progress()));
+					toLedgerProgress(result.progress()),
+					result.receipt());
 		} catch (RuntimeException persistenceFailure) {
 			if (diagnosticFailure != null) {
 				persistenceFailure.addSuppressed(diagnosticFailure);
@@ -382,7 +410,8 @@ public class GdeltPipelineService {
 					new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 							result.failure().code().code(),
 							true),
-					toLedgerProgress(result.progress()));
+					toLedgerProgress(result.progress()),
+					result.receipt());
 			outcome = transition == AttemptTransitionResult.APPLIED
 					? OUTCOME_FAILED
 					: OUTCOME_OWNERSHIP_LOST;
@@ -422,7 +451,8 @@ public class GdeltPipelineService {
 					new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 							IngestionErrorCode.INTERNAL_ERROR.code(),
 							false),
-					toLedgerProgress(progress));
+					toLedgerProgress(progress),
+					null);
 		} catch (RuntimeException persistenceFailure) {
 			exception.addSuppressed(persistenceFailure);
 		}

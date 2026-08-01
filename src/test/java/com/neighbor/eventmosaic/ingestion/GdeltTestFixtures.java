@@ -5,6 +5,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredArchive;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredUpdate;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
+import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import java.net.URI;
 import java.nio.file.Path;
@@ -78,5 +79,23 @@ public final class GdeltTestFixtures {
 						null),
 				false
 		);
+	}
+
+	public static BackendDataProperties backendDataProperties() {
+		return new BackendDataProperties(
+				Duration.ofDays(7),
+				new BackendDataProperties.Retry(
+						Duration.ofMinutes(1),
+						2.0,
+						Duration.ofMinutes(15),
+						0.1,
+						3),
+				Duration.ofMinutes(12),
+				500,
+				new BackendDataProperties.DiskPressure(1, 1),
+				new BackendDataProperties.Cleanup(
+						Duration.ofHours(24),
+						Duration.ofDays(7),
+						false));
 	}
 }

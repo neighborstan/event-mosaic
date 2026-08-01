@@ -9,6 +9,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingTargetBinding;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
+import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -99,14 +100,21 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 	@Transactional
 	public AttemptTransitionResult markIndexed(
 			ArchiveProcessingAttempt attempt,
-			ArchiveProcessingProgress progress
+			ArchiveProcessingProgress progress,
+			ArchiveReceiptVerification verification
 	) {
 		Objects.requireNonNull(attempt, ATTEMPT_REQUIRED);
 		Objects.requireNonNull(progress, PROGRESS_REQUIRED)
 				.requireIndexedCompletion();
+		Objects.requireNonNull(verification, "verification must not be null");
+		requireVerificationMatchesAttempt(verification, attempt.targetBinding(), progress);
+		if (!verification.matched()) {
+			throw new IllegalArgumentException("INDEXED receipt verification must match");
+		}
 		return repository.markIndexed(
 				attempt,
 				progress,
+				verification,
 				clock.instant()
 		);
 	}
@@ -116,17 +124,64 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 	public AttemptTransitionResult markFailed(
 			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingFailure failure,
-			ArchiveProcessingProgress progress
+			ArchiveProcessingProgress progress,
+			ArchiveReceiptVerification verification
 	) {
 		Objects.requireNonNull(attempt, ATTEMPT_REQUIRED);
 		Objects.requireNonNull(failure, FAILURE_REQUIRED);
 		Objects.requireNonNull(progress, PROGRESS_REQUIRED);
+		if (verification != null) {
+			requireVerificationMatchesAttempt(
+					verification,
+					attempt.targetBinding(),
+					progress);
+			requireReceiptFailureMatchesVerification(verification, failure);
+		}
+		else if (isReceiptFailure(failure)) {
+			throw new IllegalArgumentException(
+					"Receipt failure must contain verification evidence");
+		}
 		return repository.markFailed(
 				attempt,
 				failure,
 				progress,
+				verification,
 				clock.instant()
 		);
+	}
+
+	@Override
+	@Transactional
+	public AttemptTransitionResult recordReceiptMatch(
+			String archiveIdempotencyKey,
+			String expectedProcessingFingerprint,
+			int expectedAttemptCount,
+			long expectedStateVersion,
+			ArchiveProcessingTargetBinding expectedStoredTargetBinding,
+			ArchiveProcessingTargetBinding verifiedCurrentTargetBinding,
+			ArchiveReceiptVerification verification
+	) {
+		requireReconciliationContext(
+				archiveIdempotencyKey,
+				expectedProcessingFingerprint,
+				expectedAttemptCount,
+				expectedStateVersion,
+				expectedStoredTargetBinding,
+				verifiedCurrentTargetBinding,
+				verification);
+		if (!verification.matched()) {
+			throw new IllegalArgumentException(
+					"Receipt match transition requires matched verification");
+		}
+		return repository.recordReceiptMatch(
+				archiveIdempotencyKey,
+				expectedProcessingFingerprint,
+				expectedAttemptCount,
+				expectedStateVersion,
+				expectedStoredTargetBinding,
+				verifiedCurrentTargetBinding,
+				verification,
+				clock.instant());
 	}
 
 	@Override
@@ -135,34 +190,67 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 			String archiveIdempotencyKey,
 			String expectedProcessingFingerprint,
 			int expectedAttemptCount,
-			ArchiveProcessingTargetBinding expectedTargetBinding,
+			long expectedStateVersion,
+			ArchiveProcessingTargetBinding expectedStoredTargetBinding,
+			ArchiveProcessingTargetBinding verifiedCurrentTargetBinding,
+			ArchiveReceiptVerification verification,
 			ArchiveProcessingFailure failure
+	) {
+		requireReconciliationContext(
+				archiveIdempotencyKey,
+				expectedProcessingFingerprint,
+				expectedAttemptCount,
+				expectedStateVersion,
+				expectedStoredTargetBinding,
+				verifiedCurrentTargetBinding,
+				verification);
+		Objects.requireNonNull(failure, FAILURE_REQUIRED);
+		requireReceiptFailureMatchesVerification(verification, failure);
+		return repository.recordReceiptMismatch(
+				archiveIdempotencyKey,
+				expectedProcessingFingerprint,
+				expectedAttemptCount,
+				expectedStateVersion,
+				expectedStoredTargetBinding,
+				verifiedCurrentTargetBinding,
+				verification,
+				failure,
+				clock.instant()
+		);
+	}
+
+	private static void requireReconciliationContext(
+			String archiveIdempotencyKey,
+			String expectedProcessingFingerprint,
+			int expectedAttemptCount,
+			long expectedStateVersion,
+			ArchiveProcessingTargetBinding expectedStoredTargetBinding,
+			ArchiveProcessingTargetBinding verifiedCurrentTargetBinding,
+			ArchiveReceiptVerification verification
 	) {
 		requireArchiveKey(archiveIdempotencyKey);
 		requireProcessingFingerprint(expectedProcessingFingerprint);
 		if (expectedAttemptCount <= 0) {
 			throw new IllegalArgumentException("expectedAttemptCount must be positive");
 		}
-		Objects.requireNonNull(
-				expectedTargetBinding,
-				"expectedTargetBinding must not be null");
-		Objects.requireNonNull(failure, FAILURE_REQUIRED);
-		boolean retryableShortage = failure.retryable()
-				&& RECEIPT_MISMATCH_CODE.equals(failure.errorCode());
-		boolean nonRetryableSurplus = !failure.retryable()
-				&& RECEIPT_SURPLUS_CODE.equals(failure.errorCode());
-		if (!retryableShortage && !nonRetryableSurplus) {
-			throw new IllegalArgumentException(
-					"Receipt failure must be retryable mismatch or non-retryable surplus");
+		if (expectedStateVersion < 0) {
+			throw new IllegalArgumentException("expectedStateVersion must not be negative");
 		}
-		return repository.recordReceiptMismatch(
-				archiveIdempotencyKey,
-				expectedProcessingFingerprint,
-				expectedAttemptCount,
-				expectedTargetBinding,
-				failure,
-				clock.instant()
-		);
+		Objects.requireNonNull(
+				expectedStoredTargetBinding,
+				"expectedStoredTargetBinding must not be null");
+		Objects.requireNonNull(
+				verifiedCurrentTargetBinding,
+				"verifiedCurrentTargetBinding must not be null");
+		Objects.requireNonNull(verification, "verification must not be null");
+		if (expectedStoredTargetBinding.indexKind()
+				!= verifiedCurrentTargetBinding.indexKind()
+				|| !expectedStoredTargetBinding.partitionKey().equals(
+						verifiedCurrentTargetBinding.partitionKey())) {
+			throw new IllegalArgumentException(
+					"Stored and current receipt targets must belong to one partition kind");
+		}
+		requireVerificationTarget(verification, verifiedCurrentTargetBinding);
 	}
 
 	@Override
@@ -196,5 +284,51 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 			throw new IllegalArgumentException(
 					"expectedProcessingFingerprint must be a lowercase SHA-256");
 		}
+	}
+
+	private static void requireVerificationMatchesAttempt(
+			ArchiveReceiptVerification verification,
+			ArchiveProcessingTargetBinding targetBinding,
+			ArchiveProcessingProgress progress
+	) {
+		requireVerificationTarget(verification, targetBinding);
+		if (verification.expectedDocumentCount() != progress.succeededOperations()
+				|| verification.actualDocumentCount() != progress.receiptDocuments()) {
+			throw new IllegalArgumentException(
+					"Receipt verification counts must match processing progress");
+		}
+	}
+
+	private static void requireVerificationTarget(
+			ArchiveReceiptVerification verification,
+			ArchiveProcessingTargetBinding targetBinding
+	) {
+		if (verification.kind() != targetBinding.indexKind()) {
+			throw new IllegalArgumentException(
+					"Receipt verification kind must match captured target");
+		}
+	}
+
+	private static void requireReceiptFailureMatchesVerification(
+			ArchiveReceiptVerification verification,
+			ArchiveProcessingFailure failure
+	) {
+		if (verification.matched()) {
+			throw new IllegalArgumentException("Receipt failure requires mismatch evidence");
+		}
+		boolean surplus = verification.actualDocumentCount()
+				> verification.expectedDocumentCount();
+		String expectedCode = surplus ? RECEIPT_SURPLUS_CODE : RECEIPT_MISMATCH_CODE;
+		boolean expectedRetryable = !surplus;
+		if (!expectedCode.equals(failure.errorCode())
+				|| expectedRetryable != failure.retryable()) {
+			throw new IllegalArgumentException(
+					"Receipt failure must match verification outcome");
+		}
+	}
+
+	private static boolean isReceiptFailure(ArchiveProcessingFailure failure) {
+		return RECEIPT_MISMATCH_CODE.equals(failure.errorCode())
+				|| RECEIPT_SURPLUS_CODE.equals(failure.errorCode());
 	}
 }

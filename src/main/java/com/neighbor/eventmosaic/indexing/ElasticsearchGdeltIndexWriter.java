@@ -5,21 +5,26 @@ import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.ShardStatistics;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
-import co.elastic.clients.elasticsearch.core.CountResponse;
+import co.elastic.clients.elasticsearch.core.MgetRequest;
+import co.elastic.clients.elasticsearch.core.MgetResponse;
+import co.elastic.clients.elasticsearch.core.bulk.BulkResponseItem;
+import co.elastic.clients.elasticsearch.core.mget.MultiGetResponseItem;
 import co.elastic.clients.elasticsearch.indices.IndexSettingBlocks;
 import co.elastic.clients.elasticsearch.indices.IndexSettings;
 import co.elastic.clients.elasticsearch.indices.IndexState;
 import co.elastic.clients.elasticsearch.indices.RefreshResponse;
 import co.elastic.clients.util.BinaryData;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
-import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
+import com.neighbor.eventmosaic.indexing.api.BulkIndexOutcome;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
+import com.neighbor.eventmosaic.indexing.api.EventIdentityConflictException;
 import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexedDocument;
+import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
@@ -41,10 +46,14 @@ import org.springframework.stereotype.Component;
 @Component
 final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
-	private static final String SOURCE_ARCHIVE_KEY_FIELD = "sourceArchiveKey";
-	private static final String PROCESSING_FINGERPRINT_FIELD = "processingFingerprint";
 	private static final String INDEX_NOT_FOUND_ERROR_TYPE = "index_not_found_exception";
 	private static final String CLUSTER_BLOCK_ERROR_TYPE = "cluster_block_exception";
+	private static final String VERSION_CONFLICT_ERROR_TYPE =
+			"version_conflict_engine_exception";
+	private static final List<String> EVENT_PROVENANCE_FIELDS = List.of(
+			"sourceArchiveKey",
+			"sourceLineNumber",
+			"processingFingerprint");
 	private static final long BULK_ACTION_FIXED_BYTES = 64;
 	private static final long JSON_ESCAPE_EXPANSION_FACTOR = 6;
 
@@ -52,6 +61,8 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 	private final ElasticsearchIndexTemplateInstaller templateInstaller;
 	private final IndexingProperties properties;
 	private final IndexingMetrics metrics;
+	private final ElasticsearchArchiveReceiptVerifier receiptVerifier;
+	private final ElasticsearchEventIdentityGuard eventIdentityGuard;
 	private final Object preparationMonitor = new Object();
 
 	private volatile boolean templatesPrepared;
@@ -67,6 +78,8 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 				templateInstaller, "templateInstaller must not be null");
 		this.properties = Objects.requireNonNull(properties, "properties must not be null");
 		this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
+		this.receiptVerifier = new ElasticsearchArchiveReceiptVerifier(client);
+		this.eventIdentityGuard = new ElasticsearchEventIdentityGuard(client);
 	}
 
 	@Override
@@ -146,9 +159,9 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 		try {
 			verifyExactTarget(command.kind(), command.target());
-			BulkRequest request = request(command, serializedDocuments);
-			BulkResponse response = client.bulk(request);
-			BulkIndexResult result = BulkResponseAnalyzer.analyze(command, response.items());
+			BulkIndexResult result = command.kind() == GdeltIndexKind.EVENT
+					? writeEvents(command, serializedDocuments)
+					: writeDocuments(command, serializedDocuments);
 			metrics.completed(result);
 			return result;
 		}
@@ -164,12 +177,240 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			throw classifyTargetAware(exception);
 		}
 		catch (IndexingAccessException
+				| EventIdentityConflictException
 				| IndexingInterruptedException
 				| IndexingProtocolException
 				| IndexTargetUnavailableException exception) {
 			metrics.failed(command.kind(), command.documents().size(), exception.retryable());
 			throw exception;
 		}
+	}
+
+	private BulkIndexResult writeDocuments(
+			BulkIndexCommand<? extends GdeltIndexedDocument> command,
+			List<BinaryData> serializedDocuments
+	) throws IOException {
+		BulkRequest request = indexRequest(command, serializedDocuments);
+		BulkResponse response = client.bulk(request);
+		return BulkResponseAnalyzer.analyze(command, response.items());
+	}
+
+	private BulkIndexResult writeEvents(
+			BulkIndexCommand<? extends GdeltIndexedDocument> command,
+			List<BinaryData> serializedDocuments
+	) throws IOException {
+		List<IndexedEventDocument> events = command.documents().stream()
+				.map(IndexedEventDocument.class::cast)
+				.toList();
+		EventIdentityGuardPlan plan = guardEvents(command.target(), events);
+		if (plan.documentsToCreate().isEmpty()) {
+			return successfulEventResult(command.documents().size());
+		}
+
+		List<BinaryData> createSources = sourcesForPlan(
+				events,
+				serializedDocuments,
+				plan.documentsToCreate());
+		BulkResponse response = client.bulk(eventCreateRequest(
+				command.target(),
+				plan.documentsToCreate(),
+				createSources));
+		return analyzeEventCreates(command, plan, response.items());
+	}
+
+	private EventIdentityGuardPlan guardEvents(
+			ExactIndexTarget target,
+			List<IndexedEventDocument> events
+	) {
+		long startedAt = System.nanoTime();
+		try {
+			EventIdentityGuardPlan plan = eventIdentityGuard.plan(target, events);
+			metrics.eventIdentityGuard(
+					System.nanoTime() - startedAt,
+					plan.replayCount() == 0
+							? EventIdentityGuardMetricOutcome.ABSENT
+							: EventIdentityGuardMetricOutcome.REPLAY);
+			return plan;
+		}
+		catch (EventIdentityConflictException exception) {
+			metrics.eventIdentityGuard(
+					System.nanoTime() - startedAt,
+					EventIdentityGuardMetricOutcome.CONFLICT);
+			throw exception;
+		}
+		catch (RuntimeException exception) {
+			metrics.eventIdentityGuard(
+					System.nanoTime() - startedAt,
+					EventIdentityGuardMetricOutcome.FAILURE);
+			throw exception;
+		}
+	}
+
+	private static List<BinaryData> sourcesForPlan(
+			List<IndexedEventDocument> originalDocuments,
+			List<BinaryData> originalSources,
+			List<IndexedEventDocument> documentsToCreate
+	) {
+		List<BinaryData> result = new ArrayList<>(documentsToCreate.size());
+		int searchFrom = 0;
+		for (IndexedEventDocument document : documentsToCreate) {
+			int position = originalDocuments.subList(searchFrom, originalDocuments.size())
+					.indexOf(document);
+			if (position < 0) {
+				throw new IndexingProtocolException(
+						IndexingErrorCode.INDEXING_RESPONSE_INVALID);
+			}
+			int absolutePosition = searchFrom + position;
+			result.add(originalSources.get(absolutePosition));
+			searchFrom = absolutePosition + 1;
+		}
+		return List.copyOf(result);
+	}
+
+	private BulkIndexResult analyzeEventCreates(
+			BulkIndexCommand<? extends GdeltIndexedDocument> originalCommand,
+			EventIdentityGuardPlan plan,
+			List<BulkResponseItem> responseItems
+	) throws IOException {
+		List<BulkResponseItem> items = List.copyOf(responseItems);
+		if (items.size() != plan.documentsToCreate().size()) {
+			throw new IndexingProtocolException(IndexingErrorCode.INDEXING_RESPONSE_INVALID);
+		}
+		List<IndexedEventDocument> conflicts = new ArrayList<>();
+		for (int position = 0; position < items.size(); position++) {
+			BulkResponseItem item = items.get(position);
+			validateEventCreateItem(originalCommand.target(), item);
+			if (!plan.documentsToCreate().get(position).documentId().equals(item.id())) {
+				throw new IndexingProtocolException(
+						IndexingErrorCode.INDEXING_RESPONSE_INVALID);
+			}
+			if (isCreateConflict(item)) {
+				conflicts.add(plan.documentsToCreate().get(position));
+			}
+		}
+		if (!conflicts.isEmpty()) {
+			verifyCreateConflicts(originalCommand.target(), conflicts);
+		}
+
+		long succeededCreates = 0;
+		long failedCreates = 0;
+		Long firstFailedLine = null;
+		boolean permanentFailure = false;
+		for (int position = 0; position < items.size(); position++) {
+			BulkResponseItem item = items.get(position);
+			if (isSuccessful(item) || isCreateConflict(item)) {
+				succeededCreates++;
+				continue;
+			}
+			failedCreates++;
+			if (firstFailedLine == null) {
+				firstFailedLine = plan.documentsToCreate().get(position).sourceLineNumber();
+			}
+			if (!isTransient(item.status())) {
+				permanentFailure = true;
+			}
+		}
+		long logicalSucceeded = Math.addExact(plan.replayCount(), succeededCreates);
+		BulkIndexOutcome outcome = failedCreates == 0
+				? BulkIndexOutcome.SUCCEEDED
+				: permanentFailure
+						? BulkIndexOutcome.NON_RETRYABLE_PARTIAL_FAILURE
+						: BulkIndexOutcome.RETRYABLE_PARTIAL_FAILURE;
+		return new BulkIndexResult(
+				GdeltIndexKind.EVENT,
+				originalCommand.documents().size(),
+				logicalSucceeded,
+				failedCreates,
+				firstFailedLine,
+				outcome);
+	}
+
+	private void verifyCreateConflicts(
+			ExactIndexTarget target,
+			List<IndexedEventDocument> conflicts
+	) throws IOException {
+		MgetRequest request = MgetRequest.of(builder -> builder
+				.index(target.indexName())
+				.ids(conflicts.stream().map(IndexedEventDocument::documentId).toList())
+				.realtime(true)
+				.sourceIncludes(EVENT_PROVENANCE_FIELDS));
+		MgetResponse<EventIdentityProjection> response = client.mget(
+				request,
+				EventIdentityProjection.class);
+		if (response.docs().size() != conflicts.size()) {
+			throw new IndexingProtocolException(IndexingErrorCode.INDEXING_RESPONSE_INVALID);
+		}
+		for (int position = 0; position < conflicts.size(); position++) {
+			IndexedEventDocument candidate = conflicts.get(position);
+			MultiGetResponseItem<EventIdentityProjection> item = response.docs().get(position);
+			if (item.isFailure()) {
+				if (INDEX_NOT_FOUND_ERROR_TYPE.equals(item.failure().error().type())) {
+					throw new IndexTargetUnavailableException(
+							IndexTargetUnavailableReason.MISSING);
+				}
+				throw new IndexingAccessException(IndexingErrorCode.INDEXING_UNAVAILABLE);
+			}
+			if (!item.isResult()
+					|| !item.result().found()
+					|| !target.indexName().equals(item.result().index())
+					|| !candidate.documentId().equals(item.result().id())
+					|| !sameProvenance(candidate, item.result().source())) {
+				throw new EventIdentityConflictException(candidate.sourceLineNumber());
+			}
+		}
+	}
+
+	private static boolean sameProvenance(
+			IndexedEventDocument document,
+			EventIdentityProjection projection
+	) {
+		return projection != null
+				&& projection.sourceArchiveKey() != null
+				&& projection.sourceLineNumber() != null
+				&& projection.processingFingerprint() != null
+				&& document.sourceArchiveKey().equals(projection.sourceArchiveKey())
+				&& document.sourceLineNumber() == projection.sourceLineNumber()
+				&& document.processingFingerprint().equals(
+						projection.processingFingerprint());
+	}
+
+	private static void validateEventCreateItem(
+			ExactIndexTarget target,
+			BulkResponseItem item
+	) {
+		if (!target.indexName().equals(item.index())) {
+			throw new IndexingProtocolException(IndexingErrorCode.INDEXING_RESPONSE_INVALID);
+		}
+		if (item.error() == null) {
+			return;
+		}
+		if (INDEX_NOT_FOUND_ERROR_TYPE.equals(item.error().type())) {
+			throw new IndexTargetUnavailableException(IndexTargetUnavailableReason.MISSING);
+		}
+		if (CLUSTER_BLOCK_ERROR_TYPE.equals(item.error().type())) {
+			throw new IndexTargetUnavailableException(
+					IndexTargetUnavailableReason.WRITE_BLOCKED);
+		}
+	}
+
+	private static boolean isCreateConflict(BulkResponseItem item) {
+		return item.status() == 409
+				&& item.error() != null
+				&& VERSION_CONFLICT_ERROR_TYPE.equals(item.error().type());
+	}
+
+	private static boolean isSuccessful(BulkResponseItem item) {
+		return item.error() == null && item.status() >= 200 && item.status() < 300;
+	}
+
+	private static BulkIndexResult successfulEventResult(long submitted) {
+		return new BulkIndexResult(
+				GdeltIndexKind.EVENT,
+				submitted,
+				submitted,
+				0,
+				null,
+				BulkIndexOutcome.SUCCEEDED);
 	}
 
 	@Override
@@ -198,25 +439,7 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		checkInterrupted();
 		try {
 			verifyExactTarget(query.kind(), query.target());
-			CountResponse response = client.count(request -> request
-					.index(query.target().indexName())
-					.query(root -> root.bool(bool -> bool
-							.filter(filter -> filter.term(term -> term
-									.field(SOURCE_ARCHIVE_KEY_FIELD)
-									.value(query.sourceArchiveKey())))
-							.filter(filter -> filter.term(term -> term
-									.field(PROCESSING_FINGERPRINT_FIELD)
-									.value(query.processingFingerprint()))))));
-			rejectFailedShards(response.shards());
-			long actualCount = response.count();
-			ArchiveReceiptStatus status = actualCount == query.expectedDocumentCount()
-					? ArchiveReceiptStatus.MATCHED
-					: ArchiveReceiptStatus.MISMATCHED;
-			return new ArchiveReceiptVerification(
-					query.kind(),
-					query.expectedDocumentCount(),
-					actualCount,
-					status);
+			return receiptVerifier.verify(query);
 		}
 		catch (IOException exception) {
 			throw ioFailure(exception);
@@ -253,7 +476,7 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		return serializedDocuments;
 	}
 
-	private static BulkRequest request(
+	private static BulkRequest indexRequest(
 			BulkIndexCommand<? extends GdeltIndexedDocument> command,
 			List<BinaryData> serializedDocuments
 	) {
@@ -264,6 +487,24 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			BinaryData serializedDocument = serializedDocuments.get(position);
 			builder.operations(operation -> operation.index(index -> index
 					.index(command.target().indexName())
+					.id(document.documentId())
+					.document(serializedDocument)));
+		}
+		return builder.build();
+	}
+
+	private static BulkRequest eventCreateRequest(
+			ExactIndexTarget target,
+			List<IndexedEventDocument> documents,
+			List<BinaryData> serializedDocuments
+	) {
+		BulkRequest.Builder builder = new BulkRequest.Builder()
+				.includeSourceOnError(false);
+		for (int position = 0; position < documents.size(); position++) {
+			IndexedEventDocument document = documents.get(position);
+			BinaryData serializedDocument = serializedDocuments.get(position);
+			builder.operations(operation -> operation.create(create -> create
+					.index(target.indexName())
 					.id(document.documentId())
 					.document(serializedDocument)));
 		}

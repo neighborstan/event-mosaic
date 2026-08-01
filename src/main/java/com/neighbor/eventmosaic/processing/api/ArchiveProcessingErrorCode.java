@@ -13,8 +13,9 @@ public enum ArchiveProcessingErrorCode implements ApplicationErrorCode {
 	BULK_PARTIAL_FAILURE("Elasticsearch rejected part of a processing batch"),
 	INDEXING_OPERATION_FAILURE("Elasticsearch indexing operation failed"),
 	INDEXING_INTERRUPTED("Elasticsearch indexing operation was interrupted"),
-	INDEX_RECEIPT_MISMATCH("Elasticsearch archive receipt is missing documents"),
-	INDEX_RECEIPT_SURPLUS("Elasticsearch archive receipt contains surplus documents");
+	INDEX_RECEIPT_MISMATCH("Elasticsearch archive receipt has an identity mismatch"),
+	INDEX_RECEIPT_SURPLUS("Elasticsearch archive receipt contains surplus documents"),
+	EVENT_IDENTITY_CONFLICT("Elasticsearch Event identity conflicts with stored provenance");
 
 	private final String safeMessage;
 

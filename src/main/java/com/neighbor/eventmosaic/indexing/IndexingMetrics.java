@@ -6,6 +6,7 @@ import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import org.springframework.stereotype.Component;
 
 /**
@@ -16,6 +17,8 @@ final class IndexingMetrics {
 
 	private static final String REQUESTS_METER = "event_mosaic.indexing.bulk.requests";
 	private static final String DOCUMENTS_METER = "event_mosaic.indexing.bulk.documents";
+	private static final String EVENT_IDENTITY_GUARD_METER =
+			"event_mosaic.indexing.event_identity_guard";
 	private static final String KIND_TAG = "kind";
 	private static final String OUTCOME_TAG = "outcome";
 
@@ -70,6 +73,18 @@ final class IndexingMetrics {
 				OUTCOME_TAG, tag(outcome)
 		).increment();
 		incrementDocuments(kindTag, IndexingDocumentMetricOutcome.UNKNOWN, submitted);
+	}
+
+	/** Записывает стоимость и bounded outcome Event identity guard. */
+	void eventIdentityGuard(long elapsedNanos, EventIdentityGuardMetricOutcome outcome) {
+		if (elapsedNanos < 0) {
+			throw new IllegalArgumentException("elapsedNanos must not be negative");
+		}
+		Objects.requireNonNull(outcome, "outcome must not be null");
+		meterRegistry.timer(
+				EVENT_IDENTITY_GUARD_METER,
+				OUTCOME_TAG, tag(outcome)
+		).record(elapsedNanos, TimeUnit.NANOSECONDS);
 	}
 
 	private void incrementDocuments(

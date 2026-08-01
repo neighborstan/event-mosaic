@@ -11,8 +11,8 @@ import static org.mockito.Mockito.when;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
-import co.elastic.clients.elasticsearch.core.CountRequest;
-import co.elastic.clients.elasticsearch.core.CountResponse;
+import co.elastic.clients.elasticsearch.core.OpenPointInTimeRequest;
+import co.elastic.clients.elasticsearch.core.OpenPointInTimeResponse;
 import co.elastic.clients.elasticsearch.indices.CreateIndexRequest;
 import co.elastic.clients.elasticsearch.indices.ElasticsearchIndicesClient;
 import co.elastic.clients.elasticsearch.indices.GetIndexRequest;
@@ -23,6 +23,7 @@ import co.elastic.clients.elasticsearch.indices.RefreshRequest;
 import co.elastic.clients.elasticsearch.indices.RefreshResponse;
 import co.elastic.clients.json.jackson.Jackson3JsonpMapper;
 import co.elastic.clients.util.BinaryData;
+import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
@@ -49,6 +50,8 @@ class ElasticsearchGdeltIndexWriterTest {
 			"gdelt-events-v1-p20260727-g0001",
 			"event-index-uuid");
 	private static final String PROCESSING_FINGERPRINT = "a".repeat(64);
+	private static final ArchiveIdentityDigest EMPTY_DIGEST =
+			ArchiveIdentityDigest.accumulator().finish();
 
 	private final ElasticsearchClient client = mock(ElasticsearchClient.class);
 	private final ElasticsearchIndicesClient indices = mock(ElasticsearchIndicesClient.class);
@@ -113,9 +116,9 @@ class ElasticsearchGdeltIndexWriterTest {
 		when(client.indices()).thenReturn(indices);
 		when(indices.get(any(GetIndexRequest.class)))
 				.thenReturn(targetState(TARGET.indexUuid(), false));
-		when(client.count(any(CountRequest.class)))
-				.thenReturn(CountResponse.of(response -> response
-						.count(0)
+		when(client.openPointInTime(any(OpenPointInTimeRequest.class)))
+				.thenReturn(OpenPointInTimeResponse.of(response -> response
+						.id("receipt-pit")
 						.shards(shards -> shards
 								.total(2)
 								.successful(1)
@@ -126,7 +129,9 @@ class ElasticsearchGdeltIndexWriterTest {
 				TARGET,
 				"event-archive",
 				PROCESSING_FINGERPRINT,
-				0);
+				0,
+				EMPTY_DIGEST,
+				500);
 
 		assertThatExceptionOfType(IndexingAccessException.class)
 				.isThrownBy(() -> indexWriter.verifyReceipt(query))

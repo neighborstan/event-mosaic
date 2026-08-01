@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.neighbor.eventmosaic.ingestion.error.ArchiveContentViolationException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
+import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.shared.error.NonRetryableException;
 import com.neighbor.eventmosaic.shared.error.RetryableException;
 import java.net.URI;
@@ -115,6 +116,72 @@ class IngestionContractsTest {
 		assertThatThrownBy(() -> AttemptTransitionResult.fromUpdatedRows(2))
 				.isInstanceOf(IllegalStateException.class)
 				.hasMessageContaining("unexpected number of rows");
+	}
+
+	@Test
+	@DisplayName("Processing receipt различает полное совпадение и сохраненный mismatch")
+	void processingReceiptMatchesOnlyEqualCountAndDigest() {
+		Instant verifiedAt = Instant.parse("2026-07-20T12:00:00Z");
+		ArchiveProcessingReceipt matched = new ArchiveProcessingReceipt(
+				2,
+				2,
+				ArchiveIdentityDigest.ALGORITHM,
+				"a".repeat(64),
+				"a".repeat(64),
+				1,
+				"event-index-uuid",
+				verifiedAt);
+		ArchiveProcessingReceipt countMismatch = new ArchiveProcessingReceipt(
+				2,
+				1,
+				ArchiveIdentityDigest.ALGORITHM,
+				"a".repeat(64),
+				"b".repeat(64),
+				1,
+				"event-index-uuid",
+				verifiedAt);
+		ArchiveProcessingReceipt digestMismatch = new ArchiveProcessingReceipt(
+				2,
+				2,
+				ArchiveIdentityDigest.ALGORITHM,
+				"a".repeat(64),
+				"b".repeat(64),
+				1,
+				"event-index-uuid",
+				verifiedAt);
+
+		assertThat(matched.matched()).isTrue();
+		assertThat(countMismatch.matched()).isFalse();
+		assertThat(digestMismatch.matched()).isFalse();
+	}
+
+	@Test
+	@DisplayName("Processing receipt отклоняет неизвестный algorithm и неканонический digest")
+	void processingReceiptRejectsInvalidDigestContract() {
+		Instant verifiedAt = Instant.parse("2026-07-20T12:00:00Z");
+
+		assertThatThrownBy(() -> new ArchiveProcessingReceipt(
+				1,
+				1,
+				"sha256-v0",
+				"a".repeat(64),
+				"a".repeat(64),
+				1,
+				"event-index-uuid",
+				verifiedAt))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("algorithm");
+		assertThatThrownBy(() -> new ArchiveProcessingReceipt(
+				1,
+				1,
+				ArchiveIdentityDigest.ALGORITHM,
+				"A".repeat(64),
+				"a".repeat(64),
+				1,
+				"event-index-uuid",
+				verifiedAt))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("lowercase");
 	}
 
 	@Test

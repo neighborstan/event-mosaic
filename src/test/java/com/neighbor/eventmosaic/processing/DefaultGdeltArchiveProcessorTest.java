@@ -11,16 +11,19 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltCsvProgressListener;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvRecord;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvReadSummary;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvSchemaException;
+import com.neighbor.eventmosaic.gdelt.api.GdeltEvent;
 import com.neighbor.eventmosaic.gdelt.api.GdeltEventCsvReader;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMention;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMentionCsvReader;
 import com.neighbor.eventmosaic.gdelt.api.GdeltRecordConsumer;
+import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexOutcome;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
+import com.neighbor.eventmosaic.indexing.api.EventIdentityConflictException;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexedDocument;
@@ -40,6 +43,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -73,7 +77,16 @@ class DefaultGdeltArchiveProcessorTest {
 				ProcessingTestFixtures.ACTIVE_TARGETS.mention(),
 				ProcessingTestFixtures.SOURCE_ARCHIVE_KEY,
 				"1".repeat(64),
-				2));
+				2,
+				mentionDigest(1, 2),
+				500));
+		assertThat(result.receipt())
+				.isNotNull()
+				.satisfies(receipt -> {
+					assertThat(receipt.status()).isEqualTo(ArchiveReceiptStatus.MATCHED);
+					assertThat(receipt.expectedDigest()).isEqualTo(mentionDigest(1, 2));
+					assertThat(receipt.actualDigest()).isEqualTo(mentionDigest(1, 2));
+				});
 		assertThat(writer.commands.getFirst().target())
 				.isEqualTo(ProcessingTestFixtures.ACTIVE_TARGETS.mention());
 		assertThat(writer.estimatedTargets)
@@ -160,9 +173,43 @@ class DefaultGdeltArchiveProcessorTest {
 				ProcessingTestFixtures.ACTIVE_TARGETS.mention(),
 				ProcessingTestFixtures.SOURCE_ARCHIVE_KEY,
 				"1".repeat(64),
-				0));
+				0,
+				mentionDigest(),
+				500));
 		assertThat(result.progress()).isEqualTo(
 				new ArchiveProcessingProgress(3, 0, 3, 0, 0, 0, 0, null));
+	}
+
+	@Test
+	@DisplayName("Digest включает только accepted identities в порядке source")
+	void hashesOnlyAcceptedIdentitiesInSourceOrder() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		List<GdeltMention> mentions = List.of(
+				validMentions(1).getFirst(),
+				mentionWithMissingTime(2),
+				ProcessingTestFixtures.mention(
+						700_000_003L,
+						EVENT_TIME,
+						MENTION_TIME,
+						1,
+						"identifier-2"));
+		DefaultGdeltArchiveProcessor processor = processor(writer, mentions, null);
+
+		ArchiveProcessingResult result = processor.process(
+				ProcessingTestFixtures.mentionRequest(),
+				ArchiveProcessingProgressListener.continuing());
+
+		assertThat(result.outcome()).isEqualTo(ArchiveProcessingOutcome.COMPLETED);
+		assertThat(writer.receiptQueries).containsExactly(new ArchiveReceiptQuery(
+				GdeltIndexKind.MENTION,
+				ProcessingTestFixtures.ACTIVE_TARGETS.mention(),
+				ProcessingTestFixtures.SOURCE_ARCHIVE_KEY,
+				"1".repeat(64),
+				2,
+				mentionDigest(1, 3),
+				500));
+		assertThat(result.progress()).isEqualTo(
+				new ArchiveProcessingProgress(3, 0, 1, 2, 2, 0, 2, null));
 	}
 
 	@Test
@@ -261,7 +308,9 @@ class DefaultGdeltArchiveProcessorTest {
 						ProcessingTestFixtures.mentionRequest().indexTargets().mention(),
 						ProcessingTestFixtures.mentionRequest().sourceArchiveKey(),
 						ProcessingTestFixtures.mentionRequest().processingFingerprint(),
-						2));
+						2,
+						mentionDigest(1, 2),
+						500));
 	}
 
 	@Test
@@ -435,10 +484,36 @@ class DefaultGdeltArchiveProcessorTest {
 	}
 
 	@Test
+	@DisplayName("Event identity conflict остается отдельным non-retryable failure")
+	void projectsEventIdentityConflictWithoutOverwriteRetry() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		EventIdentityConflictException conflict = new EventIdentityConflictException(1);
+		writer.writeFailure = conflict;
+		AtomicReference<RuntimeException> diagnostic = new AtomicReference<>();
+		DefaultGdeltArchiveProcessor processor = eventProcessor(writer);
+
+		ArchiveProcessingResult result = processor.process(
+				ProcessingTestFixtures.eventRequest(),
+				ArchiveProcessingProgressListener.continuing(),
+				diagnostic::set);
+
+		assertThat(result.outcome()).isEqualTo(ArchiveProcessingOutcome.FAILED);
+		assertThat(result.failure()).satisfies(failure -> {
+			assertThat(failure.code())
+					.isEqualTo(ArchiveProcessingErrorCode.EVENT_IDENTITY_CONFLICT);
+			assertThat(failure.retryable()).isFalse();
+			assertThat(failure.firstFailedLineNumber()).isEqualTo(1);
+		});
+		assertThat(result.receipt()).isNull();
+		assertThat(diagnostic).hasValue(conflict);
+		assertThat(writer.receiptQueries).isEmpty();
+	}
+
+	@Test
 	@DisplayName("Не завершает archive без совпавшей terminal receipt")
 	void failsOnTerminalReceiptMismatch() {
 		FakeIndexWriter writer = new FakeIndexWriter(2);
-		writer.receiptStatus = ArchiveReceiptStatus.MISMATCHED;
+		writer.receiptStatus = ArchiveReceiptStatus.SHORTAGE;
 		writer.receiptActualDocuments = 0;
 		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(1), null);
 
@@ -455,10 +530,39 @@ class DefaultGdeltArchiveProcessorTest {
 	}
 
 	@Test
+	@DisplayName("Равный count с другим identity digest открывает retryable replay")
+	void failsOnEqualCountIdentityMismatch() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		writer.receiptStatus = ArchiveReceiptStatus.IDENTITY_MISMATCH;
+		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(1), null);
+
+		ArchiveProcessingResult result = processor.process(
+				ProcessingTestFixtures.mentionRequest(),
+				ArchiveProcessingProgressListener.continuing());
+
+		assertThat(result.outcome()).isEqualTo(ArchiveProcessingOutcome.FAILED);
+		assertThat(result.failure().code())
+				.isEqualTo(ArchiveProcessingErrorCode.INDEX_RECEIPT_MISMATCH);
+		assertThat(result.failure().retryable()).isTrue();
+		assertThat(result.receipt())
+				.isNotNull()
+				.satisfies(receipt -> {
+					assertThat(receipt.status())
+							.isEqualTo(ArchiveReceiptStatus.IDENTITY_MISMATCH);
+					assertThat(receipt.expectedDocumentCount())
+							.isEqualTo(receipt.actualDocumentCount());
+					assertThat(receipt.actualDigest())
+							.isNotEqualTo(receipt.expectedDigest());
+				});
+		assertThat(result.progress()).isEqualTo(
+				new ArchiveProcessingProgress(1, 0, 0, 1, 1, 0, 1, null));
+	}
+
+	@Test
 	@DisplayName("Лишний stale документ даёт отдельный non-retryable receipt surplus")
 	void failsWhenReceiptContainsExtraDocument() {
 		FakeIndexWriter writer = new FakeIndexWriter(2);
-		writer.receiptStatus = ArchiveReceiptStatus.MISMATCHED;
+		writer.receiptStatus = ArchiveReceiptStatus.SURPLUS;
 		writer.receiptActualDocuments = 2;
 		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(1), null);
 
@@ -578,6 +682,47 @@ class DefaultGdeltArchiveProcessorTest {
 				ProcessingTestFixtures.mentionRequest(),
 				ArchiveProcessingProgressListener.continuing(),
 				diagnosticListener);
+	}
+
+	private static DefaultGdeltArchiveProcessor eventProcessor(FakeIndexWriter writer) {
+		GdeltEvent event = ProcessingTestFixtures.event(
+				700_000_001L,
+				LocalDate.of(2026, 7, 21),
+				EVENT_TIME,
+				ProcessingTestFixtures.geo("Actor 1", 55.75, 37.61),
+				ProcessingTestFixtures.absentGeo(),
+				ProcessingTestFixtures.geo("Action", 40.71, -74.00));
+		GdeltEventCsvReader eventReader = (path, consumer) -> {
+			consumer.accept(new GdeltCsvRecord<>(1, event));
+			return new GdeltCsvReadSummary(
+					GdeltArchiveKind.TRANSLATION_EVENTS,
+					1,
+					1,
+					0,
+					Map.of(),
+					Map.of());
+		};
+		GdeltMentionCsvReader unusedMentionReader = (path, consumer) -> {
+			throw new AssertionError("Mention reader must not be called");
+		};
+		return new DefaultGdeltArchiveProcessor(
+				eventReader,
+				unusedMentionReader,
+				new GdeltEventDocumentMapper(),
+				new GdeltMentionDocumentMapper(),
+				writer,
+				new ProcessingMetrics(new SimpleMeterRegistry()));
+	}
+
+	private static ArchiveIdentityDigest mentionDigest(long... sourceLineNumbers) {
+		ArchiveIdentityDigest.Accumulator accumulator = ArchiveIdentityDigest.accumulator();
+		MentionIdentityFactory identityFactory = new MentionIdentityFactory();
+		for (long sourceLineNumber : sourceLineNumbers) {
+			accumulator.addIdentity(identityFactory.rawMentionId(
+					ProcessingTestFixtures.SOURCE_ARCHIVE_KEY,
+					sourceLineNumber));
+		}
+		return accumulator.finish();
 	}
 
 	private static List<GdeltMention> validMentions(int count) {
@@ -707,6 +852,12 @@ class DefaultGdeltArchiveProcessorTest {
 					query.kind(),
 					query.expectedDocumentCount(),
 					actualDocuments,
+					query.expectedDigest(),
+					receiptStatus == ArchiveReceiptStatus.IDENTITY_MISMATCH
+							? ArchiveIdentityDigest.accumulator()
+									.addIdentity("different-identity")
+									.finish()
+							: query.expectedDigest(),
 					receiptStatus);
 		}
 	}

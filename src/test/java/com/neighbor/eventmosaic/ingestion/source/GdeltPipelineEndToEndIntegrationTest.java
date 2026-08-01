@@ -276,7 +276,8 @@ class GdeltPipelineEndToEndIntegrationTest {
 				fingerprintFactory,
 				indexWriter,
 				indexTargetResolver,
-				properties);
+				properties,
+				GdeltTestFixtures.backendDataProperties());
 	}
 
 	private void registerSource(

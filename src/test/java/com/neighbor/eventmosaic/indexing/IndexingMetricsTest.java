@@ -8,6 +8,7 @@ import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.Collection;
 import org.junit.jupiter.api.DisplayName;
@@ -18,6 +19,8 @@ class IndexingMetricsTest {
 
 	private static final String REQUESTS_METER = "event_mosaic.indexing.bulk.requests";
 	private static final String DOCUMENTS_METER = "event_mosaic.indexing.bulk.documents";
+	private static final String EVENT_IDENTITY_GUARD_METER =
+			"event_mosaic.indexing.event_identity_guard";
 
 	private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 	private final IndexingMetrics metrics = new IndexingMetrics(meterRegistry);
@@ -56,6 +59,21 @@ class IndexingMetricsTest {
 						tuple("mention", "retryable_failure", 2.0),
 						tuple("event", "unknown", 4.0));
 		assertOnlyTagKeys(documentCounters);
+	}
+
+	@Test
+	@DisplayName("Измеряет Event identity guard только с bounded outcome")
+	void measuresEventIdentityGuardWithBoundedOutcome() {
+		metrics.eventIdentityGuard(12_000, EventIdentityGuardMetricOutcome.REPLAY);
+
+		Timer timer = meterRegistry.find(EVENT_IDENTITY_GUARD_METER)
+				.tag("outcome", "replay")
+				.timer();
+		assertThat(timer).isNotNull();
+		assertThat(timer.count()).isEqualTo(1);
+		assertThat(timer.getId().getTags())
+				.extracting(Tag::getKey)
+				.containsExactly("outcome");
 	}
 
 	private static void assertOnlyTagKeys(Collection<Counter> counters) {

@@ -10,13 +10,17 @@ import java.util.Objects;
  * @param sourceArchiveKey точный ключ исходного архива
  * @param processingFingerprint fingerprint версии processing projection
  * @param expectedDocumentCount ожидаемое число индексированных документов
+ * @param expectedDigest digest document identities в физическом порядке source
+ * @param pageSize максимальный размер bounded PIT/search_after страницы
  */
 public record ArchiveReceiptQuery(
 		GdeltIndexKind kind,
 		ExactIndexTarget target,
 		String sourceArchiveKey,
 		String processingFingerprint,
-		long expectedDocumentCount
+		long expectedDocumentCount,
+		ArchiveIdentityDigest expectedDigest,
+		int pageSize
 ) {
 
 	/**
@@ -36,6 +40,10 @@ public record ArchiveReceiptQuery(
 		}
 		if (expectedDocumentCount < 0) {
 			throw new IllegalArgumentException("expectedDocumentCount must not be negative");
+		}
+		Objects.requireNonNull(expectedDigest, "expectedDigest must not be null");
+		if (pageSize <= 0 || pageSize > 10_000) {
+			throw new IllegalArgumentException("pageSize must be between 1 and 10000");
 		}
 	}
 

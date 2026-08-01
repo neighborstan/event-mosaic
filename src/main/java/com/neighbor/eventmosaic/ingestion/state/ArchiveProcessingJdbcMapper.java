@@ -40,6 +40,7 @@ final class ArchiveProcessingJdbcMapper {
 						resultSet.getString("projection_revision"),
 						resultSet.getString("processing_fingerprint")),
 				status,
+				resultSet.getLong("state_version"),
 				new ArchiveProcessingAttemptState(
 						resultSet.getInt("total_attempt_count"),
 						resultSet.getObject("attempt_token", UUID.class),
@@ -101,6 +102,9 @@ final class ArchiveProcessingJdbcMapper {
 		return new ArchiveProcessingReceipt(
 				expectedDocumentCount,
 				resultSet.getLong("actual_document_count"),
+				resultSet.getString("receipt_digest_algorithm"),
+				resultSet.getString("expected_identity_digest"),
+				resultSet.getString("actual_identity_digest"),
 				resultSet.getLong("verified_generation_id"),
 				resultSet.getString("verified_index_uuid"),
 				instant(resultSet, "receipt_verified_at"));

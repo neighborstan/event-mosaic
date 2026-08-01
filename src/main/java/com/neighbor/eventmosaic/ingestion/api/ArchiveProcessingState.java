@@ -9,10 +9,11 @@ import java.util.Objects;
  * @param archiveIdempotencyKey стабильный source archive key
  * @param fingerprint неизменяемая processing identity
  * @param status lifecycle status downstream processing
+ * @param stateVersion durable CAS version processing snapshot
  * @param attempt сохраненное состояние attempts
  * @param targetBinding captured exact target для PROCESSING или INDEXED state
  * @param progress абсолютные counters последней или текущей attempt
- * @param receipt count-only exact target evidence либо {@code null}
+ * @param receipt aggregate exact target evidence либо {@code null}
  * @param failure последняя failure либо {@code null}
  * @param firstSeenAt время регистрации processing row
  * @param completedAt время подтвержденного indexing либо {@code null}
@@ -21,6 +22,7 @@ public record ArchiveProcessingState(
 		String archiveIdempotencyKey,
 		ArchiveProcessingFingerprint fingerprint,
 		ArchiveProcessingStatus status,
+		long stateVersion,
 		ArchiveProcessingAttemptState attempt,
 		ArchiveProcessingTargetBinding targetBinding,
 		ArchiveProcessingProgress progress,
@@ -37,6 +39,9 @@ public record ArchiveProcessingState(
 		Objects.requireNonNull(archiveIdempotencyKey, "archiveIdempotencyKey must not be null");
 		Objects.requireNonNull(fingerprint, "fingerprint must not be null");
 		Objects.requireNonNull(status, "status must not be null");
+		if (stateVersion < 0) {
+			throw new IllegalArgumentException("stateVersion must not be negative");
+		}
 		Objects.requireNonNull(attempt, "attempt must not be null");
 		Objects.requireNonNull(progress, "progress must not be null");
 		Objects.requireNonNull(firstSeenAt, "firstSeenAt must not be null");
@@ -60,7 +65,8 @@ public record ArchiveProcessingState(
 					attempt, targetBinding, progress, receipt, failure, completedAt);
 			case PROCESSING -> requireProcessing(
 					attempt, targetBinding, receipt, failure, completedAt);
-			case FAILED -> requireFailed(attempt, targetBinding, failure, completedAt);
+			case FAILED -> requireFailed(
+					attempt, targetBinding, progress, receipt, failure, completedAt);
 			case INDEXED -> requireIndexed(
 					attempt, targetBinding, progress, receipt, failure, completedAt);
 		}
@@ -105,6 +111,8 @@ public record ArchiveProcessingState(
 	private static void requireFailed(
 			ArchiveProcessingAttemptState attempt,
 			ArchiveProcessingTargetBinding targetBinding,
+			ArchiveProcessingProgress progress,
+			ArchiveProcessingReceipt receipt,
 			RecordedArchiveProcessingFailure failure,
 			Instant completedAt
 	) {
@@ -114,6 +122,13 @@ public record ArchiveProcessingState(
 				|| failure == null
 				|| completedAt != null) {
 			throw new IllegalArgumentException("FAILED state must contain only terminal failure");
+		}
+		if (receipt != null
+				&& (receipt.matched()
+				|| receipt.expectedDocumentCount() != progress.succeededOperations()
+				|| receipt.actualDocumentCount() != progress.receiptDocuments())) {
+			throw new IllegalArgumentException(
+					"FAILED receipt must contain matching progress and mismatch evidence");
 		}
 	}
 
@@ -134,7 +149,8 @@ public record ArchiveProcessingState(
 			throw new IllegalArgumentException("INDEXED state must contain only completion outcome");
 		}
 		progress.requireIndexedCompletion();
-		if (receipt.expectedDocumentCount() != progress.succeededOperations()
+		if (!receipt.matched()
+				|| receipt.expectedDocumentCount() != progress.succeededOperations()
 				|| receipt.actualDocumentCount() != progress.receiptDocuments()
 				|| receipt.verifiedGenerationId() != targetBinding.generationId()
 				|| !receipt.verifiedIndexUuid().equals(targetBinding.indexUuid())) {

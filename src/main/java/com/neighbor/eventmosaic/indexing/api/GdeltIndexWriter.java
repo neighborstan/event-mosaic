@@ -57,7 +57,7 @@ public interface GdeltIndexWriter {
 	void refresh(GdeltIndexKind kind, ExactIndexTarget target);
 
 	/**
-	 * Сверяет число документов exact target по ключу архива и processing fingerprint.
+	 * Сверяет count и identity digest exact target по ключу архива и fingerprint.
 	 *
 	 * @param query параметры приемочной проверки
 	 * @return различимый результат совпадения, расхождения или отсутствия индекса

@@ -13,6 +13,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
+import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Duration;
@@ -49,6 +50,15 @@ class JdbcArchiveProcessingRepository {
 	private static final String PARAM_SUCCEEDED = "succeededOperations";
 	private static final String PARAM_FAILED = "failedOperations";
 	private static final String PARAM_FIRST_FAILED_LINE = "firstFailedLine";
+	private static final String STORED_BINDING_PREDICATE = """
+			and logical_partition_key = :expectedPartitionKey
+			and bound_partition_state_version = :expectedPartitionStateVersion
+			and bound_generation_id = :expectedGenerationId
+			and bound_generation_uuid = :expectedGenerationUuid
+			and bound_index_kind = :expectedIndexKind
+			and bound_index_name = :expectedIndexName
+			and bound_index_uuid = :expectedIndexUuid
+			""";
 	private static final String ACTIVE_BINDING_PREDICATE = """
 			and logical_partition_key = :partitionKey
 			and bound_partition_state_version = :partitionStateVersion
@@ -95,6 +105,7 @@ class JdbcArchiveProcessingRepository {
 			    projection_revision,
 			    processing_fingerprint,
 			    status,
+			    state_version,
 			    attempt_token,
 			    lease_expires_at,
 			    logical_partition_key,
@@ -118,8 +129,11 @@ class JdbcArchiveProcessingRepository {
 			    failed_operations,
 			    actual_document_count,
 			    expected_document_count,
+			    receipt_digest_algorithm,
+			    expected_identity_digest,
 			    verified_generation_id,
 			    verified_index_uuid,
+			    actual_identity_digest,
 			    receipt_verified_at,
 			    first_failed_line,
 			    failed_at,
@@ -337,6 +351,7 @@ class JdbcArchiveProcessingRepository {
 	AttemptTransitionResult markIndexed(
 			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingProgress progress,
+			ArchiveReceiptVerification verification,
 			Instant now
 	) {
 		if (!ownsCurrentTarget(attempt)) {
@@ -344,7 +359,8 @@ class JdbcArchiveProcessingRepository {
 		}
 		int updated = bindTarget(
 				bindProgress(
-						jdbcClient.sql("""
+						bindReceiptVerification(
+								jdbcClient.sql("""
 						update ingestion_archive_processing
 						set status = :status,
 						    delivered_records = :deliveredRecords,
@@ -364,12 +380,12 @@ class JdbcArchiveProcessingRepository {
 						    last_error_code = null,
 						    last_error_retryable = null,
 						    expected_document_count = :expectedDocumentCount,
-						    receipt_digest_algorithm = null,
-						    expected_identity_digest = null,
-						    verified_generation_id = :generationId,
-						    verified_index_uuid = :indexUuid,
+						    receipt_digest_algorithm = :receiptDigestAlgorithm,
+						    expected_identity_digest = :expectedIdentityDigest,
+						    verified_generation_id = :verifiedGenerationId,
+						    verified_index_uuid = :verifiedIndexUuid,
 						    actual_document_count = :actualDocumentCount,
-						    actual_identity_digest = null,
+						    actual_identity_digest = :actualIdentityDigest,
 						    receipt_verified_at = :receiptVerifiedAt,
 						    state_version = state_version + 1,
 						    updated_at = :updatedAt
@@ -387,15 +403,15 @@ class JdbcArchiveProcessingRepository {
 						      or first_failed_line = :firstFailedLine
 						  )
 						""" + ACTIVE_BINDING_PREDICATE)
-						.param(PARAM_STATUS, ArchiveProcessingStatus.INDEXED.name())
-						.param("completedAt", Timestamp.from(now))
-						.param("expectedDocumentCount", progress.succeededOperations())
-						.param("actualDocumentCount", progress.receiptDocuments())
-						.param("receiptVerifiedAt", Timestamp.from(now))
-						.param(PARAM_UPDATED_AT, Timestamp.from(now))
-						.param(PARAM_ARCHIVE_KEY, attempt.archiveIdempotencyKey())
-						.param(PARAM_PROCESSING_STATUS, ArchiveProcessingStatus.PROCESSING.name())
-						.param(PARAM_ATTEMPT_TOKEN, attempt.token()),
+								.param(PARAM_STATUS, ArchiveProcessingStatus.INDEXED.name())
+								.param("completedAt", Timestamp.from(now))
+								.param(PARAM_UPDATED_AT, Timestamp.from(now))
+								.param(PARAM_ARCHIVE_KEY, attempt.archiveIdempotencyKey())
+								.param(PARAM_PROCESSING_STATUS, ArchiveProcessingStatus.PROCESSING.name())
+								.param(PARAM_ATTEMPT_TOKEN, attempt.token()),
+								verification,
+								attempt.targetBinding(),
+								now),
 						progress),
 				attempt.targetBinding()).update();
 		return AttemptTransitionResult.fromUpdatedRows(updated);
@@ -405,6 +421,7 @@ class JdbcArchiveProcessingRepository {
 			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingFailure failure,
 			ArchiveProcessingProgress progress,
+			ArchiveReceiptVerification verification,
 			Instant now
 	) {
 		if (!ownsCurrentTarget(attempt)) {
@@ -415,7 +432,8 @@ class JdbcArchiveProcessingRepository {
 				: null;
 		int updated = bindTarget(
 				bindProgress(
-						jdbcClient.sql("""
+						bindReceiptVerification(
+								jdbcClient.sql("""
 						update ingestion_archive_processing
 						set status = :status,
 						    delivered_records = :deliveredRecords,
@@ -442,6 +460,14 @@ class JdbcArchiveProcessingRepository {
 						    retry_not_before = :retryNotBefore,
 						    last_error_code = :errorCode,
 						    last_error_retryable = :retryable,
+						    expected_document_count = :expectedDocumentCount,
+						    receipt_digest_algorithm = :receiptDigestAlgorithm,
+						    expected_identity_digest = :expectedIdentityDigest,
+						    verified_generation_id = :verifiedGenerationId,
+						    verified_index_uuid = :verifiedIndexUuid,
+						    actual_document_count = :actualDocumentCount,
+						    actual_identity_digest = :actualIdentityDigest,
+						    receipt_verified_at = :receiptVerifiedAt,
 						    state_version = state_version + 1,
 						    updated_at = :updatedAt
 						where archive_idempotency_key = :archiveIdempotencyKey
@@ -458,17 +484,79 @@ class JdbcArchiveProcessingRepository {
 						      or first_failed_line = :firstFailedLine
 						  )
 						""" + ACTIVE_BINDING_PREDICATE)
-						.param(PARAM_STATUS, ArchiveProcessingStatus.FAILED.name())
-						.param("failedAt", Timestamp.from(now))
-						.param("errorCode", failure.errorCode())
-						.param("retryable", failure.retryable())
-						.param("retryNotBefore", retryNotBefore, Types.TIMESTAMP_WITH_TIMEZONE)
-						.param(PARAM_UPDATED_AT, Timestamp.from(now))
-						.param(PARAM_ARCHIVE_KEY, attempt.archiveIdempotencyKey())
-						.param(PARAM_PROCESSING_STATUS, ArchiveProcessingStatus.PROCESSING.name())
-						.param(PARAM_ATTEMPT_TOKEN, attempt.token()),
+								.param(PARAM_STATUS, ArchiveProcessingStatus.FAILED.name())
+								.param("failedAt", Timestamp.from(now))
+								.param("errorCode", failure.errorCode())
+								.param("retryable", failure.retryable())
+								.param("retryNotBefore", retryNotBefore, Types.TIMESTAMP_WITH_TIMEZONE)
+								.param(PARAM_UPDATED_AT, Timestamp.from(now))
+								.param(PARAM_ARCHIVE_KEY, attempt.archiveIdempotencyKey())
+								.param(PARAM_PROCESSING_STATUS, ArchiveProcessingStatus.PROCESSING.name())
+								.param(PARAM_ATTEMPT_TOKEN, attempt.token()),
+								verification,
+								attempt.targetBinding(),
+								now),
 						progress),
 				attempt.targetBinding()).update();
+		return AttemptTransitionResult.fromUpdatedRows(updated);
+	}
+
+	AttemptTransitionResult recordReceiptMatch(
+			String archiveIdempotencyKey,
+			String expectedProcessingFingerprint,
+			int expectedAttemptCount,
+			long expectedStateVersion,
+			ArchiveProcessingTargetBinding expectedStoredTargetBinding,
+			ArchiveProcessingTargetBinding verifiedCurrentTargetBinding,
+			ArchiveReceiptVerification verification,
+			Instant now
+	) {
+		if (!lockProcessingRow(archiveIdempotencyKey)
+				|| validateAndLockTarget(
+						archiveIdempotencyKey,
+						verifiedCurrentTargetBinding)
+						!= ArchiveProcessingClaimStatus.CLAIMED) {
+			return AttemptTransitionResult.OWNERSHIP_LOST;
+		}
+		int updated = bindStoredTarget(bindTarget(bindReceiptVerification(jdbcClient.sql("""
+				update ingestion_archive_processing
+				set logical_partition_key = :partitionKey,
+				    bound_partition_state_version = :partitionStateVersion,
+				    bound_generation_id = :generationId,
+				    bound_generation_uuid = :generationUuid,
+				    bound_index_kind = :indexKind,
+				    bound_index_name = :indexName,
+				    bound_index_uuid = :indexUuid,
+				    expected_document_count = :expectedDocumentCount,
+				    receipt_digest_algorithm = :receiptDigestAlgorithm,
+				    expected_identity_digest = :expectedIdentityDigest,
+				    verified_generation_id = :verifiedGenerationId,
+				    verified_index_uuid = :verifiedIndexUuid,
+				    actual_document_count = :actualDocumentCount,
+				    actual_identity_digest = :actualIdentityDigest,
+				    receipt_verified_at = :receiptVerifiedAt,
+				    state_version = state_version + 1,
+				    updated_at = :updatedAt
+				where archive_idempotency_key = :archiveIdempotencyKey
+				  and processing_fingerprint = :processingFingerprint
+				  and total_attempt_count = :expectedAttemptCount
+				  and state_version = :expectedStateVersion
+				  and status = :indexedStatus
+				  and expected_document_count = :expectedDocumentCount
+				  and receipt_digest_algorithm = :receiptDigestAlgorithm
+				  and expected_identity_digest = :expectedIdentityDigest
+				""" + STORED_BINDING_PREDICATE)
+				.param(PARAM_UPDATED_AT, Timestamp.from(now))
+				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
+				.param("processingFingerprint", expectedProcessingFingerprint)
+				.param("expectedAttemptCount", expectedAttemptCount)
+				.param("expectedStateVersion", expectedStateVersion)
+				.param("indexedStatus", ArchiveProcessingStatus.INDEXED.name()),
+				verification,
+				verifiedCurrentTargetBinding,
+				now),
+				verifiedCurrentTargetBinding),
+				expectedStoredTargetBinding).update();
 		return AttemptTransitionResult.fromUpdatedRows(updated);
 	}
 
@@ -476,23 +564,33 @@ class JdbcArchiveProcessingRepository {
 			String archiveIdempotencyKey,
 			String expectedProcessingFingerprint,
 			int expectedAttemptCount,
-			ArchiveProcessingTargetBinding expectedTargetBinding,
+			long expectedStateVersion,
+			ArchiveProcessingTargetBinding expectedStoredTargetBinding,
+			ArchiveProcessingTargetBinding verifiedCurrentTargetBinding,
+			ArchiveReceiptVerification verification,
 			ArchiveProcessingFailure failure,
 			Instant now
 	) {
 		if (!lockProcessingRow(archiveIdempotencyKey)
-				|| validateAndLockTarget(archiveIdempotencyKey, expectedTargetBinding)
+				|| validateAndLockTarget(
+						archiveIdempotencyKey,
+						verifiedCurrentTargetBinding)
 						!= ArchiveProcessingClaimStatus.CLAIMED) {
 			return AttemptTransitionResult.OWNERSHIP_LOST;
 		}
 		OffsetDateTime retryNotBefore = failure.retryable()
 				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
 				: null;
-		int updated = bindTarget(jdbcClient.sql("""
+		int updated = bindStoredTarget(bindReceiptVerification(jdbcClient.sql("""
 				update ingestion_archive_processing
 				set status = :status,
 				    failed_at = :failedAt,
 				    completed_at = null,
+				    verified_generation_id = :verifiedGenerationId,
+				    verified_index_uuid = :verifiedIndexUuid,
+				    actual_document_count = :actualDocumentCount,
+				    actual_identity_digest = :actualIdentityDigest,
+				    receipt_verified_at = :receiptVerifiedAt,
 				    bound_partition_state_version = null,
 				    bound_generation_id = null,
 				    bound_generation_uuid = null,
@@ -511,8 +609,12 @@ class JdbcArchiveProcessingRepository {
 				where archive_idempotency_key = :archiveIdempotencyKey
 				  and processing_fingerprint = :processingFingerprint
 				  and total_attempt_count = :expectedAttemptCount
+				  and state_version = :expectedStateVersion
 				  and status = :indexedStatus
-				""" + ACTIVE_BINDING_PREDICATE)
+				  and expected_document_count = :expectedDocumentCount
+				  and receipt_digest_algorithm = :receiptDigestAlgorithm
+				  and expected_identity_digest = :expectedIdentityDigest
+				""" + STORED_BINDING_PREDICATE)
 				.param(PARAM_STATUS, ArchiveProcessingStatus.FAILED.name())
 				.param("failedAt", Timestamp.from(now))
 				.param("errorCode", failure.errorCode())
@@ -522,8 +624,12 @@ class JdbcArchiveProcessingRepository {
 				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
 				.param("processingFingerprint", expectedProcessingFingerprint)
 				.param("expectedAttemptCount", expectedAttemptCount)
+				.param("expectedStateVersion", expectedStateVersion)
 				.param("indexedStatus", ArchiveProcessingStatus.INDEXED.name()),
-				expectedTargetBinding).update();
+				verification,
+				verifiedCurrentTargetBinding,
+				now),
+				expectedStoredTargetBinding).update();
 		return AttemptTransitionResult.fromUpdatedRows(updated);
 	}
 
@@ -721,6 +827,34 @@ class JdbcArchiveProcessingRepository {
 				.param(PARAM_FIRST_FAILED_LINE, progress.firstFailedLine(), Types.BIGINT);
 	}
 
+	private static JdbcClient.StatementSpec bindReceiptVerification(
+			JdbcClient.StatementSpec statement,
+			ArchiveReceiptVerification verification,
+			ArchiveProcessingTargetBinding targetBinding,
+			Instant verifiedAt
+	) {
+		if (verification == null) {
+			return statement
+					.param("expectedDocumentCount", null, Types.BIGINT)
+					.param("receiptDigestAlgorithm", null, Types.VARCHAR)
+					.param("expectedIdentityDigest", null, Types.VARCHAR)
+					.param("verifiedGenerationId", null, Types.BIGINT)
+					.param("verifiedIndexUuid", null, Types.VARCHAR)
+					.param("actualDocumentCount", null, Types.BIGINT)
+					.param("actualIdentityDigest", null, Types.VARCHAR)
+					.param("receiptVerifiedAt", null, Types.TIMESTAMP_WITH_TIMEZONE);
+		}
+		return statement
+				.param("expectedDocumentCount", verification.expectedDocumentCount())
+				.param("receiptDigestAlgorithm", verification.algorithm())
+				.param("expectedIdentityDigest", verification.expectedDigest().value())
+				.param("verifiedGenerationId", targetBinding.generationId())
+				.param("verifiedIndexUuid", targetBinding.indexUuid())
+				.param("actualDocumentCount", verification.actualDocumentCount())
+				.param("actualIdentityDigest", verification.actualDigest().value())
+				.param("receiptVerifiedAt", Timestamp.from(verifiedAt));
+	}
+
 	private static JdbcClient.StatementSpec bindTarget(
 			JdbcClient.StatementSpec statement,
 			ArchiveProcessingTargetBinding binding
@@ -733,6 +867,22 @@ class JdbcArchiveProcessingRepository {
 				.param(PARAM_INDEX_KIND, binding.indexKind().name())
 				.param(PARAM_INDEX_NAME, binding.indexName())
 				.param(PARAM_INDEX_UUID, binding.indexUuid());
+	}
+
+	private static JdbcClient.StatementSpec bindStoredTarget(
+			JdbcClient.StatementSpec statement,
+			ArchiveProcessingTargetBinding binding
+	) {
+		return statement
+				.param("expectedPartitionKey", binding.partitionKey())
+				.param(
+						"expectedPartitionStateVersion",
+						binding.partitionStateVersion())
+				.param("expectedGenerationId", binding.generationId())
+				.param("expectedGenerationUuid", binding.generationUuid())
+				.param("expectedIndexKind", binding.indexKind().name())
+				.param("expectedIndexName", binding.indexName())
+				.param("expectedIndexUuid", binding.indexUuid());
 	}
 
 	private record PartitionTargetState(

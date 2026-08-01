@@ -23,6 +23,9 @@ import com.neighbor.eventmosaic.ingestion.api.DiscoveredUpdate;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveLedger;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
+import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
+import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
+import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import java.nio.file.Path;
 import java.sql.Timestamp;
@@ -40,6 +43,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 @Import({PostgreSqlTestcontainersConfiguration.class, FixedClockTestConfiguration.class})
@@ -57,6 +61,10 @@ class ArchiveProcessingLedgerIntegrationTest {
 	private static final String MENTION_INDEX_NAME = "gdelt-mentions-v1-p20260720-g0001";
 	private static final String EVENT_INDEX_UUID = "event-index-uuid";
 	private static final String MENTION_INDEX_UUID = "mention-index-uuid";
+	private static final String NEXT_EVENT_INDEX_NAME = "gdelt-events-v1-p20260720-g0002";
+	private static final String NEXT_MENTION_INDEX_NAME = "gdelt-mentions-v1-p20260720-g0002";
+	private static final String NEXT_EVENT_INDEX_UUID = "event-index-uuid-g0002";
+	private static final String NEXT_MENTION_INDEX_UUID = "mention-index-uuid-g0002";
 
 	@Autowired
 	private ArchiveProcessingLedger processingLedger;
@@ -196,8 +204,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Captured partition version и generation UUID fence progress и terminal receipt")
-	void targetBindingFencesProgressAndStoresCountReceipt() {
+	@DisplayName("Captured partition version и generation UUID fence progress и aggregate receipt")
+	void targetBindingFencesProgressAndStoresAggregateReceipt() {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		processingLedger.register(events.idempotencyKey(), fingerprint("f"));
 		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
@@ -227,7 +235,10 @@ class ArchiveProcessingLedgerIntegrationTest {
 				ArchiveProcessingProgress.empty(),
 				Duration.ofMinutes(20)))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
-		assertThat(processingLedger.markIndexed(staleAttempt, completed))
+		assertThat(processingLedger.markIndexed(
+				staleAttempt,
+				completed,
+				matchedVerification(target, 2)))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
 				.orElseThrow())
@@ -236,7 +247,10 @@ class ArchiveProcessingLedgerIntegrationTest {
 					assertThat(current.receipt()).isNull();
 					assertThat(current.completedAt()).isNull();
 				});
-		assertThat(processingLedger.markIndexed(attempt, completed))
+		assertThat(processingLedger.markIndexed(
+				attempt,
+				completed,
+				matchedVerification(target, 2)))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 
 		ArchiveProcessingState state = processingLedger.findByArchiveIdempotencyKey(
@@ -245,6 +259,11 @@ class ArchiveProcessingLedgerIntegrationTest {
 		assertThat(state.receipt()).satisfies(receipt -> {
 			assertThat(receipt.expectedDocumentCount()).isEqualTo(2);
 			assertThat(receipt.actualDocumentCount()).isEqualTo(2);
+			assertThat(receipt.digestAlgorithm())
+					.isEqualTo(ArchiveIdentityDigest.ALGORITHM);
+			assertThat(receipt.expectedIdentityDigest()).isEqualTo("a".repeat(64));
+			assertThat(receipt.actualIdentityDigest()).isEqualTo("a".repeat(64));
+			assertThat(receipt.matched()).isTrue();
 			assertThat(receipt.verifiedGenerationId()).isEqualTo(target.generationId());
 			assertThat(receipt.verifiedIndexUuid()).isEqualTo(target.indexUuid());
 		});
@@ -254,15 +273,28 @@ class ArchiveProcessingLedgerIntegrationTest {
 				where archive_idempotency_key = :archiveIdempotencyKey
 				  and bound_generation_uuid = :generationUuid
 				  and bound_index_name = :indexName
-				  and receipt_digest_algorithm is null
-				  and expected_identity_digest is null
-				  and actual_identity_digest is null
+				  and receipt_digest_algorithm = :digestAlgorithm
+				  and expected_identity_digest = :expectedDigest
+				  and actual_identity_digest = :actualDigest
 				""")
 				.param("archiveIdempotencyKey", events.idempotencyKey())
 				.param("generationUuid", target.generationUuid())
 				.param("indexName", target.indexName())
+				.param("digestAlgorithm", ArchiveIdentityDigest.ALGORITHM)
+				.param("expectedDigest", "a".repeat(64))
+				.param("actualDigest", "a".repeat(64))
 				.query(Integer.class)
 				.single()).isEqualTo(1);
+		assertThatThrownBy(() -> jdbcClient.sql("""
+				update ingestion_archive_processing
+				set receipt_digest_algorithm = null,
+				    expected_identity_digest = null,
+				    actual_identity_digest = null
+				where archive_idempotency_key = :archiveIdempotencyKey
+				""")
+				.param("archiveIdempotencyKey", events.idempotencyKey())
+				.update())
+				.isInstanceOf(DataIntegrityViolationException.class);
 
 		DiscoveredArchive mentions = stagedArchive(ArchiveType.TRANSLATION_MENTIONS);
 		processingLedger.register(mentions.idempotencyKey(), fingerprint("b"));
@@ -281,7 +313,10 @@ class ArchiveProcessingLedgerIntegrationTest {
 				ArchiveProcessingProgress.empty(),
 				Duration.ofMinutes(20)))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
-		assertThat(processingLedger.markIndexed(mentionAttempt, completed))
+		assertThat(processingLedger.markIndexed(
+				mentionAttempt,
+				completed,
+				matchedVerification(mentionAttempt.targetBinding(), 2)))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(mentions.idempotencyKey())
 				.orElseThrow())
@@ -319,7 +354,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 		assertThat(processingLedger.markFailed(
 				first,
 				new ArchiveProcessingFailure(MAPPING_FAILURE, false),
-				ArchiveProcessingProgress.empty()))
+				ArchiveProcessingProgress.empty(),
+				null))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 
 		assertThat(processingLedger.checkpoint(
@@ -355,7 +391,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 		assertThat(processingLedger.markFailed(
 				first,
 				retryable,
-				partial))
+				partial,
+				null))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(mentions.idempotencyKey())
 				.orElseThrow())
@@ -382,15 +419,16 @@ class ArchiveProcessingLedgerIntegrationTest {
 		assertThat(processingLedger.markFailed(
 				retry,
 				new ArchiveProcessingFailure(MAPPING_FAILURE, false),
-				ArchiveProcessingProgress.empty()))
+				ArchiveProcessingProgress.empty(),
+				null))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 		assertThat(claimResult(mentions, activeTarget(mentions.archiveType())).status())
 				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
 	}
 
 	@Test
-	@DisplayName("Terminal state требует exact receipt только для INDEXED")
-	void terminalReceiptInvariantDistinguishesIndexedAndFailed() {
+	@DisplayName("Terminal state требует matched receipt для INDEXED и хранит mismatch для FAILED")
+	void terminalReceiptInvariantDistinguishesMatchedAndMismatchedEvidence() {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
 		ArchiveProcessingAttempt attempt = claim(events);
@@ -399,7 +437,10 @@ class ArchiveProcessingLedgerIntegrationTest {
 		String eventArchiveKey = events.idempotencyKey();
 
 		assertThatThrownBy(() ->
-				processingLedger.markIndexed(attempt, unverified))
+				processingLedger.markIndexed(
+						attempt,
+						unverified,
+						matchedVerification(attempt.targetBinding(), 2)))
 				.isInstanceOf(IllegalArgumentException.class)
 				.hasMessageContaining("receipt");
 		assertThat(processingLedger.findByArchiveIdempotencyKey(eventArchiveKey)
@@ -410,15 +451,24 @@ class ArchiveProcessingLedgerIntegrationTest {
 				2, 0, 0, 2, 2, 0, 3, null);
 		assertThat(processingLedger.markFailed(
 				attempt,
-				new ArchiveProcessingFailure(RECEIPT_MISMATCH, true),
-				extraDocuments))
+				new ArchiveProcessingFailure(RECEIPT_SURPLUS, false),
+				extraDocuments,
+				surplusVerification(attempt.targetBinding(), 2, 3)))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
-				.orElseThrow().progress())
-				.satisfies(progress -> {
-					assertThat(progress.deliveredRecords()).isEqualTo(2);
-					assertThat(progress.submittedOperations()).isEqualTo(2);
-					assertThat(progress.succeededOperations()).isEqualTo(2);
+				.orElseThrow())
+				.satisfies(state -> {
+					assertThat(state.progress().deliveredRecords()).isEqualTo(2);
+					assertThat(state.progress().submittedOperations()).isEqualTo(2);
+					assertThat(state.progress().succeededOperations()).isEqualTo(2);
+					assertThat(state.receipt().actualDocumentCount()).isEqualTo(3);
+					assertThat(state.receipt().matched()).isFalse();
+					assertThat(state.receipt().verifiedGenerationId())
+							.isEqualTo(attempt.targetBinding().generationId());
+					assertThat(state.receipt().verifiedIndexUuid())
+							.isEqualTo(attempt.targetBinding().indexUuid());
+					assertThat(state.receipt().verifiedAt())
+							.isEqualTo(FixedClockTestConfiguration.NOW);
 				});
 	}
 
@@ -433,7 +483,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 		assertThat(processingLedger.markFailed(
 				attempt,
 				new ArchiveProcessingFailure(BULK_PARTIAL_FAILURE, true),
-				ArchiveProcessingProgress.empty()))
+				ArchiveProcessingProgress.empty(),
+				null))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 
 		jdbcClient.sql("""
@@ -475,39 +526,144 @@ class ArchiveProcessingLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Receipt mismatch условно открывает INDEXED archive для полного reindex")
+	@DisplayName("Matched receipt переносит INDEXED binding на проверенную current generation")
+	void matchedReceiptRebindsIndexedArchiveToCurrentGeneration() {
+		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
+		ArchiveProcessingFingerprint fingerprint = fingerprint("a");
+		processingLedger.register(events.idempotencyKey(), fingerprint);
+		ArchiveProcessingTargetBinding storedTarget = activeTarget(events.archiveType());
+		ArchiveProcessingAttempt attempt = claimResult(events, storedTarget)
+				.claimedAttempt().orElseThrow();
+		ArchiveProcessingProgress completed = progress(
+				2, 0, 0, 2, 2, 0, 2, null);
+
+		assertThat(processingLedger.markIndexed(
+				attempt,
+				completed,
+				matchedVerification(storedTarget, 2)))
+				.isEqualTo(AttemptTransitionResult.APPLIED);
+		ArchiveProcessingState indexedSnapshot = processingLedger
+				.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow();
+		long indexedStateVersion = indexedSnapshot.stateVersion();
+		ArchiveProcessingTargetBinding currentTarget = replaceActiveTarget(events.archiveType());
+		ArchiveReceiptVerification currentVerification = matchedVerification(currentTarget, 2);
+
+		assertThat(processingLedger.recordReceiptMatch(
+				events.idempotencyKey(),
+				fingerprint.processingFingerprint(),
+				1,
+				indexedStateVersion,
+				storedTarget,
+				storedTarget,
+				matchedVerification(storedTarget, 2)))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		assertThat(processingLedger.recordReceiptMatch(
+				events.idempotencyKey(),
+				fingerprint.processingFingerprint(),
+				1,
+				indexedStateVersion,
+				currentTarget,
+				currentTarget,
+				currentVerification))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		assertThat(processingLedger.recordReceiptMatch(
+				events.idempotencyKey(),
+				fingerprint.processingFingerprint(),
+				1,
+				indexedStateVersion,
+				storedTarget,
+				currentTarget,
+				currentVerification))
+				.isEqualTo(AttemptTransitionResult.APPLIED);
+
+		ArchiveProcessingState reconciledSnapshot = processingLedger
+				.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow();
+		assertThat(reconciledSnapshot)
+				.satisfies(state -> {
+					assertThat(state.status()).isEqualTo(ArchiveProcessingStatus.INDEXED);
+					assertThat(state.stateVersion()).isGreaterThan(indexedStateVersion);
+					assertThat(state.targetBinding()).isEqualTo(currentTarget);
+					assertThat(state.attempt().count()).isEqualTo(1);
+					assertThat(state.receipt()).satisfies(receipt -> {
+						assertThat(receipt.matched()).isTrue();
+						assertThat(receipt.verifiedGenerationId())
+								.isEqualTo(currentTarget.generationId());
+						assertThat(receipt.verifiedIndexUuid())
+								.isEqualTo(currentTarget.indexUuid());
+						assertThat(receipt.verifiedAt())
+								.isEqualTo(FixedClockTestConfiguration.NOW);
+					});
+				});
+		assertThat(processingLedger.recordReceiptMatch(
+				events.idempotencyKey(),
+				fingerprint.processingFingerprint(),
+				1,
+				indexedStateVersion,
+				currentTarget,
+				currentTarget,
+				currentVerification))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+	}
+
+	@Test
+	@DisplayName("Receipt mismatch current generation открывает INDEXED archive для reindex")
 	void receiptMismatchConditionallyReopensIndexedArchive() {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		ArchiveProcessingFingerprint fingerprint = fingerprint("a");
 		processingLedger.register(events.idempotencyKey(), fingerprint);
-		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
-		ArchiveProcessingAttempt attempt = claimResult(events, target)
+		ArchiveProcessingTargetBinding storedTarget = activeTarget(events.archiveType());
+		ArchiveProcessingAttempt attempt = claimResult(events, storedTarget)
 				.claimedAttempt().orElseThrow();
 		ArchiveProcessingProgress completed = progress(
 				3, 1, 1, 2, 2, 0, 2, null);
 
 		assertThat(processingLedger.markIndexed(
 				attempt,
-				completed))
+				completed,
+				matchedVerification(storedTarget, 2)))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
-		assertThat(claimResult(events, target).status())
+		ArchiveProcessingState indexedSnapshot = processingLedger
+				.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow();
+		long indexedStateVersion = indexedSnapshot.stateVersion();
+		assertThat(claimResult(events, storedTarget).status())
 				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
 
+		ArchiveProcessingTargetBinding currentTarget = replaceActiveTarget(events.archiveType());
 		ArchiveProcessingFailure mismatch = new ArchiveProcessingFailure(
 				RECEIPT_MISMATCH,
 				true);
+		ArchiveReceiptVerification identityMismatch = identityMismatchVerification(currentTarget, 2);
+		assertThat(processingLedger.recordReceiptMismatch(
+				events.idempotencyKey(),
+				fingerprint.processingFingerprint(),
+				1,
+				indexedStateVersion,
+				storedTarget,
+				storedTarget,
+				identityMismatchVerification(storedTarget, 2),
+				mismatch))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(processingLedger.recordReceiptMismatch(
 				events.idempotencyKey(),
 				"c".repeat(64),
 				1,
-				target,
+				indexedStateVersion,
+				storedTarget,
+				currentTarget,
+				identityMismatch,
 				mismatch))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(processingLedger.recordReceiptMismatch(
 				events.idempotencyKey(),
 				fingerprint.processingFingerprint(),
 				1,
-				target,
+				indexedStateVersion,
+				storedTarget,
+				currentTarget,
+				identityMismatch,
 				mismatch))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 
@@ -516,10 +672,23 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.satisfies(state -> {
 					assertThat(state.status()).isEqualTo(ArchiveProcessingStatus.FAILED);
 					assertThat(state.progress()).isEqualTo(completed);
+					assertThat(state.receipt()).satisfies(receipt -> {
+						assertThat(receipt.expectedIdentityDigest()).isEqualTo("a".repeat(64));
+						assertThat(receipt.actualIdentityDigest()).isEqualTo("b".repeat(64));
+						assertThat(receipt.actualDocumentCount()).isEqualTo(2);
+						assertThat(receipt.matched()).isFalse();
+						assertThat(receipt.verifiedGenerationId())
+								.isEqualTo(currentTarget.generationId());
+						assertThat(receipt.verifiedIndexUuid())
+								.isEqualTo(currentTarget.indexUuid());
+						assertThat(receipt.verifiedAt())
+								.isEqualTo(FixedClockTestConfiguration.NOW);
+					});
+					assertThat(state.targetBinding()).isNull();
 					assertThat(state.completedAt()).isNull();
 					assertThat(state.failure().failure()).isEqualTo(mismatch);
 				});
-		ArchiveProcessingAttempt reindex = claimResult(events, target)
+		ArchiveProcessingAttempt reindex = claimResult(events, currentTarget)
 				.claimedAttempt().orElseThrow();
 		assertThat(reindex.attemptCount()).isEqualTo(2);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
@@ -527,13 +696,20 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.isEqualTo(ArchiveProcessingProgress.empty());
 		assertThat(processingLedger.markIndexed(
 				reindex,
-				completed))
+				completed,
+				matchedVerification(currentTarget, 2)))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
+		ArchiveProcessingState reindexedSnapshot = processingLedger
+				.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow();
 		assertThat(processingLedger.recordReceiptMismatch(
 				events.idempotencyKey(),
 				fingerprint.processingFingerprint(),
 				1,
-				target,
+				reindexedSnapshot.stateVersion(),
+				currentTarget,
+				currentTarget,
+				identityMismatch,
 				mismatch))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
@@ -555,16 +731,26 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.claimedAttempt().orElseThrow();
 		ArchiveProcessingProgress completed = progress(
 				2, 0, 0, 2, 2, 0, 2, null);
-		processingLedger.markIndexed(attempt, completed);
+		processingLedger.markIndexed(
+				attempt,
+				completed,
+				matchedVerification(target, 2));
+		ArchiveProcessingState indexedSnapshot = processingLedger
+				.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow();
 		ArchiveProcessingFailure surplus = new ArchiveProcessingFailure(
 				RECEIPT_SURPLUS,
 				false);
+		ArchiveReceiptVerification surplusReceipt = surplusVerification(target, 2, 3);
 
 		assertThat(processingLedger.recordReceiptMismatch(
 				events.idempotencyKey(),
 				fingerprint.processingFingerprint(),
 				1,
+				indexedSnapshot.stateVersion(),
 				target,
+				target,
+				surplusReceipt,
 				surplus))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 
@@ -572,6 +758,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.orElseThrow())
 				.satisfies(state -> {
 					assertThat(state.status()).isEqualTo(ArchiveProcessingStatus.FAILED);
+					assertThat(state.receipt().actualDocumentCount()).isEqualTo(3);
+					assertThat(state.receipt().actualIdentityDigest()).isEqualTo("b".repeat(64));
 					assertThat(state.failure().failure()).isEqualTo(surplus);
 				});
 		assertThat(claimResult(events, target).status())
@@ -693,11 +881,86 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.param("createdAt", Timestamp.from(FixedClockTestConfiguration.NOW))
 				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
 				.update();
+		return currentActiveTarget(archiveType);
+	}
+
+	private ArchiveProcessingTargetBinding replaceActiveTarget(ArchiveType archiveType) {
+		assertThat(jdbcClient.sql("""
+				update index_generations
+				set state = 'SUPERSEDED',
+				    state_version = state_version + 1,
+				    superseded_at = :supersededAt,
+				    updated_at = :updatedAt
+				where partition_key = :partitionKey
+				  and state = 'ACTIVE'
+				""")
+				.param("supersededAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("partitionKey", PARTITION_KEY)
+				.update()).isEqualTo(1);
+		assertThat(jdbcClient.sql("""
+				update index_logical_partitions
+				set state_version = state_version + 1,
+				    updated_at = :updatedAt
+				where partition_key = :partitionKey
+				""")
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("partitionKey", PARTITION_KEY)
+				.update()).isEqualTo(1);
+		assertThat(jdbcClient.sql("""
+				insert into index_generations (
+				    generation_uuid,
+				    partition_key,
+				    generation_number,
+				    state,
+				    event_index_name,
+				    event_index_uuid,
+				    mention_index_name,
+				    mention_index_uuid,
+				    heartbeat_at,
+				    activated_at,
+				    created_at,
+				    updated_at
+				)
+				values (
+				    :generationUuid,
+				    :partitionKey,
+				    2,
+				    'ACTIVE',
+				    :eventIndexName,
+				    :eventIndexUuid,
+				    :mentionIndexName,
+				    :mentionIndexUuid,
+				    :heartbeatAt,
+				    :activatedAt,
+				    :createdAt,
+				    :updatedAt
+				)
+				""")
+				.param("generationUuid", UUID.randomUUID())
+				.param("partitionKey", PARTITION_KEY)
+				.param("eventIndexName", NEXT_EVENT_INDEX_NAME)
+				.param("eventIndexUuid", NEXT_EVENT_INDEX_UUID)
+				.param("mentionIndexName", NEXT_MENTION_INDEX_NAME)
+				.param("mentionIndexUuid", NEXT_MENTION_INDEX_UUID)
+				.param("heartbeatAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("activatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("createdAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.update()).isEqualTo(1);
+		return currentActiveTarget(archiveType);
+	}
+
+	private ArchiveProcessingTargetBinding currentActiveTarget(ArchiveType archiveType) {
 		return jdbcClient.sql("""
 				select
 				    partition_state.state_version,
 				    generation.id,
-				    generation.generation_uuid
+				    generation.generation_uuid,
+				    generation.event_index_name,
+				    generation.event_index_uuid,
+				    generation.mention_index_name,
+				    generation.mention_index_uuid
 				from index_logical_partitions partition_state
 				join index_generations generation
 				  on generation.partition_key = partition_state.partition_key
@@ -716,9 +979,11 @@ class ArchiveProcessingLedgerIntegrationTest {
 							resultSet.getLong("id"),
 							resultSet.getObject("generation_uuid", UUID.class),
 							kind == GdeltIndexKind.EVENT
-									? EVENT_INDEX_NAME : MENTION_INDEX_NAME,
+									? resultSet.getString("event_index_name")
+									: resultSet.getString("mention_index_name"),
 							kind == GdeltIndexKind.EVENT
-									? EVENT_INDEX_UUID : MENTION_INDEX_UUID);
+									? resultSet.getString("event_index_uuid")
+									: resultSet.getString("mention_index_uuid"));
 				})
 				.single();
 	}
@@ -808,6 +1073,62 @@ class ArchiveProcessingLedgerIntegrationTest {
 				"gdelt-index-v1",
 				hexDigit.repeat(64)
 		);
+	}
+
+	private static ArchiveReceiptVerification matchedVerification(
+			ArchiveProcessingTargetBinding target,
+			long documentCount
+	) {
+		ArchiveIdentityDigest digest = digest("a");
+		return new ArchiveReceiptVerification(
+				target.indexKind(),
+				documentCount,
+				documentCount,
+				digest,
+				digest,
+				ArchiveReceiptStatus.MATCHED);
+	}
+
+	private static ArchiveReceiptVerification identityMismatchVerification(
+			ArchiveProcessingTargetBinding target,
+			long documentCount
+	) {
+		return mismatchedVerification(
+				target,
+				documentCount,
+				documentCount,
+				ArchiveReceiptStatus.IDENTITY_MISMATCH);
+	}
+
+	private static ArchiveReceiptVerification surplusVerification(
+			ArchiveProcessingTargetBinding target,
+			long expectedDocumentCount,
+			long actualDocumentCount
+	) {
+		return mismatchedVerification(
+				target,
+				expectedDocumentCount,
+				actualDocumentCount,
+				ArchiveReceiptStatus.SURPLUS);
+	}
+
+	private static ArchiveReceiptVerification mismatchedVerification(
+			ArchiveProcessingTargetBinding target,
+			long expectedDocumentCount,
+			long actualDocumentCount,
+			ArchiveReceiptStatus status
+	) {
+		return new ArchiveReceiptVerification(
+				target.indexKind(),
+				expectedDocumentCount,
+				actualDocumentCount,
+				digest("a"),
+				digest("b"),
+				status);
+	}
+
+	private static ArchiveIdentityDigest digest(String hexDigit) {
+		return new ArchiveIdentityDigest(hexDigit.repeat(64));
 	}
 
 	private static ArchiveProcessingProgress progress(

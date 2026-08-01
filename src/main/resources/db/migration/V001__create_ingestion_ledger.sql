@@ -789,22 +789,6 @@ create table ingestion_archive_processing (
                 logical_partition_key is not null
                 and expected_document_count is not null
                 and expected_document_count >= 0
-                and receipt_digest_algorithm is null
-                and expected_identity_digest is null
-                and verified_generation_id is not null
-                and verified_index_uuid is not null
-                and btrim(verified_index_uuid) <> ''
-                and verified_index_uuid !~ '[*?,[:space:]]'
-                and actual_document_count is not null
-                and actual_document_count >= 0
-                and actual_identity_digest is null
-                and receipt_verified_at is not null
-            )
-            or
-            (
-                logical_partition_key is not null
-                and expected_document_count is not null
-                and expected_document_count >= 0
                 and receipt_digest_algorithm is not null
                 and receipt_digest_algorithm = 'sha256-length-prefix-v1'
                 and expected_identity_digest is not null
@@ -912,13 +896,9 @@ create table ingestion_archive_processing (
                 and actual_document_count = expected_document_count
                 and verified_generation_id = bound_generation_id
                 and verified_index_uuid = bound_index_uuid
-                and (
-                    (
-                        expected_identity_digest is null
-                        and actual_identity_digest is null
-                    )
-                    or actual_identity_digest = expected_identity_digest
-                )
+                and receipt_digest_algorithm = 'sha256-length-prefix-v1'
+                and expected_identity_digest is not null
+                and actual_identity_digest = expected_identity_digest
             )
         )
 );

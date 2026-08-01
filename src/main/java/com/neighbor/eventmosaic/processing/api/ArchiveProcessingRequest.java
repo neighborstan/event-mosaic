@@ -15,6 +15,7 @@ import java.util.Objects;
  * @param processingFingerprint fingerprint проекции и mapping revision
  * @param indexTargets exact ACTIVE generation, зафиксированная для attempt
  * @param csvPath путь к подготовленному CSV
+ * @param receiptPageSize максимальный размер PIT/search_after страницы receipt
  */
 public record ArchiveProcessingRequest(
 		GdeltArchiveKind kind,
@@ -22,7 +23,8 @@ public record ArchiveProcessingRequest(
 		String sourceArchiveKey,
 		String processingFingerprint,
 		ActiveIndexTargets indexTargets,
-		Path csvPath
+		Path csvPath,
+		int receiptPageSize
 ) {
 
 	/** Проверяет обязательный source context до открытия CSV. */
@@ -33,6 +35,29 @@ public record ArchiveProcessingRequest(
 		requireText(processingFingerprint, "processingFingerprint");
 		Objects.requireNonNull(indexTargets, "indexTargets must not be null");
 		Objects.requireNonNull(csvPath, "csvPath must not be null");
+		if (receiptPageSize <= 0 || receiptPageSize > 10_000) {
+			throw new IllegalArgumentException(
+					"receiptPageSize must be between 1 and 10000");
+		}
+	}
+
+	/** Создает запрос с production default страницы receipt. */
+	public ArchiveProcessingRequest(
+			GdeltArchiveKind kind,
+			Instant sourceUpdateTime,
+			String sourceArchiveKey,
+			String processingFingerprint,
+			ActiveIndexTargets indexTargets,
+			Path csvPath
+	) {
+		this(
+				kind,
+				sourceUpdateTime,
+				sourceArchiveKey,
+				processingFingerprint,
+				indexTargets,
+				csvPath,
+				500);
 	}
 
 	private static void requireText(String value, String fieldName) {

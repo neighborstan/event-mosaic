@@ -8,18 +8,20 @@ public enum GdeltIndexKind {
 	/**
 	 * Событие GDELT.
 	 */
-	EVENT("gdelt-events-v1"),
+	EVENT("gdelt-events-v1", "globalEventId"),
 
 	/**
 	 * Упоминание события GDELT.
 	 */
-	MENTION("gdelt-mentions-v1");
+	MENTION("gdelt-mentions-v1", "rawMentionId");
 
 	/** Фиксированное имя физического индекса. */
 	private final String indexName;
+	private final String identityField;
 
-	GdeltIndexKind(String indexName) {
+	GdeltIndexKind(String indexName, String identityField) {
 		this.indexName = indexName;
+		this.identityField = identityField;
 	}
 
 	/**
@@ -29,6 +31,15 @@ public enum GdeltIndexKind {
 	 */
 	public String indexName() {
 		return indexName;
+	}
+
+	/**
+	 * Возвращает ordinary doc-values field стабильной document identity.
+	 *
+	 * @return поле вторичной сортировки receipt
+	 */
+	public String identityField() {
+		return identityField;
 	}
 
 	/**

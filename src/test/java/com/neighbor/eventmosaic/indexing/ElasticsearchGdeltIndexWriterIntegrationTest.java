@@ -14,10 +14,12 @@ import co.elastic.clients.elasticsearch._types.mapping.Property;
 import co.elastic.clients.elasticsearch._types.mapping.TypeMapping;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
 import com.neighbor.eventmosaic.TestcontainersConfiguration;
+import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexOutcome;
+import com.neighbor.eventmosaic.indexing.api.EventIdentityConflictException;
 import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
@@ -53,6 +55,7 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 			"gdelt-mentions-v1-p20260727-g0001";
 	private static final String MISSING_EVENT_GENERATION =
 			"gdelt-events-v1-p20260727-g0002";
+	private static final String EVENT_READ_ALIAS = "gdelt-events-read";
 	private static final String STRICT_DYNAMIC_MAPPING_ERROR_TYPE =
 			"strict_dynamic_mapping_exception";
 	private static final String INDEX_NOT_FOUND_ERROR_TYPE =
@@ -61,6 +64,7 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	private static final String MENTION_ARCHIVE = "20260730101500.translation.mentions.CSV.zip";
 	private static final String EVENT_PROCESSING_FINGERPRINT = "a".repeat(64);
 	private static final String MENTION_PROCESSING_FINGERPRINT = "b".repeat(64);
+	private static final int RECEIPT_PAGE_SIZE = 500;
 	private static final Set<String> EVENT_KEYWORD_FIELDS = Set.of(
 			"actor1Code",
 			"actor1Name",
@@ -393,44 +397,87 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Стабильные IDs перезаписывают Event и Mention без дубликатов")
-	void overwritesDocumentsByStableIds() throws IOException {
+	@DisplayName("Exact Event provenance повторяется без перезаписи документа")
+	void replaysExactEventProvenanceWithoutOverwrite() throws IOException {
 		createPhysicalIndices();
 		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
-		ExactIndexTarget mentionTarget = target(MENTION_GENERATION);
 		IndexedEventDocument initialEvent = event(2001, 2, "Actor before");
-		IndexedEventDocument updatedEvent = event(2001, 2, "Actor after");
-		IndexedMentionDocument initialMention = mention("m1", 2001, 3, -1.5);
-		IndexedMentionDocument updatedMention = mention("m1", 2001, 3, 2.5);
+		IndexedEventDocument replay = event(2001, 2, "Actor must not overwrite");
 
 		assertThat(writer.write(new BulkIndexCommand<>(
 				EVENT, eventTarget, List.of(initialEvent))).successful())
 				.isTrue();
 		assertThat(writer.write(new BulkIndexCommand<>(
-				EVENT, eventTarget, List.of(updatedEvent))).successful())
+				EVENT, eventTarget, List.of(replay))).successful())
 				.isTrue();
+		writer.refresh(EVENT, eventTarget);
+
+		assertThat(client.count(request -> request.index(EVENT_GENERATION)).count()).isEqualTo(1);
+		var storedEvent = client.get(
+				request -> request.index(EVENT_GENERATION).id(initialEvent.documentId()),
+				IndexedEventDocument.class);
+		assertThat(storedEvent.found()).isTrue();
+		assertThat(storedEvent.source())
+				.isNotNull()
+				.extracting(IndexedEventDocument::actor1Name)
+				.isEqualTo("Actor before");
+	}
+
+	@Test
+	@DisplayName("Другая Event provenance отклоняется без изменения документа")
+	void rejectsDifferentEventProvenanceWithoutOverwrite() throws IOException {
+		createPhysicalIndices();
+		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
+		IndexedEventDocument initialEvent = event(2002, 2, "Actor before");
+		IndexedEventDocument collision = event(2002, 3, "Actor collision");
+		writer.write(new BulkIndexCommand<>(
+				EVENT,
+				eventTarget,
+				List.of(initialEvent)));
+
+		assertThatExceptionOfType(EventIdentityConflictException.class)
+				.isThrownBy(() -> writer.write(new BulkIndexCommand<>(
+						EVENT,
+						eventTarget,
+						List.of(collision))))
+				.satisfies(exception -> {
+					assertThat(exception.retryable()).isFalse();
+					assertThat(exception.sourceLineNumber()).isEqualTo(3);
+				});
+		writer.refresh(EVENT, eventTarget);
+
+		assertThat(client.count(request -> request.index(EVENT_GENERATION)).count())
+				.isEqualTo(1);
+		var storedEvent = client.get(
+				request -> request.index(EVENT_GENERATION).id(initialEvent.documentId()),
+				IndexedEventDocument.class);
+		assertThat(storedEvent.source())
+				.isNotNull()
+				.extracting(IndexedEventDocument::actor1Name)
+				.isEqualTo("Actor before");
+	}
+
+	@Test
+	@DisplayName("Стабильный Mention ID сохраняет overwrite без дубликатов")
+	void overwritesMentionByStableId() throws IOException {
+		createPhysicalIndices();
+		ExactIndexTarget mentionTarget = target(MENTION_GENERATION);
+		IndexedMentionDocument initialMention = mention("m1", 2001, 3, -1.5);
+		IndexedMentionDocument updatedMention = mention("m1", 2001, 3, 2.5);
+
 		assertThat(writer.write(new BulkIndexCommand<>(
 				MENTION, mentionTarget, List.of(initialMention))).successful())
 				.isTrue();
 		assertThat(writer.write(new BulkIndexCommand<>(
 				MENTION, mentionTarget, List.of(updatedMention))).successful())
 				.isTrue();
-		writer.refresh(EVENT, eventTarget);
 		writer.refresh(MENTION, mentionTarget);
 
-		assertThat(client.count(request -> request.index(EVENT_GENERATION)).count()).isEqualTo(1);
-		assertThat(client.count(request -> request.index(MENTION_GENERATION)).count()).isEqualTo(1);
-		var storedEvent = client.get(
-				request -> request.index(EVENT_GENERATION).id(initialEvent.documentId()),
-				IndexedEventDocument.class);
+		assertThat(client.count(request -> request.index(MENTION_GENERATION)).count())
+				.isEqualTo(1);
 		var storedMention = client.get(
 				request -> request.index(MENTION_GENERATION).id(initialMention.documentId()),
 				IndexedMentionDocument.class);
-		assertThat(storedEvent.found()).isTrue();
-		assertThat(storedEvent.source())
-				.isNotNull()
-				.extracting(IndexedEventDocument::actor1Name)
-				.isEqualTo("Actor after");
 		assertThat(storedMention.found()).isTrue();
 		assertThat(storedMention.source())
 				.isNotNull()
@@ -442,6 +489,7 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	@DisplayName("Receipt использует exact target, archive key и processing fingerprint")
 	void verifiesExactReceiptAndDeletedIndex() throws IOException {
 		client.indices().create(request -> request.index(EVENT_GENERATION));
+		addEventReadAlias(EVENT_GENERATION);
 		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
 		IndexedEventDocument exactArchive = event(3001, 4, "Exact archive");
 		IndexedEventDocument similarArchive = event(
@@ -466,18 +514,43 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				eventTarget,
 				EVENT_ARCHIVE,
 				EVENT_PROCESSING_FINGERPRINT,
-				1));
-		var mismatched = writer.verifyReceipt(new ArchiveReceiptQuery(
+				1,
+				digestOfIds(exactArchive.documentId()),
+				RECEIPT_PAGE_SIZE));
+		var shortage = writer.verifyReceipt(new ArchiveReceiptQuery(
 				EVENT,
 				eventTarget,
 				EVENT_ARCHIVE,
 				EVENT_PROCESSING_FINGERPRINT,
-				2));
+				2,
+				digestOfIds(exactArchive.documentId(), "3999"),
+				RECEIPT_PAGE_SIZE));
+		var surplus = writer.verifyReceipt(new ArchiveReceiptQuery(
+				EVENT,
+				eventTarget,
+				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
+				0,
+				digestOfIds(),
+				RECEIPT_PAGE_SIZE));
+		var identityMismatch = writer.verifyReceipt(new ArchiveReceiptQuery(
+				EVENT,
+				eventTarget,
+				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
+				1,
+				digestOfIds("3999"),
+				RECEIPT_PAGE_SIZE));
 
 		assertThat(matched.status()).isEqualTo(ArchiveReceiptStatus.MATCHED);
 		assertThat(matched.actualDocumentCount()).isEqualTo(1);
-		assertThat(mismatched.status()).isEqualTo(ArchiveReceiptStatus.MISMATCHED);
-		assertThat(mismatched.actualDocumentCount()).isEqualTo(1);
+		assertThat(shortage.status()).isEqualTo(ArchiveReceiptStatus.SHORTAGE);
+		assertThat(shortage.actualDocumentCount()).isEqualTo(1);
+		assertThat(surplus.status()).isEqualTo(ArchiveReceiptStatus.SURPLUS);
+		assertThat(surplus.actualDocumentCount()).isEqualTo(1);
+		assertThat(identityMismatch.status())
+				.isEqualTo(ArchiveReceiptStatus.IDENTITY_MISMATCH);
+		assertThat(identityMismatch.actualDocumentCount()).isEqualTo(1);
 
 		client.indices().delete(request -> request.index(EVENT_GENERATION));
 
@@ -486,7 +559,9 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				eventTarget,
 				EVENT_ARCHIVE,
 				EVENT_PROCESSING_FINGERPRINT,
-				1);
+				1,
+				digestOfIds(exactArchive.documentId()),
+				RECEIPT_PAGE_SIZE);
 		assertThatExceptionOfType(IndexTargetUnavailableException.class)
 				.isThrownBy(() -> writer.verifyReceipt(missingQuery))
 				.satisfies(exception -> assertThat(exception.reason())
@@ -498,6 +573,7 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	void countsReceiptOnlyInExactTargetGeneration() throws IOException {
 		client.indices().create(request -> request.index(EVENT_GENERATION));
 		client.indices().create(request -> request.index(MISSING_EVENT_GENERATION));
+		addEventReadAlias(EVENT_GENERATION);
 		ExactIndexTarget activeTarget = target(EVENT_GENERATION);
 		ExactIndexTarget otherGeneration = target(MISSING_EVENT_GENERATION);
 		IndexedEventDocument activeDocument = event(3101, 7, "Active generation");
@@ -512,7 +588,9 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				activeTarget,
 				EVENT_ARCHIVE,
 				EVENT_PROCESSING_FINGERPRINT,
-				1));
+				1,
+				digestOfIds(activeDocument.documentId()),
+				RECEIPT_PAGE_SIZE));
 		long bothGenerationsCount = client.count(request -> request
 				.index(EVENT_GENERATION, MISSING_EVENT_GENERATION)
 				.query(root -> root.bool(bool -> bool
@@ -537,6 +615,7 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				.settings(settings -> settings
 						.numberOfShards("2")
 						.refreshInterval(interval -> interval.time("-1"))));
+		addEventReadAlias(EVENT_GENERATION);
 		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
 		List<IndexedEventDocument> documents = java.util.stream.LongStream
 				.rangeClosed(1, 32)
@@ -556,8 +635,12 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				eventTarget,
 				EVENT_ARCHIVE,
 				EVENT_PROCESSING_FINGERPRINT,
-				documents.size())).status())
-				.isEqualTo(ArchiveReceiptStatus.MISMATCHED);
+				documents.size(),
+				digestOfIds(documents.stream()
+						.map(IndexedEventDocument::documentId)
+						.toArray(String[]::new)),
+				1)).status())
+				.isEqualTo(ArchiveReceiptStatus.SHORTAGE);
 
 		writer.refresh(EVENT, eventTarget);
 
@@ -566,7 +649,11 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				eventTarget,
 				EVENT_ARCHIVE,
 				EVENT_PROCESSING_FINGERPRINT,
-				documents.size()));
+				documents.size(),
+				digestOfIds(documents.stream()
+						.map(IndexedEventDocument::documentId)
+						.toArray(String[]::new)),
+				1));
 		assertThat(receipt.status()).isEqualTo(ArchiveReceiptStatus.MATCHED);
 		assertThat(receipt.actualDocumentCount()).isEqualTo(documents.size());
 	}
@@ -610,6 +697,13 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	private void createPhysicalIndices() throws IOException {
 		client.indices().create(request -> request.index(EVENT_GENERATION));
 		client.indices().create(request -> request.index(MENTION_GENERATION));
+		addEventReadAlias(EVENT_GENERATION);
+	}
+
+	private void addEventReadAlias(String indexName) throws IOException {
+		client.indices().updateAliases(request -> request.actions(action -> action.add(add -> add
+				.index(indexName)
+				.alias(EVENT_READ_ALIAS))));
 	}
 
 	private ExactIndexTarget target(String indexName) throws IOException {
@@ -695,6 +789,14 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	private static void assertDocValuesEnabled(Boolean docValues) {
 		// Elasticsearch не возвращает значение true по умолчанию в installed mapping.
 		assertThat(docValues).isNotEqualTo(Boolean.FALSE);
+	}
+
+	private static ArchiveIdentityDigest digestOfIds(String... orderedIds) {
+		ArchiveIdentityDigest.Accumulator accumulator = ArchiveIdentityDigest.accumulator();
+		for (String identity : orderedIds) {
+			accumulator.addIdentity(identity);
+		}
+		return accumulator.finish();
 	}
 
 	private static IndexedEventDocument event(long id, long line, String actor1Name) {

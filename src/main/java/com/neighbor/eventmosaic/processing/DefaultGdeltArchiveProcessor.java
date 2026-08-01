@@ -12,10 +12,13 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltEventCsvReader;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMention;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMentionCsvReader;
 import com.neighbor.eventmosaic.gdelt.api.GdeltRecordConsumer;
+import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
+import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
+import com.neighbor.eventmosaic.indexing.api.EventIdentityConflictException;
 import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
@@ -151,6 +154,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				request.processingFingerprint(),
 				bulkSize,
 				maxBulkBytes,
+				request.receiptPageSize(),
 				indexWriter,
 				progressListener,
 				metrics);
@@ -161,10 +165,11 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			accumulator.sourceCompleted(summary);
 			accumulator.flushFinal();
 			accumulator.refreshIndex();
-			accumulator.verifyReceipt();
+			ArchiveReceiptVerification receipt = accumulator.verifyReceipt();
 			ArchiveProcessingResult result = ArchiveProcessingResult.completed(
 					request.kind(),
-					accumulator.progress());
+					accumulator.progress(),
+					receipt);
 			metrics.archiveOutcome(request.kind(), result.outcome());
 			return result;
 		}
@@ -186,12 +191,12 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 					signal.firstFailedLineNumber());
 		}
 		catch (ReceiptMismatchSignal signal) {
-			return expectedFailure(
+			return expectedReceiptFailure(
 					request.kind(),
 					accumulator.progress(),
 					signal.code(),
 					signal.retryable(),
-					null);
+					signal.verification());
 		}
 		catch (GdeltCsvInterruptedException exception) {
 			return expectedFailure(
@@ -220,6 +225,16 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 					ArchiveProcessingErrorCode.CSV_SOURCE_SCHEMA_FAILURE,
 					false,
 					null,
+					exception,
+					diagnosticListener);
+		}
+		catch (EventIdentityConflictException exception) {
+			return expectedFailure(
+					request.kind(),
+					accumulator.progress(),
+					ArchiveProcessingErrorCode.EVENT_IDENTITY_CONFLICT,
+					false,
+					exception.sourceLineNumber(),
 					exception,
 					diagnosticListener);
 		}
@@ -294,6 +309,22 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		return ArchiveProcessingResult.failed(kind, progress, failure);
 	}
 
+	private ArchiveProcessingResult expectedReceiptFailure(
+			GdeltArchiveKind kind,
+			ArchiveProcessingProgress progress,
+			ArchiveProcessingErrorCode code,
+			boolean retryable,
+			ArchiveReceiptVerification receipt
+	) {
+		metrics.failure(kind, code);
+		metrics.archiveOutcome(kind, ArchiveProcessingOutcome.FAILED);
+		return ArchiveProcessingResult.failed(
+				kind,
+				progress,
+				new ArchiveProcessingFailure(code, retryable, null),
+				receipt);
+	}
+
 	private static void reportSuppressedDiagnostic(
 			RuntimeException signal,
 			ArchiveProcessingDiagnosticListener diagnosticListener
@@ -329,10 +360,12 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		private final String processingFingerprint;
 		private final int bulkSize;
 		private final long maxBulkBytes;
+		private final int receiptPageSize;
 		private final GdeltIndexWriter indexWriter;
 		private final ArchiveProcessingProgressListener progressListener;
 		private final ProcessingMetrics metrics;
 		private final List<D> documents;
+		private final ArchiveIdentityDigest.Accumulator expectedDigest;
 
 		private long deliveredRecords;
 		private long bufferedBytes;
@@ -344,6 +377,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		private long receiptDocuments;
 		private Long firstFailedLineNumber;
 		private ArchiveProcessingProgress lastCheckpoint;
+		private ArchiveReceiptVerification receipt;
 
 		private BatchAccumulator(
 				GdeltArchiveKind archiveKind,
@@ -353,6 +387,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				String processingFingerprint,
 				int bulkSize,
 				long maxBulkBytes,
+				int receiptPageSize,
 				GdeltIndexWriter indexWriter,
 				ArchiveProcessingProgressListener progressListener,
 				ProcessingMetrics metrics
@@ -364,10 +399,12 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			this.processingFingerprint = processingFingerprint;
 			this.bulkSize = bulkSize;
 			this.maxBulkBytes = maxBulkBytes;
+			this.receiptPageSize = receiptPageSize;
 			this.indexWriter = indexWriter;
 			this.progressListener = progressListener;
 			this.metrics = metrics;
 			this.documents = new ArrayList<>(bulkSize);
+			this.expectedDigest = ArchiveIdentityDigest.accumulator();
 		}
 
 		private void accept(DocumentMappingResult<D> mapping) {
@@ -380,6 +417,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				metrics.mapped(archiveKind);
 				metrics.invalidGeoCandidates(archiveKind, mapping.invalidGeoCandidates());
 				D document = mapping.document();
+				expectedDigest.addIdentity(document.documentId());
 				long operationBytes = indexWriter.estimateBulkOperationBytes(
 						indexTarget,
 						document);
@@ -442,6 +480,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 						documents));
 			}
 			catch (IndexTargetUnavailableException
+					| EventIdentityConflictException
 					| IndexingAccessException
 					| IndexingInterruptedException
 					| IndexingProtocolException exception) {
@@ -470,20 +509,22 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			indexWriter.refresh(indexKind, indexTarget);
 		}
 
-		private void verifyReceipt() {
-			ArchiveReceiptVerification receipt = indexWriter.verifyReceipt(new ArchiveReceiptQuery(
+		private ArchiveReceiptVerification verifyReceipt() {
+			ArchiveIdentityDigest expected = expectedDigest.finish();
+			receipt = indexWriter.verifyReceipt(new ArchiveReceiptQuery(
 					indexKind,
 					indexTarget,
 					sourceArchiveKey,
 					processingFingerprint,
-					succeededOperations));
+					succeededOperations,
+					expected,
+					receiptPageSize));
 			receiptDocuments = receipt.actualDocumentCount();
 			checkpoint();
 			if (!receipt.matched()) {
-				throw new ReceiptMismatchSignal(
-						receipt.expectedDocumentCount(),
-						receipt.actualDocumentCount());
+				throw new ReceiptMismatchSignal(receipt);
 			}
+			return receipt;
 		}
 
 		private void checkpoint() {
@@ -561,9 +602,12 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		private final ArchiveProcessingErrorCode code;
 		private final boolean retryable;
 
-		private ReceiptMismatchSignal(long expectedDocuments, long actualDocuments) {
+		private final ArchiveReceiptVerification verification;
+
+		private ReceiptMismatchSignal(ArchiveReceiptVerification verification) {
 			super(null, null, true, false);
-			boolean surplus = actualDocuments > expectedDocuments;
+			this.verification = verification;
+			boolean surplus = verification.status() == ArchiveReceiptStatus.SURPLUS;
 			this.code = surplus
 					? ArchiveProcessingErrorCode.INDEX_RECEIPT_SURPLUS
 					: ArchiveProcessingErrorCode.INDEX_RECEIPT_MISMATCH;
@@ -576,6 +620,10 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 
 		private boolean retryable() {
 			return retryable;
+		}
+
+		private ArchiveReceiptVerification verification() {
+			return verification;
 		}
 	}
 }

@@ -1,5 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.api;
 
+import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import java.time.Duration;
 import java.util.Optional;
 
@@ -53,11 +54,13 @@ public interface ArchiveProcessingLedger {
 	 *
 	 * @param attempt captured token и exact target владельца
 	 * @param progress итоговые counters
+	 * @param verification полное совпавшее count+digest evidence
 	 * @return результат conditional transition
 	 */
 	AttemptTransitionResult markIndexed(
 			ArchiveProcessingAttempt attempt,
-			ArchiveProcessingProgress progress
+			ArchiveProcessingProgress progress,
+			ArchiveReceiptVerification verification
 	);
 
 	/**
@@ -66,12 +69,36 @@ public interface ArchiveProcessingLedger {
 	 * @param attempt captured token и exact target владельца
 	 * @param failure безопасная failure projection
 	 * @param progress partial counters
+	 * @param verification receipt mismatch evidence либо {@code null}
 	 * @return результат conditional transition
 	 */
 	AttemptTransitionResult markFailed(
 			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingFailure failure,
-			ArchiveProcessingProgress progress
+			ArchiveProcessingProgress progress,
+			ArchiveReceiptVerification verification
+	);
+
+	/**
+	 * Условно обновляет diagnostic receipt успешно проверенного INDEXED state.
+	 *
+	 * @param archiveIdempotencyKey стабильный source archive key
+	 * @param expectedProcessingFingerprint fingerprint проверенного state
+	 * @param expectedAttemptCount число attempts проверенного state
+	 * @param expectedStateVersion durable version проверенного state
+	 * @param expectedStoredTargetBinding binding сохраненного INDEXED state для CAS
+	 * @param verifiedCurrentTargetBinding проверенный current ACTIVE target
+	 * @param verification совпавшее count+digest evidence current target
+	 * @return APPLIED либо OWNERSHIP_LOST при изменившемся state или current target
+	 */
+	AttemptTransitionResult recordReceiptMatch(
+			String archiveIdempotencyKey,
+			String expectedProcessingFingerprint,
+			int expectedAttemptCount,
+			long expectedStateVersion,
+			ArchiveProcessingTargetBinding expectedStoredTargetBinding,
+			ArchiveProcessingTargetBinding verifiedCurrentTargetBinding,
+			ArchiveReceiptVerification verification
 	);
 
 	/**
@@ -80,7 +107,10 @@ public interface ArchiveProcessingLedger {
 	 * @param archiveIdempotencyKey стабильный source archive key
 	 * @param expectedProcessingFingerprint fingerprint проверенного state
 	 * @param expectedAttemptCount число attempts проверенного state
-	 * @param expectedTargetBinding exact target проверенного INDEXED state
+	 * @param expectedStateVersion durable version проверенного state
+	 * @param expectedStoredTargetBinding binding сохраненного INDEXED state для CAS
+	 * @param verifiedCurrentTargetBinding проверенный current ACTIVE target
+	 * @param verification несовпавшее count+digest evidence current target
 	 * @param failure retryable shortage либо non-retryable surplus
 	 * @return APPLIED либо OWNERSHIP_LOST при изменившемся state
 	 */
@@ -88,7 +118,10 @@ public interface ArchiveProcessingLedger {
 			String archiveIdempotencyKey,
 			String expectedProcessingFingerprint,
 			int expectedAttemptCount,
-			ArchiveProcessingTargetBinding expectedTargetBinding,
+			long expectedStateVersion,
+			ArchiveProcessingTargetBinding expectedStoredTargetBinding,
+			ArchiveProcessingTargetBinding verifiedCurrentTargetBinding,
+			ArchiveReceiptVerification verification,
 			ArchiveProcessingFailure failure
 	);
 

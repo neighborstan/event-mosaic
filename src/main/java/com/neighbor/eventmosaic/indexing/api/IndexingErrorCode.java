@@ -37,6 +37,13 @@ public enum IndexingErrorCode implements ApplicationErrorCode {
 			"Elasticsearch вернул некорректный ответ"),
 
 	/**
+	 * Event с тем же {@code globalEventId} имеет другую source provenance.
+	 */
+	EVENT_IDENTITY_CONFLICT(
+			"EVENT_IDENTITY_CONFLICT",
+			"Event identity конфликтует с сохраненной provenance"),
+
+	/**
 	 * Exact physical target больше не существует.
 	 */
 	INDEX_TARGET_MISSING(

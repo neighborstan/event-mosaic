@@ -4,7 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -14,6 +17,7 @@ import static org.mockito.Mockito.when;
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
+import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
@@ -74,7 +78,11 @@ class GdeltPipelineServiceTest {
 
 	private static final String EVENT_FINGERPRINT = "a".repeat(64);
 	private static final String MENTION_FINGERPRINT = "b".repeat(64);
+	private static final long INDEXED_STATE_VERSION = 7;
 	private static final Instant NOW = Instant.parse("2026-07-30T12:00:00Z");
+	private static final ArchiveIdentityDigest RECEIPT_DIGEST = digest("1");
+	private static final ArchiveIdentityDigest OTHER_DIGEST = digest("2");
+	private static final ArchiveIdentityDigest EMPTY_DIGEST = digest();
 	private static final ActiveIndexTargets ACTIVE_TARGETS = new ActiveIndexTargets(
 			"p20260727",
 			3,
@@ -111,7 +119,8 @@ class GdeltPipelineServiceTest {
 				fingerprintFactory,
 				indexWriter,
 				indexTargetResolver,
-				GdeltTestFixtures.properties(tempDir, 1024 * 1024));
+				GdeltTestFixtures.properties(tempDir, 1024 * 1024),
+				GdeltTestFixtures.backendDataProperties());
 		when(indexTargetResolver.resolve(any())).thenReturn(
 				IndexTargetResolution.ready(ACTIVE_TARGETS));
 		when(fingerprintFactory.create(
@@ -125,9 +134,9 @@ class GdeltPipelineServiceTest {
 								: MENTION_FINGERPRINT);
 		when(processingLedger.checkpoint(any(), any(), any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
-		when(processingLedger.markIndexed(any(), any()))
+		when(processingLedger.markIndexed(any(), any(), any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
-		when(processingLedger.markFailed(any(), any(), any()))
+		when(processingLedger.markFailed(any(), any(), any(), any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
 	}
 
@@ -143,14 +152,14 @@ class GdeltPipelineServiceTest {
 			ArchiveProcessingProgressListener listener = invocation.getArgument(1);
 			ArchiveProcessingProgress progress = successfulProgress();
 			assertThat(listener.onProgress(progress)).isTrue();
-			return ArchiveProcessingResult.completed(request.kind(), progress);
+			return completed(request.kind(), progress);
 		});
 
 		assertThat(service.runLatestUpdate()).isSameAs(runState);
 
 		verify(archiveProcessor, org.mockito.Mockito.times(2)).process(any(), any(), any());
 		verify(processingLedger, org.mockito.Mockito.times(2))
-				.markIndexed(any(), any());
+				.markIndexed(any(), any(), any());
 		verifyNoInteractions(indexWriter);
 	}
 
@@ -192,8 +201,8 @@ class GdeltPipelineServiceTest {
 				.contains("GDELT archive processing lost ownership with cleanup failure")
 				.doesNotContain("unsafe control signal")
 				.doesNotContain("unsafe close details");
-		verify(processingLedger, never()).markIndexed(any(), any());
-		verify(processingLedger, never()).markFailed(any(), any(), any());
+		verify(processingLedger, never()).markIndexed(any(), any(), any());
+		verify(processingLedger, never()).markFailed(any(), any(), any(), any());
 	}
 
 	@Test
@@ -215,24 +224,91 @@ class GdeltPipelineServiceTest {
 	}
 
 	@Test
-	@DisplayName("Не создает новый attempt при совпавшем receipt INDEXED архива")
-	void skipsIndexedArchiveWithMatchingReceipt() {
+	@DisplayName("После смены generation обновляет matched receipt и пропускает INDEXED архив")
+	void recordsMatchedReceiptAgainstCurrentGenerationBeforeSkip() {
 		IngestionRunState runState = runState(false);
 		IngestionArchiveState archive = runState.archives().getFirst();
+		ArchiveProcessingFingerprint fingerprint = eventFingerprint();
+		ArchiveProcessingTargetBinding storedBinding = previousTargetBinding(
+				GdeltIndexKind.EVENT);
+		ArchiveProcessingTargetBinding currentBinding = targetBinding(GdeltIndexKind.EVENT);
+		ArchiveReceiptVerification matched = verification(
+				GdeltIndexKind.EVENT,
+				1,
+				1,
+				ArchiveReceiptStatus.MATCHED);
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
-		when(processingLedger.register(anyString(), any()))
-				.thenAnswer(invocation -> indexedState(
-						archive,
-						invocation.getArgument(1)));
-		when(indexWriter.verifyReceipt(any())).thenReturn(
-				new ArchiveReceiptVerification(
-						GdeltIndexKind.EVENT,
-						1,
-						1,
-						ArchiveReceiptStatus.MATCHED));
+		when(processingLedger.register(archive.archive().idempotencyKey(), fingerprint))
+				.thenReturn(indexedState(archive, fingerprint, storedBinding));
+		when(indexWriter.verifyReceipt(any())).thenReturn(matched);
+		when(processingLedger.recordReceiptMatch(
+				eq(archive.archive().idempotencyKey()),
+				eq(fingerprint.processingFingerprint()),
+				eq(1),
+				eq(INDEXED_STATE_VERSION),
+				eq(storedBinding),
+				eq(currentBinding),
+				same(matched)))
+				.thenReturn(AttemptTransitionResult.APPLIED);
 
 		service.runLatestUpdate();
 
+		verify(processingLedger).recordReceiptMatch(
+				archive.archive().idempotencyKey(),
+				fingerprint.processingFingerprint(),
+				1,
+				INDEXED_STATE_VERSION,
+				storedBinding,
+				currentBinding,
+				matched);
+		verify(indexWriter).verifyReceipt(org.mockito.ArgumentMatchers.argThat(query ->
+				query.target().equals(ACTIVE_TARGETS.event())));
+		verify(processingLedger, never()).claim(anyString(), any(), any());
+		verifyNoInteractions(archiveProcessor);
+	}
+
+	@Test
+	@DisplayName("После смены generation receipt mismatch передает stored и current bindings")
+	void recordsReceiptMismatchAgainstChangedGenerationBindings() {
+		IngestionRunState runState = runState(false);
+		IngestionArchiveState archive = runState.archives().getFirst();
+		ArchiveProcessingFingerprint fingerprint = eventFingerprint();
+		ArchiveProcessingTargetBinding storedBinding = previousTargetBinding(
+				GdeltIndexKind.EVENT);
+		ArchiveProcessingTargetBinding currentBinding = targetBinding(GdeltIndexKind.EVENT);
+		ArchiveReceiptVerification mismatch = verification(
+				GdeltIndexKind.EVENT,
+				1,
+				1,
+				ArchiveReceiptStatus.IDENTITY_MISMATCH);
+		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
+		when(processingLedger.register(archive.archive().idempotencyKey(), fingerprint))
+				.thenReturn(indexedState(archive, fingerprint, storedBinding));
+		when(indexWriter.verifyReceipt(any())).thenReturn(mismatch);
+		when(processingLedger.recordReceiptMismatch(
+				eq(archive.archive().idempotencyKey()),
+				eq(fingerprint.processingFingerprint()),
+				eq(1),
+				eq(INDEXED_STATE_VERSION),
+				eq(storedBinding),
+				eq(currentBinding),
+				same(mismatch),
+				any()))
+				.thenReturn(AttemptTransitionResult.OWNERSHIP_LOST);
+
+		service.runLatestUpdate();
+
+		verify(processingLedger).recordReceiptMismatch(
+				eq(archive.archive().idempotencyKey()),
+				eq(fingerprint.processingFingerprint()),
+				eq(1),
+				eq(INDEXED_STATE_VERSION),
+				eq(storedBinding),
+				eq(currentBinding),
+				same(mismatch),
+				org.mockito.ArgumentMatchers.argThat(failure ->
+						"INDEX_RECEIPT_MISMATCH".equals(failure.errorCode())
+								&& failure.retryable()));
 		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
 	}
@@ -261,15 +337,18 @@ class GdeltPipelineServiceTest {
 						archive,
 						invocation.getArgument(1)));
 		when(indexWriter.verifyReceipt(any())).thenReturn(
-				new ArchiveReceiptVerification(
+				verification(
 						GdeltIndexKind.EVENT,
 						1,
 						2,
-						ArchiveReceiptStatus.MISMATCHED));
+						ArchiveReceiptStatus.SURPLUS));
 		when(processingLedger.recordReceiptMismatch(
 				anyString(),
 				anyString(),
 				anyInt(),
+				anyLong(),
+				any(),
+				any(),
 				any(),
 				any()))
 				.thenReturn(AttemptTransitionResult.OWNERSHIP_LOST);
@@ -291,15 +370,18 @@ class GdeltPipelineServiceTest {
 						archive,
 						invocation.getArgument(1)));
 		when(indexWriter.verifyReceipt(any())).thenReturn(
-				new ArchiveReceiptVerification(
+				verification(
 						GdeltIndexKind.EVENT,
 						1,
 						2,
-						ArchiveReceiptStatus.MISMATCHED));
+						ArchiveReceiptStatus.SURPLUS));
 		when(processingLedger.recordReceiptMismatch(
 				anyString(),
 				anyString(),
 				anyInt(),
+				anyLong(),
+				any(),
+				any(),
 				any(),
 				any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
@@ -310,6 +392,9 @@ class GdeltPipelineServiceTest {
 				anyString(),
 				anyString(),
 				anyInt(),
+				anyLong(),
+				any(),
+				any(),
 				any(),
 				org.mockito.ArgumentMatchers.argThat(failure ->
 						"INDEX_RECEIPT_SURPLUS".equals(failure.errorCode())
@@ -328,15 +413,18 @@ class GdeltPipelineServiceTest {
 		when(processingLedger.register(archiveKey, eventFingerprint()))
 				.thenReturn(indexedState(archive, eventFingerprint()));
 		when(indexWriter.verifyReceipt(any())).thenReturn(
-				new ArchiveReceiptVerification(
+				verification(
 						GdeltIndexKind.EVENT,
 						1,
 						0,
-						ArchiveReceiptStatus.MISMATCHED));
+						ArchiveReceiptStatus.SHORTAGE));
 		when(processingLedger.recordReceiptMismatch(
 				anyString(),
 				anyString(),
 				anyInt(),
+				anyLong(),
+				any(),
+				any(),
 				any(),
 				any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
@@ -350,7 +438,7 @@ class GdeltPipelineServiceTest {
 						invocation.getArgument(1)));
 		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
 			ArchiveProcessingRequest request = invocation.getArgument(0);
-			return ArchiveProcessingResult.completed(request.kind(), successfulProgress());
+			return completed(request.kind(), successfulProgress());
 		});
 
 		assertThat(service.runLatestUpdate()).isSameAs(runState);
@@ -359,6 +447,9 @@ class GdeltPipelineServiceTest {
 				anyString(),
 				anyString(),
 				anyInt(),
+				anyLong(),
+				any(),
+				any(),
 				any(),
 				org.mockito.ArgumentMatchers.argThat(failure ->
 						"INDEX_RECEIPT_MISMATCH".equals(failure.errorCode())
@@ -373,7 +464,7 @@ class GdeltPipelineServiceTest {
 								&& request.indexTargets().equals(ACTIVE_TARGETS)),
 				any(),
 				any());
-		verify(processingLedger).markIndexed(any(), any());
+		verify(processingLedger).markIndexed(any(), any(), any());
 	}
 
 	@Test
@@ -393,7 +484,8 @@ class GdeltPipelineServiceTest {
 		assertThatThrownBy(service::runLatestUpdate).isSameAs(failure);
 
 		verify(processingLedger, never())
-				.recordReceiptMismatch(anyString(), anyString(), anyInt(), any(), any());
+				.recordReceiptMismatch(
+						anyString(), anyString(), anyInt(), anyLong(), any(), any(), any(), any());
 		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
 	}
@@ -414,7 +506,8 @@ class GdeltPipelineServiceTest {
 		assertThat(service.runLatestUpdate()).isSameAs(runState);
 
 		verify(processingLedger, never())
-				.recordReceiptMismatch(anyString(), anyString(), anyInt(), any(), any());
+				.recordReceiptMismatch(
+						anyString(), anyString(), anyInt(), anyLong(), any(), any(), any(), any());
 		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
 	}
@@ -445,7 +538,7 @@ class GdeltPipelineServiceTest {
 		when(indexWriter.verifyReceipt(any(ArchiveReceiptQuery.class))).thenThrow(failure);
 		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
 			ArchiveProcessingRequest request = invocation.getArgument(0);
-			return ArchiveProcessingResult.completed(request.kind(), successfulProgress());
+			return completed(request.kind(), successfulProgress());
 		});
 
 		assertThatThrownBy(service::runLatestUpdate).isSameAs(failure);
@@ -458,9 +551,11 @@ class GdeltPipelineServiceTest {
 		verify(processingLedger).markIndexed(
 				org.mockito.ArgumentMatchers.argThat(attempt ->
 						mentionArchiveKey.equals(attempt.archiveIdempotencyKey())),
+				any(),
 				any());
 		verify(processingLedger, never())
-				.recordReceiptMismatch(anyString(), anyString(), anyInt(), any(), any());
+				.recordReceiptMismatch(
+						anyString(), anyString(), anyInt(), anyLong(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -515,7 +610,7 @@ class GdeltPipelineServiceTest {
 								true,
 								1L));
 			}
-			return ArchiveProcessingResult.completed(request.kind(), successfulProgress());
+			return completed(request.kind(), successfulProgress());
 		});
 
 		service.runLatestUpdate();
@@ -524,10 +619,12 @@ class GdeltPipelineServiceTest {
 				org.mockito.ArgumentMatchers.argThat(attempt ->
 						attempt.archiveIdempotencyKey().contains(".export.")),
 				any(),
+				any(),
 				any());
 		verify(processingLedger).markIndexed(
 				org.mockito.ArgumentMatchers.argThat(attempt ->
 						attempt.archiveIdempotencyKey().contains(".mentions.")),
+				any(),
 				any());
 	}
 
@@ -560,7 +657,7 @@ class GdeltPipelineServiceTest {
 									.isSameAs(diagnostic));
 
 			assertThat(Thread.currentThread().isInterrupted()).isTrue();
-			verify(processingLedger).markFailed(any(), any(), any());
+			verify(processingLedger).markFailed(any(), any(), any(), any());
 			verify(archiveProcessor).process(any(), any(), any());
 		} finally {
 			Thread.interrupted();
@@ -583,7 +680,7 @@ class GdeltPipelineServiceTest {
 								ArchiveProcessingErrorCode.CSV_SOURCE_INTERRUPTED,
 								true,
 								null)));
-		when(processingLedger.markFailed(any(), any(), any()))
+		when(processingLedger.markFailed(any(), any(), any(), any()))
 				.thenThrow(persistenceFailure);
 
 		try {
@@ -626,7 +723,8 @@ class GdeltPipelineServiceTest {
 				org.mockito.ArgumentMatchers.argThat(progress ->
 						progress.deliveredRecords() == 2
 								&& progress.mappingRejectedRecords() == 1
-								&& progress.succeededOperations() == 1));
+								&& progress.succeededOperations() == 1),
+				any());
 		verify(archiveProcessor).process(any(), any(), any());
 	}
 
@@ -640,7 +738,7 @@ class GdeltPipelineServiceTest {
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
 		stubPendingRegistrationAndClaims();
 		when(archiveProcessor.process(any(), any(), any())).thenThrow(defect);
-		when(processingLedger.markFailed(any(), any(), any()))
+		when(processingLedger.markFailed(any(), any(), any(), any()))
 				.thenThrow(persistenceFailure);
 
 		assertThatThrownBy(service::runLatestUpdate)
@@ -682,8 +780,8 @@ class GdeltPipelineServiceTest {
 		assertThat(GdeltPipelineService.targetUnavailableOutcome(reason))
 				.isEqualTo(expectedOutcome);
 		assertThat(reason.errorCode().code()).isEqualTo(expectedErrorCode);
-		verify(processingLedger, never()).markIndexed(any(), any());
-		verify(processingLedger, never()).markFailed(any(), any(), any());
+		verify(processingLedger, never()).markIndexed(any(), any(), any());
+		verify(processingLedger, never()).markFailed(any(), any(), any(), any());
 	}
 
 	private IngestionRunState runState(boolean includeMention) {
@@ -727,6 +825,7 @@ class GdeltPipelineServiceTest {
 				archiveKey,
 				fingerprint,
 				ArchiveProcessingStatus.PENDING,
+				0,
 				new ArchiveProcessingAttemptState(
 						0,
 						null,
@@ -749,11 +848,19 @@ class GdeltPipelineServiceTest {
 				com.neighbor.eventmosaic.ingestion.api.ArchiveType.TRANSLATION_EVENTS
 				? GdeltIndexKind.EVENT
 				: GdeltIndexKind.MENTION;
-		ArchiveProcessingTargetBinding binding = targetBinding(kind);
+		return indexedState(archive, fingerprint, targetBinding(kind));
+	}
+
+	private static ArchiveProcessingState indexedState(
+			IngestionArchiveState archive,
+			ArchiveProcessingFingerprint fingerprint,
+			ArchiveProcessingTargetBinding binding
+	) {
 		return new ArchiveProcessingState(
 				archive.archive().idempotencyKey(),
 				fingerprint,
 				ArchiveProcessingStatus.INDEXED,
+				INDEXED_STATE_VERSION,
 				new ArchiveProcessingAttemptState(
 						1,
 						null,
@@ -766,7 +873,10 @@ class GdeltPipelineServiceTest {
 				new ArchiveProcessingReceipt(
 						1,
 						1,
-						ACTIVE_TARGETS.generationId(),
+						ArchiveIdentityDigest.ALGORITHM,
+						RECEIPT_DIGEST.value(),
+						RECEIPT_DIGEST.value(),
+						binding.generationId(),
 						binding.indexUuid(),
 						NOW),
 				null,
@@ -790,6 +900,50 @@ class GdeltPipelineServiceTest {
 
 	private static ArchiveProcessingProgress successfulProgress() {
 		return new ArchiveProcessingProgress(1, 0, 0, 1, 1, 0, 1, null);
+	}
+
+	private static ArchiveProcessingResult completed(
+			GdeltArchiveKind kind,
+			ArchiveProcessingProgress progress
+	) {
+		return ArchiveProcessingResult.completed(
+				kind,
+				progress,
+				verification(
+						kind == GdeltArchiveKind.TRANSLATION_EVENTS
+								? GdeltIndexKind.EVENT
+								: GdeltIndexKind.MENTION,
+						1,
+						1,
+						ArchiveReceiptStatus.MATCHED));
+	}
+
+	private static ArchiveReceiptVerification verification(
+			GdeltIndexKind kind,
+			long expectedCount,
+			long actualCount,
+			ArchiveReceiptStatus status
+	) {
+		ArchiveIdentityDigest actualDigest = switch (status) {
+			case MATCHED -> RECEIPT_DIGEST;
+			case SHORTAGE -> EMPTY_DIGEST;
+			case SURPLUS, IDENTITY_MISMATCH -> OTHER_DIGEST;
+		};
+		return new ArchiveReceiptVerification(
+				kind,
+				expectedCount,
+				actualCount,
+				RECEIPT_DIGEST,
+				actualDigest,
+				status);
+	}
+
+	private static ArchiveIdentityDigest digest(String... identities) {
+		ArchiveIdentityDigest.Accumulator accumulator = ArchiveIdentityDigest.accumulator();
+		for (String identity : identities) {
+			accumulator.addIdentity(identity);
+		}
+		return accumulator.finish();
 	}
 
 	private static ArchiveProcessingClaimResult claimedAttempt(
@@ -817,5 +971,25 @@ class GdeltPipelineServiceTest {
 				ACTIVE_TARGETS.generationUuid(),
 				target.indexName(),
 				target.indexUuid());
+	}
+
+	private static ArchiveProcessingTargetBinding previousTargetBinding(
+			GdeltIndexKind kind
+	) {
+		String indexName = switch (kind) {
+			case EVENT -> "gdelt-events-v1-p20260727-g0000";
+			case MENTION -> "gdelt-mentions-v1-p20260727-g0000";
+		};
+		String indexUuid = kind == GdeltIndexKind.EVENT
+				? "previous-event-index-uuid"
+				: "previous-mention-index-uuid";
+		return new ArchiveProcessingTargetBinding(
+				kind,
+				ACTIVE_TARGETS.partitionKey(),
+				ACTIVE_TARGETS.partitionStateVersion() - 1,
+				ACTIVE_TARGETS.generationId() - 1,
+				UUID.fromString("22222222-2222-2222-2222-222222222222"),
+				indexName,
+				indexUuid);
 	}
 }
