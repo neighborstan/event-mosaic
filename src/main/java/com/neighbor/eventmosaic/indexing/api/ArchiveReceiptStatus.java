@@ -13,11 +13,6 @@ public enum ArchiveReceiptStatus {
 	/**
 	 * Индекс существует, но число документов отличается.
 	 */
-	MISMATCHED,
-
-	/**
-	 * Целевой индекс отсутствует.
-	 */
-	INDEX_ABSENT
+	MISMATCHED
 
 }

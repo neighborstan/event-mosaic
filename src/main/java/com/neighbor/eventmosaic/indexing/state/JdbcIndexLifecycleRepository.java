@@ -1,5 +1,7 @@
 package com.neighbor.eventmosaic.indexing.state;
 
+import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationStatus;
@@ -202,6 +204,60 @@ class JdbcIndexLifecycleRepository {
 				0));
 	}
 
+	Optional<IndexMaintenanceOperation> reclaimExpiredMaintenance(
+			String partitionKey,
+			Duration leaseDuration,
+			Instant now
+	) {
+		IndexPartition partition = findPartitionForUpdate(partitionKey).orElseThrow(
+				() -> new IllegalArgumentException("Unknown logical partition"));
+		Optional<IndexMaintenanceOperation> existing = findOpenOperationForUpdate(partitionKey);
+		if (existing.isEmpty()) {
+			return Optional.empty();
+		}
+		IndexMaintenanceOperation operation = existing.orElseThrow();
+		if (operation.leaseExpiresAt().isAfter(now)
+				|| operation.partitionVersion() != partition.stateVersion()) {
+			return Optional.empty();
+		}
+		UUID nextToken = UUID.randomUUID();
+		Instant nextLeaseExpiresAt = now.plus(leaseDuration);
+		int updated = jdbcClient.sql("""
+				update index_maintenance_operations
+				set operation_token = :nextToken,
+				    lease_expires_at = :nextLeaseExpiresAt,
+				    operation_version = operation_version + 1,
+				    heartbeat_at = :heartbeatAt,
+				    updated_at = :updatedAt
+				where id = :operationId
+				  and operation_version = :expectedOperationVersion
+				  and lease_expires_at <= :now
+				  and phase not in ('COMPLETED', 'FAILED')
+				""")
+				.param("nextToken", nextToken)
+				.param("nextLeaseExpiresAt", Timestamp.from(nextLeaseExpiresAt))
+				.param("heartbeatAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.param("operationId", operation.id())
+				.param("expectedOperationVersion", operation.operationVersion())
+				.param("now", Timestamp.from(now))
+				.update();
+		if (updated != 1) {
+			return Optional.empty();
+		}
+		return Optional.of(new IndexMaintenanceOperation(
+				operation.id(),
+				operation.partitionKey(),
+				operation.type(),
+				operation.phase(),
+				nextToken,
+				nextLeaseExpiresAt,
+				operation.partitionVersion(),
+				operation.baseGenerationId(),
+				operation.buildingGenerationId(),
+				operation.operationVersion() + 1));
+	}
+
 	IndexLifecycleTransitionResult recordGenerationUuids(
 			String partitionKey,
 			UUID operationToken,
@@ -380,6 +436,38 @@ class JdbcIndexLifecycleRepository {
 				.optional();
 	}
 
+	Optional<ActiveIndexTargets> findActiveTargets(String partitionKey) {
+		return jdbcClient.sql("""
+				select
+				    p.partition_key,
+				    p.state_version as partition_state_version,
+				    active.id as generation_id,
+				    active.generation_uuid,
+				    active.event_index_name,
+				    active.event_index_uuid,
+				    active.mention_index_name,
+				    active.mention_index_uuid
+				from index_logical_partitions p
+				join index_generations active
+				  on active.partition_key = p.partition_key
+				 and active.state = 'ACTIVE'
+				where p.partition_key = :partitionKey
+				""")
+				.param("partitionKey", partitionKey)
+				.query((resultSet, rowNumber) -> new ActiveIndexTargets(
+						resultSet.getString("partition_key"),
+						resultSet.getLong("partition_state_version"),
+						resultSet.getLong("generation_id"),
+						resultSet.getObject("generation_uuid", UUID.class),
+						new ExactIndexTarget(
+								resultSet.getString("event_index_name"),
+								resultSet.getString("event_index_uuid")),
+						new ExactIndexTarget(
+								resultSet.getString("mention_index_name"),
+								resultSet.getString("mention_index_uuid"))))
+				.optional();
+	}
+
 	List<IndexGeneration> findGenerations(String partitionKey) {
 		return jdbcClient.sql("""
 				select
@@ -411,6 +499,13 @@ class JdbcIndexLifecycleRepository {
 
 	private Optional<IndexMaintenanceOperation> findOpenOperation(String partitionKey) {
 		return jdbcClient.sql(SELECT_OPERATION)
+				.param("partitionKey", partitionKey)
+				.query(JdbcIndexLifecycleRepository::mapOperation)
+				.optional();
+	}
+
+	private Optional<IndexMaintenanceOperation> findOpenOperationForUpdate(String partitionKey) {
+		return jdbcClient.sql(SELECT_OPERATION + "for update")
 				.param("partitionKey", partitionKey)
 				.query(JdbcIndexLifecycleRepository::mapOperation)
 				.optional();

@@ -7,6 +7,8 @@ import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexedDocument;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import java.util.List;
 import java.util.Objects;
 
@@ -14,6 +16,8 @@ import java.util.Objects;
  * Сопоставляет каждый Elasticsearch bulk item с исходной физической строкой.
  */
 final class BulkResponseAnalyzer {
+	private static final String INDEX_NOT_FOUND_ERROR_TYPE = "index_not_found_exception";
+	private static final String CLUSTER_BLOCK_ERROR_TYPE = "cluster_block_exception";
 
 	private BulkResponseAnalyzer() {
 	}
@@ -35,6 +39,7 @@ final class BulkResponseAnalyzer {
 		if (responseItems.size() != command.documents().size()) {
 			throw new IndexingProtocolException(IndexingErrorCode.INDEXING_RESPONSE_INVALID);
 		}
+		validateExactTarget(command, responseItems);
 
 		long succeeded = 0;
 		long failed = 0;
@@ -65,6 +70,29 @@ final class BulkResponseAnalyzer {
 				failed,
 				firstFailedLineNumber,
 				outcome);
+	}
+
+	private static void validateExactTarget(
+			BulkIndexCommand<? extends GdeltIndexedDocument> command,
+			List<BulkResponseItem> items
+	) {
+		for (BulkResponseItem item : items) {
+			if (!command.target().indexName().equals(item.index())) {
+				throw new IndexingProtocolException(
+						IndexingErrorCode.INDEXING_RESPONSE_INVALID);
+			}
+			if (item.error() == null) {
+				continue;
+			}
+			if (INDEX_NOT_FOUND_ERROR_TYPE.equals(item.error().type())) {
+				throw new IndexTargetUnavailableException(
+						IndexTargetUnavailableReason.MISSING);
+			}
+			if (CLUSTER_BLOCK_ERROR_TYPE.equals(item.error().type())) {
+				throw new IndexTargetUnavailableException(
+						IndexTargetUnavailableReason.WRITE_BLOCKED);
+			}
+		}
 	}
 
 	private static boolean isSuccessful(BulkResponseItem item) {

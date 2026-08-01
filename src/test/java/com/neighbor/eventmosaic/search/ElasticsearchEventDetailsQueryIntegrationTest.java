@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import com.neighbor.eventmosaic.TestcontainersConfiguration;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
@@ -19,6 +20,7 @@ import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -35,6 +37,10 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 	private static final Instant UPDATE_TIME = Instant.parse("2026-07-21T14:45:00Z");
 	private static final String EVENT_ARCHIVE = "event-archive";
 	private static final String MENTION_ARCHIVE = "mention-archive";
+	private static final String EVENT_PHYSICAL =
+			"gdelt-events-v1-p20260720-g9999";
+	private static final String MENTION_PHYSICAL =
+			"gdelt-mentions-v1-p20260720-g9999";
 
 	@Autowired
 	private ElasticsearchClient client;
@@ -43,9 +49,17 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 	private GdeltIndexWriter indexWriter;
 
 	private ElasticsearchEventDetailsQuery eventDetailsQuery;
+	private ExactIndexTarget eventTarget;
+	private ExactIndexTarget mentionTarget;
 
 	@BeforeEach
 	void resetReadModel() throws IOException {
+		client.indices().delete(request -> request
+				.index(
+						EVENT_PHYSICAL,
+						MENTION_PHYSICAL)
+				.allowNoIndices(true)
+				.ignoreUnavailable(true));
 		client.indices().delete(request -> request
 				.index(
 						GdeltIndexKind.EVENT.indexName(),
@@ -53,8 +67,31 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 				.allowNoIndices(true)
 				.ignoreUnavailable(true));
 		indexWriter.prepareReadModel();
+		client.indices().create(request -> request.index(EVENT_PHYSICAL));
+		client.indices().create(request -> request.index(MENTION_PHYSICAL));
+		eventTarget = target(EVENT_PHYSICAL);
+		mentionTarget = target(MENTION_PHYSICAL);
+		client.indices().updateAliases(request -> request
+				.actions(action -> action.add(add -> add
+						.index(EVENT_PHYSICAL)
+						.alias(GdeltIndexKind.EVENT.indexName())))
+				.actions(action -> action.add(add -> add
+						.index(MENTION_PHYSICAL)
+						.alias(GdeltIndexKind.MENTION.indexName()))));
 		eventDetailsQuery =
 				new ElasticsearchEventDetailsQuery(client, new EventSearchProperties(2));
+	}
+
+	@AfterEach
+	void cleanReadModel() throws IOException {
+		removeCompatibilityAlias(EVENT_PHYSICAL, GdeltIndexKind.EVENT.indexName());
+		removeCompatibilityAlias(MENTION_PHYSICAL, GdeltIndexKind.MENTION.indexName());
+		client.indices().delete(request -> request
+				.index(
+						EVENT_PHYSICAL,
+						MENTION_PHYSICAL)
+				.allowNoIndices(true)
+				.ignoreUnavailable(true));
 	}
 
 	@Test
@@ -62,9 +99,11 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 	void returnsCollapsedAndLimitedSources() {
 		indexWriter.write(new BulkIndexCommand<>(
 				GdeltIndexKind.EVENT,
+				eventTarget,
 				List.of(event())));
 		indexWriter.write(new BulkIndexCommand<>(
 				GdeltIndexKind.MENTION,
+				mentionTarget,
 				List.of(
 						mention(
 								"rm1-a-old",
@@ -101,8 +140,8 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 								"2026-07-21T14:47:00Z",
 								3.5,
 								5))));
-		indexWriter.refresh(GdeltIndexKind.EVENT);
-		indexWriter.refresh(GdeltIndexKind.MENTION);
+		indexWriter.refresh(GdeltIndexKind.EVENT, eventTarget);
+		indexWriter.refresh(GdeltIndexKind.MENTION, mentionTarget);
 
 		var details = eventDetailsQuery.findById(EVENT_ID).orElseThrow();
 
@@ -122,7 +161,7 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 	@Test
 	@DisplayName("Отсутствующий Event index возвращает not found")
 	void returnsNotFoundWhenEventIndexIsAbsent() throws IOException {
-		client.indices().delete(request -> request.index(GdeltIndexKind.EVENT.indexName()));
+		client.indices().delete(request -> request.index(EVENT_PHYSICAL));
 
 		assertThat(eventDetailsQuery.findById(EVENT_ID)).isEmpty();
 	}
@@ -132,9 +171,10 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 	void returnsNotFoundWhenMentionIndexIsAbsent() throws IOException {
 		indexWriter.write(new BulkIndexCommand<>(
 				GdeltIndexKind.EVENT,
+				eventTarget,
 				List.of(event())));
-		indexWriter.refresh(GdeltIndexKind.EVENT);
-		client.indices().delete(request -> request.index(GdeltIndexKind.MENTION.indexName()));
+		indexWriter.refresh(GdeltIndexKind.EVENT, eventTarget);
+		client.indices().delete(request -> request.index(MENTION_PHYSICAL));
 
 		assertThat(eventDetailsQuery.findById(EVENT_ID)).isEmpty();
 	}
@@ -144,8 +184,9 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 	void returnsNotFoundWhenEventDocumentIsAbsent() {
 		indexWriter.write(new BulkIndexCommand<>(
 				GdeltIndexKind.EVENT,
+				eventTarget,
 				List.of(event())));
-		indexWriter.refresh(GdeltIndexKind.EVENT);
+		indexWriter.refresh(GdeltIndexKind.EVENT, eventTarget);
 
 		assertThat(eventDetailsQuery.findById(EVENT_ID + 1)).isEmpty();
 	}
@@ -155,17 +196,37 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 	void reportsExistingIndexReadFailure() throws IOException {
 		indexWriter.write(new BulkIndexCommand<>(
 				GdeltIndexKind.EVENT,
+				eventTarget,
 				List.of(event())));
-		indexWriter.refresh(GdeltIndexKind.EVENT);
+		indexWriter.refresh(GdeltIndexKind.EVENT, eventTarget);
 		client.indices().close(
-				request -> request.index(GdeltIndexKind.EVENT.indexName()));
+				request -> request.index(EVENT_PHYSICAL));
 		try {
 			assertThatThrownBy(() -> eventDetailsQuery.findById(EVENT_ID))
 					.isInstanceOf(SearchAccessException.class)
 					.hasMessage("Сервис поиска временно недоступен");
 		} finally {
 			client.indices().open(
-					request -> request.index(GdeltIndexKind.EVENT.indexName()));
+					request -> request.index(EVENT_PHYSICAL));
+		}
+	}
+
+	private ExactIndexTarget target(String indexName) throws IOException {
+		var settings = client.indices()
+				.get(request -> request.index(indexName))
+				.get(indexName)
+				.settings();
+		var indexSettings = settings.index() == null ? settings : settings.index();
+		return new ExactIndexTarget(indexName, indexSettings.uuid());
+	}
+
+	private void removeCompatibilityAlias(String indexName, String aliasName) throws IOException {
+		if (client.indices().existsAlias(request -> request
+				.index(indexName)
+				.name(aliasName)).value()) {
+			client.indices().deleteAlias(request -> request
+					.index(indexName)
+					.name(aliasName));
 		}
 	}
 

@@ -13,21 +13,31 @@ import static org.mockito.Mockito.when;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvInterruptedException;
+import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetResolution;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetResolutionStatus;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetResolver;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveAttemptState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttempt;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttemptState;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimResult;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFingerprint;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingLedger;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingReceipt;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingStatus;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingTargetBinding;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.AutomaticRetryState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveState;
@@ -65,6 +75,17 @@ class GdeltPipelineServiceTest {
 	private static final String EVENT_FINGERPRINT = "a".repeat(64);
 	private static final String MENTION_FINGERPRINT = "b".repeat(64);
 	private static final Instant NOW = Instant.parse("2026-07-30T12:00:00Z");
+	private static final ActiveIndexTargets ACTIVE_TARGETS = new ActiveIndexTargets(
+			"p20260727",
+			3,
+			17,
+			UUID.fromString("11111111-1111-1111-1111-111111111111"),
+			new ExactIndexTarget(
+					"gdelt-events-v1-p20260727-g0001",
+					"event-index-uuid"),
+			new ExactIndexTarget(
+					"gdelt-mentions-v1-p20260727-g0001",
+					"mention-index-uuid"));
 
 	@TempDir
 	Path tempDir;
@@ -77,6 +98,7 @@ class GdeltPipelineServiceTest {
 	private final ProcessingFingerprintFactory fingerprintFactory =
 			mock(ProcessingFingerprintFactory.class);
 	private final GdeltIndexWriter indexWriter = mock(GdeltIndexWriter.class);
+	private final IndexTargetResolver indexTargetResolver = mock(IndexTargetResolver.class);
 
 	private GdeltPipelineService service;
 
@@ -88,7 +110,10 @@ class GdeltPipelineServiceTest {
 				archiveProcessor,
 				fingerprintFactory,
 				indexWriter,
+				indexTargetResolver,
 				GdeltTestFixtures.properties(tempDir, 1024 * 1024));
+		when(indexTargetResolver.resolve(any())).thenReturn(
+				IndexTargetResolution.ready(ACTIVE_TARGETS));
 		when(fingerprintFactory.create(
 				anyString(),
 				any(GdeltArchiveKind.class),
@@ -98,11 +123,11 @@ class GdeltPipelineServiceTest {
 						== GdeltArchiveKind.TRANSLATION_EVENTS
 								? EVENT_FINGERPRINT
 								: MENTION_FINGERPRINT);
-		when(processingLedger.checkpoint(anyString(), any(), any(), any()))
+		when(processingLedger.checkpoint(any(), any(), any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
-		when(processingLedger.markIndexed(anyString(), any(), any()))
+		when(processingLedger.markIndexed(any(), any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
-		when(processingLedger.markFailed(anyString(), any(), any(), any()))
+		when(processingLedger.markFailed(any(), any(), any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
 	}
 
@@ -114,6 +139,7 @@ class GdeltPipelineServiceTest {
 		stubPendingRegistrationAndClaims();
 		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
 			ArchiveProcessingRequest request = invocation.getArgument(0);
+			assertThat(request.indexTargets()).isEqualTo(ACTIVE_TARGETS);
 			ArchiveProcessingProgressListener listener = invocation.getArgument(1);
 			ArchiveProcessingProgress progress = successfulProgress();
 			assertThat(listener.onProgress(progress)).isTrue();
@@ -124,8 +150,22 @@ class GdeltPipelineServiceTest {
 
 		verify(archiveProcessor, org.mockito.Mockito.times(2)).process(any(), any(), any());
 		verify(processingLedger, org.mockito.Mockito.times(2))
-				.markIndexed(anyString(), any(), any());
+				.markIndexed(any(), any());
 		verifyNoInteractions(indexWriter);
+	}
+
+	@Test
+	@DisplayName("Откладывает processing до завершения maintenance")
+	void defersProcessingWhilePartitionIsUnderMaintenance() {
+		IngestionRunState runState = runState(false);
+		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
+		when(indexTargetResolver.resolve(any())).thenReturn(
+				IndexTargetResolution.outcome(
+						IndexTargetResolutionStatus.MAINTENANCE_DEFERRED));
+
+		assertThat(service.runLatestUpdate()).isSameAs(runState);
+
+		verifyNoInteractions(processingLedger, archiveProcessor, indexWriter);
 	}
 
 	@Test
@@ -152,8 +192,26 @@ class GdeltPipelineServiceTest {
 				.contains("GDELT archive processing lost ownership with cleanup failure")
 				.doesNotContain("unsafe control signal")
 				.doesNotContain("unsafe close details");
-		verify(processingLedger, never()).markIndexed(anyString(), any(), any());
-		verify(processingLedger, never()).markFailed(anyString(), any(), any(), any());
+		verify(processingLedger, never()).markIndexed(any(), any());
+		verify(processingLedger, never()).markFailed(any(), any(), any());
+	}
+
+	@Test
+	@DisplayName("Write block после claim остается typed deferred outcome")
+	void preservesWriteBlockedOutcomeAfterClaim() {
+		assertPostClaimTargetOutcome(
+				IndexTargetUnavailableReason.WRITE_BLOCKED,
+				"DEFERRED_WRITE_BLOCKED",
+				"INDEX_TARGET_WRITE_BLOCKED");
+	}
+
+	@Test
+	@DisplayName("Missing target после claim остается typed ownership outcome")
+	void preservesMissingTargetOutcomeAfterClaim() {
+		assertPostClaimTargetOutcome(
+				IndexTargetUnavailableReason.MISSING,
+				"OWNERSHIP_LOST",
+				"INDEX_TARGET_MISSING");
 	}
 
 	@Test
@@ -175,49 +233,21 @@ class GdeltPipelineServiceTest {
 
 		service.runLatestUpdate();
 
-		verify(processingLedger, never()).claim(anyString(), any());
+		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
 	}
 
 	@Test
-	@DisplayName("Открывает полный reindex после удаления целевого индекса")
-	void reopensIndexedArchiveAfterMissingIndex() {
+	@DisplayName("Не запускает archive worker для отсутствующей ACTIVE generation")
+	void defersMissingActiveGenerationWithoutAutoCreate() {
 		IngestionRunState runState = runState(false);
-		IngestionArchiveState archive = runState.archives().getFirst();
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
-		when(processingLedger.register(anyString(), any()))
-				.thenAnswer(invocation -> indexedState(
-						archive,
-						invocation.getArgument(1)));
-		when(indexWriter.verifyReceipt(any())).thenReturn(
-				new ArchiveReceiptVerification(
-						GdeltIndexKind.EVENT,
-						1,
-						0,
-						ArchiveReceiptStatus.INDEX_ABSENT));
-		when(processingLedger.recordReceiptMismatch(
-				anyString(),
-				anyString(),
-				anyInt(),
-				any()))
-				.thenReturn(AttemptTransitionResult.APPLIED);
-		when(processingLedger.claim(anyString(), any())).thenAnswer(invocation ->
-				attempt(
-						archive.archive().idempotencyKey(),
-						eventFingerprint()));
-		when(archiveProcessor.process(any(), any(), any())).thenReturn(
-				ArchiveProcessingResult.completed(
-						GdeltArchiveKind.TRANSLATION_EVENTS,
-						successfulProgress()));
+		when(indexTargetResolver.resolve(any())).thenReturn(
+				IndexTargetResolution.outcome(IndexTargetResolutionStatus.MISSING));
 
 		service.runLatestUpdate();
 
-		verify(processingLedger).recordReceiptMismatch(
-				anyString(),
-				anyString(),
-				anyInt(),
-				any());
-		verify(archiveProcessor).process(any(), any(), any());
+		verifyNoInteractions(processingLedger, indexWriter, archiveProcessor);
 	}
 
 	@Test
@@ -240,12 +270,13 @@ class GdeltPipelineServiceTest {
 				anyString(),
 				anyString(),
 				anyInt(),
+				any(),
 				any()))
 				.thenReturn(AttemptTransitionResult.OWNERSHIP_LOST);
 
 		service.runLatestUpdate();
 
-		verify(processingLedger, never()).claim(anyString(), any());
+		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
 	}
 
@@ -269,6 +300,7 @@ class GdeltPipelineServiceTest {
 				anyString(),
 				anyString(),
 				anyInt(),
+				any(),
 				any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
 
@@ -278,11 +310,70 @@ class GdeltPipelineServiceTest {
 				anyString(),
 				anyString(),
 				anyInt(),
+				any(),
 				org.mockito.ArgumentMatchers.argThat(failure ->
 						"INDEX_RECEIPT_SURPLUS".equals(failure.errorCode())
 								&& !failure.retryable()));
-		verify(processingLedger, never()).claim(anyString(), any());
+		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
+	}
+
+	@Test
+	@DisplayName("Shortage receipt переоткрывает whole-archive replay в той же generation")
+	void replaysWholeArchiveAfterReceiptShortage() {
+		IngestionRunState runState = runState(false);
+		IngestionArchiveState archive = runState.archives().getFirst();
+		String archiveKey = archive.archive().idempotencyKey();
+		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
+		when(processingLedger.register(archiveKey, eventFingerprint()))
+				.thenReturn(indexedState(archive, eventFingerprint()));
+		when(indexWriter.verifyReceipt(any())).thenReturn(
+				new ArchiveReceiptVerification(
+						GdeltIndexKind.EVENT,
+						1,
+						0,
+						ArchiveReceiptStatus.MISMATCHED));
+		when(processingLedger.recordReceiptMismatch(
+				anyString(),
+				anyString(),
+				anyInt(),
+				any(),
+				any()))
+				.thenReturn(AttemptTransitionResult.APPLIED);
+		when(processingLedger.claim(
+				org.mockito.ArgumentMatchers.eq(archiveKey),
+				any(),
+				any()))
+				.thenAnswer(invocation -> claimedAttempt(
+						archiveKey,
+						eventFingerprint(),
+						invocation.getArgument(1)));
+		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
+			ArchiveProcessingRequest request = invocation.getArgument(0);
+			return ArchiveProcessingResult.completed(request.kind(), successfulProgress());
+		});
+
+		assertThat(service.runLatestUpdate()).isSameAs(runState);
+
+		verify(processingLedger).recordReceiptMismatch(
+				anyString(),
+				anyString(),
+				anyInt(),
+				any(),
+				org.mockito.ArgumentMatchers.argThat(failure ->
+						"INDEX_RECEIPT_MISMATCH".equals(failure.errorCode())
+								&& failure.retryable()));
+		verify(processingLedger).claim(
+				org.mockito.ArgumentMatchers.eq(archiveKey),
+				any(),
+				any());
+		verify(archiveProcessor).process(
+				org.mockito.ArgumentMatchers.argThat(request ->
+						request.sourceArchiveKey().equals(archiveKey)
+								&& request.indexTargets().equals(ACTIVE_TARGETS)),
+				any(),
+				any());
+		verify(processingLedger).markIndexed(any(), any());
 	}
 
 	@Test
@@ -302,8 +393,29 @@ class GdeltPipelineServiceTest {
 		assertThatThrownBy(service::runLatestUpdate).isSameAs(failure);
 
 		verify(processingLedger, never())
-				.recordReceiptMismatch(anyString(), anyString(), anyInt(), any());
-		verify(processingLedger, never()).claim(anyString(), any());
+				.recordReceiptMismatch(anyString(), anyString(), anyInt(), any(), any());
+		verify(processingLedger, never()).claim(anyString(), any(), any());
+		verifyNoInteractions(archiveProcessor);
+	}
+
+	@Test
+	@DisplayName("Исчезновение target во время receipt дает ownership outcome без replay")
+	void treatsMissingTargetDuringReceiptAsOwnershipOutcome() {
+		IngestionRunState runState = runState(false);
+		IngestionArchiveState archive = runState.archives().getFirst();
+		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
+		when(processingLedger.register(anyString(), any()))
+				.thenAnswer(invocation -> indexedState(
+						archive,
+						invocation.getArgument(1)));
+		when(indexWriter.verifyReceipt(any(ArchiveReceiptQuery.class))).thenThrow(
+				new IndexTargetUnavailableException(IndexTargetUnavailableReason.MISSING));
+
+		assertThat(service.runLatestUpdate()).isSameAs(runState);
+
+		verify(processingLedger, never())
+				.recordReceiptMismatch(anyString(), anyString(), anyInt(), any(), any());
+		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
 	}
 
@@ -324,8 +436,12 @@ class GdeltPipelineServiceTest {
 				.thenReturn(pendingState(mentionArchiveKey, mentionFingerprint()));
 		when(processingLedger.claim(
 				org.mockito.ArgumentMatchers.eq(mentionArchiveKey),
+				any(),
 				any()))
-				.thenReturn(attempt(mentionArchiveKey, mentionFingerprint()));
+				.thenAnswer(invocation -> claimedAttempt(
+						mentionArchiveKey,
+						mentionFingerprint(),
+						invocation.getArgument(1)));
 		when(indexWriter.verifyReceipt(any(ArchiveReceiptQuery.class))).thenThrow(failure);
 		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
 			ArchiveProcessingRequest request = invocation.getArgument(0);
@@ -340,11 +456,11 @@ class GdeltPipelineServiceTest {
 				any(),
 				any());
 		verify(processingLedger).markIndexed(
-				org.mockito.ArgumentMatchers.eq(mentionArchiveKey),
-				any(),
+				org.mockito.ArgumentMatchers.argThat(attempt ->
+						mentionArchiveKey.equals(attempt.archiveIdempotencyKey())),
 				any());
 		verify(processingLedger, never())
-				.recordReceiptMismatch(anyString(), anyString(), anyInt(), any());
+				.recordReceiptMismatch(anyString(), anyString(), anyInt(), any(), any());
 	}
 
 	@Test
@@ -376,7 +492,7 @@ class GdeltPipelineServiceTest {
 
 		verify(indexWriter, org.mockito.Mockito.times(2))
 				.verifyReceipt(any(ArchiveReceiptQuery.class));
-		verify(processingLedger, never()).claim(anyString(), any());
+		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
 	}
 
@@ -405,13 +521,13 @@ class GdeltPipelineServiceTest {
 		service.runLatestUpdate();
 
 		verify(processingLedger).markFailed(
-				org.mockito.ArgumentMatchers.contains(".export."),
-				any(),
+				org.mockito.ArgumentMatchers.argThat(attempt ->
+						attempt.archiveIdempotencyKey().contains(".export.")),
 				any(),
 				any());
 		verify(processingLedger).markIndexed(
-				org.mockito.ArgumentMatchers.contains(".mentions."),
-				any(),
+				org.mockito.ArgumentMatchers.argThat(attempt ->
+						attempt.archiveIdempotencyKey().contains(".mentions.")),
 				any());
 	}
 
@@ -444,7 +560,7 @@ class GdeltPipelineServiceTest {
 									.isSameAs(diagnostic));
 
 			assertThat(Thread.currentThread().isInterrupted()).isTrue();
-			verify(processingLedger).markFailed(anyString(), any(), any(), any());
+			verify(processingLedger).markFailed(any(), any(), any());
 			verify(archiveProcessor).process(any(), any(), any());
 		} finally {
 			Thread.interrupted();
@@ -467,7 +583,7 @@ class GdeltPipelineServiceTest {
 								ArchiveProcessingErrorCode.CSV_SOURCE_INTERRUPTED,
 								true,
 								null)));
-		when(processingLedger.markFailed(anyString(), any(), any(), any()))
+		when(processingLedger.markFailed(any(), any(), any()))
 				.thenThrow(persistenceFailure);
 
 		try {
@@ -502,7 +618,6 @@ class GdeltPipelineServiceTest {
 		assertThatThrownBy(service::runLatestUpdate).isSameAs(defect);
 
 		verify(processingLedger).markFailed(
-				anyString(),
 				any(),
 				org.mockito.ArgumentMatchers.argThat(failure ->
 						IngestionErrorCode.INTERNAL_ERROR.code()
@@ -525,7 +640,7 @@ class GdeltPipelineServiceTest {
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
 		stubPendingRegistrationAndClaims();
 		when(archiveProcessor.process(any(), any(), any())).thenThrow(defect);
-		when(processingLedger.markFailed(anyString(), any(), any(), any()))
+		when(processingLedger.markFailed(any(), any(), any()))
 				.thenThrow(persistenceFailure);
 
 		assertThatThrownBy(service::runLatestUpdate)
@@ -541,13 +656,34 @@ class GdeltPipelineServiceTest {
 				.thenAnswer(invocation -> pendingState(
 						invocation.getArgument(0),
 						invocation.getArgument(1)));
-		when(processingLedger.claim(anyString(), any())).thenAnswer(invocation -> {
+		when(processingLedger.claim(anyString(), any(), any())).thenAnswer(invocation -> {
 			String archiveKey = invocation.getArgument(0);
 			boolean event = archiveKey.contains(".export.");
-			return attempt(
+			return claimedAttempt(
 					archiveKey,
-					event ? eventFingerprint() : mentionFingerprint());
+					event ? eventFingerprint() : mentionFingerprint(),
+					invocation.getArgument(1));
 		});
+	}
+
+	private void assertPostClaimTargetOutcome(
+			IndexTargetUnavailableReason reason,
+			String expectedOutcome,
+			String expectedErrorCode
+	) {
+		IngestionRunState runState = runState(false);
+		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
+		stubPendingRegistrationAndClaims();
+		when(archiveProcessor.process(any(), any(), any())).thenThrow(
+				new IndexTargetUnavailableException(reason));
+
+		assertThat(service.runLatestUpdate()).isSameAs(runState);
+
+		assertThat(GdeltPipelineService.targetUnavailableOutcome(reason))
+				.isEqualTo(expectedOutcome);
+		assertThat(reason.errorCode().code()).isEqualTo(expectedErrorCode);
+		verify(processingLedger, never()).markIndexed(any(), any());
+		verify(processingLedger, never()).markFailed(any(), any(), any());
 	}
 
 	private IngestionRunState runState(boolean includeMention) {
@@ -597,7 +733,9 @@ class GdeltPipelineServiceTest {
 						null,
 						null,
 						AutomaticRetryState.initial(3)),
+				null,
 				com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress.empty(),
+				null,
 				null,
 				NOW,
 				null);
@@ -607,6 +745,11 @@ class GdeltPipelineServiceTest {
 			IngestionArchiveState archive,
 			ArchiveProcessingFingerprint fingerprint
 	) {
+		GdeltIndexKind kind = archive.archive().archiveType() ==
+				com.neighbor.eventmosaic.ingestion.api.ArchiveType.TRANSLATION_EVENTS
+				? GdeltIndexKind.EVENT
+				: GdeltIndexKind.MENTION;
+		ArchiveProcessingTargetBinding binding = targetBinding(kind);
 		return new ArchiveProcessingState(
 				archive.archive().idempotencyKey(),
 				fingerprint,
@@ -617,8 +760,15 @@ class GdeltPipelineServiceTest {
 						NOW,
 						null,
 						AutomaticRetryState.initial(3)),
+				binding,
 				new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress(
 						1, 0, 0, 1, 1, 0, 1, null),
+				new ArchiveProcessingReceipt(
+						1,
+						1,
+						ACTIVE_TARGETS.generationId(),
+						binding.indexUuid(),
+						NOW),
 				null,
 				NOW,
 				NOW);
@@ -642,16 +792,30 @@ class GdeltPipelineServiceTest {
 		return new ArchiveProcessingProgress(1, 0, 0, 1, 1, 0, 1, null);
 	}
 
-	private static java.util.Optional<ArchiveProcessingAttempt> attempt(
+	private static ArchiveProcessingClaimResult claimedAttempt(
 			String archiveKey,
-			ArchiveProcessingFingerprint fingerprint
+			ArchiveProcessingFingerprint fingerprint,
+			ArchiveProcessingTargetBinding targetBinding
 	) {
-		return java.util.Optional.of(new ArchiveProcessingAttempt(
+		return ArchiveProcessingClaimResult.claimed(new ArchiveProcessingAttempt(
 				archiveKey,
 				fingerprint,
+				targetBinding,
 				UUID.randomUUID(),
 				NOW.plusSeconds(900),
 				1,
 				false));
+	}
+
+	private static ArchiveProcessingTargetBinding targetBinding(GdeltIndexKind kind) {
+		var target = ACTIVE_TARGETS.target(kind);
+		return new ArchiveProcessingTargetBinding(
+				kind,
+				ACTIVE_TARGETS.partitionKey(),
+				ACTIVE_TARGETS.partitionStateVersion(),
+				ACTIVE_TARGETS.generationId(),
+				ACTIVE_TARGETS.generationUuid(),
+				target.indexName(),
+				target.indexUuid());
 	}
 }

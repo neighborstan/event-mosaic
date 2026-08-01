@@ -6,6 +6,9 @@ import co.elastic.clients.elasticsearch._types.ShardStatistics;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
 import co.elastic.clients.elasticsearch.core.CountResponse;
+import co.elastic.clients.elasticsearch.indices.IndexSettingBlocks;
+import co.elastic.clients.elasticsearch.indices.IndexSettings;
+import co.elastic.clients.elasticsearch.indices.IndexState;
 import co.elastic.clients.elasticsearch.indices.RefreshResponse;
 import co.elastic.clients.util.BinaryData;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
@@ -13,6 +16,7 @@ import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexedDocument;
@@ -21,6 +25,8 @@ import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProperties;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import jakarta.json.JsonException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -30,15 +36,15 @@ import java.util.Objects;
 import org.springframework.stereotype.Component;
 
 /**
- * Синхронный official-client adapter фиксированной Elasticsearch read model.
+ * Синхронный official-client adapter exact-generation Elasticsearch read model.
  */
 @Component
 final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	private static final String SOURCE_ARCHIVE_KEY_FIELD = "sourceArchiveKey";
+	private static final String PROCESSING_FINGERPRINT_FIELD = "processingFingerprint";
 	private static final String INDEX_NOT_FOUND_ERROR_TYPE = "index_not_found_exception";
-	private static final String INDEX_ALREADY_EXISTS_ERROR_TYPE =
-			"resource_already_exists_exception";
+	private static final String CLUSTER_BLOCK_ERROR_TYPE = "cluster_block_exception";
 	private static final long BULK_ACTION_FIXED_BYTES = 64;
 	private static final long JSON_ESCAPE_EXPANSION_FACTOR = 6;
 
@@ -74,19 +80,25 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 	}
 
 	@Override
-	public long estimateBulkOperationBytes(GdeltIndexedDocument document) {
+	public long estimateBulkOperationBytes(
+			ExactIndexTarget target,
+			GdeltIndexedDocument document
+	) {
+		Objects.requireNonNull(target, "target must not be null");
 		Objects.requireNonNull(document, "document must not be null");
+		requireMatchingTarget(document.kind(), target);
 		BinaryData serializedDocument = serialize(document);
-		return estimateBulkOperationBytes(document, serializedDocument);
+		return estimateBulkOperationBytes(target, document, serializedDocument);
 	}
 
 	private static long estimateBulkOperationBytes(
+			ExactIndexTarget target,
 			GdeltIndexedDocument document,
 			BinaryData serializedDocument
 	) {
 		try {
 			long metadataValueBytes = Math.addExact(
-					utf8Length(document.kind().indexName()),
+					utf8Length(target.indexName()),
 					utf8Length(document.documentId()));
 			long escapedMetadataUpperBound = Math.multiplyExact(
 					metadataValueBytes,
@@ -109,7 +121,6 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			templatesPrepared = false;
 			try {
 				templateInstaller.install();
-				createFixedIndices();
 				templatesPrepared = true;
 			}
 			catch (IOException exception) {
@@ -133,8 +144,9 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		List<BinaryData> serializedDocuments = validateAndSerialize(command);
 		ensureTemplatesPrepared();
 
-		BulkRequest request = request(command, serializedDocuments);
 		try {
+			verifyExactTarget(command.kind(), command.target());
+			BulkRequest request = request(command, serializedDocuments);
 			BulkResponse response = client.bulk(request);
 			BulkIndexResult result = BulkResponseAnalyzer.analyze(command, response.items());
 			metrics.completed(result);
@@ -149,35 +161,34 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 					command.kind(),
 					command.documents().size(),
 					isTransient(exception.status()));
-			throw classify(exception);
+			throw classifyTargetAware(exception);
 		}
 		catch (IndexingAccessException
 				| IndexingInterruptedException
-				| IndexingProtocolException exception) {
+				| IndexingProtocolException
+				| IndexTargetUnavailableException exception) {
 			metrics.failed(command.kind(), command.documents().size(), exception.retryable());
 			throw exception;
 		}
 	}
 
 	@Override
-	public void refresh(GdeltIndexKind kind) {
+	public void refresh(GdeltIndexKind kind, ExactIndexTarget target) {
 		Objects.requireNonNull(kind, "kind must not be null");
+		Objects.requireNonNull(target, "target must not be null");
+		requireMatchingTarget(kind, target);
 		checkInterrupted();
 		try {
+			verifyExactTarget(kind, target);
 			RefreshResponse response = client.indices()
-					.refresh(request -> request.index(kind.indexName()));
+					.refresh(request -> request.index(target.indexName()));
 			rejectFailedShards(response.shards());
 		}
 		catch (IOException exception) {
 			throw ioFailure(exception);
 		}
 		catch (ElasticsearchException exception) {
-			if (isIndexNotFound(exception)) {
-				throw new IndexingAccessException(
-						IndexingErrorCode.INDEXING_UNAVAILABLE,
-						exception);
-			}
-			throw classify(exception);
+			throw classifyTargetAware(exception);
 		}
 	}
 
@@ -186,17 +197,16 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		Objects.requireNonNull(query, "query must not be null");
 		checkInterrupted();
 		try {
-			boolean exists = client.indices()
-					.exists(request -> request.index(query.kind().indexName()))
-					.value();
-			if (!exists) {
-				return absentReceipt(query);
-			}
+			verifyExactTarget(query.kind(), query.target());
 			CountResponse response = client.count(request -> request
-					.index(query.kind().indexName())
-					.query(term -> term.term(value -> value
-							.field(SOURCE_ARCHIVE_KEY_FIELD)
-							.value(query.sourceArchiveKey()))));
+					.index(query.target().indexName())
+					.query(root -> root.bool(bool -> bool
+							.filter(filter -> filter.term(term -> term
+									.field(SOURCE_ARCHIVE_KEY_FIELD)
+									.value(query.sourceArchiveKey())))
+							.filter(filter -> filter.term(term -> term
+									.field(PROCESSING_FINGERPRINT_FIELD)
+									.value(query.processingFingerprint()))))));
 			rejectFailedShards(response.shards());
 			long actualCount = response.count();
 			ArchiveReceiptStatus status = actualCount == query.expectedDocumentCount()
@@ -212,10 +222,7 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			throw ioFailure(exception);
 		}
 		catch (ElasticsearchException exception) {
-			if (isIndexNotFound(exception)) {
-				return absentReceipt(query);
-			}
-			throw classify(exception);
+			throw classifyTargetAware(exception);
 		}
 	}
 
@@ -232,7 +239,10 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		long estimatedBytes = 0;
 		for (GdeltIndexedDocument document : command.documents()) {
 			BinaryData serializedDocument = serialize(document);
-			long operationBytes = estimateBulkOperationBytes(document, serializedDocument);
+			long operationBytes = estimateBulkOperationBytes(
+					command.target(),
+					document,
+					serializedDocument);
 			if (operationBytes > properties.maxBulkBytes() - estimatedBytes) {
 				throw new IndexingProtocolException(
 						IndexingErrorCode.INDEXING_REQUEST_REJECTED);
@@ -241,25 +251,6 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			serializedDocuments.add(serializedDocument);
 		}
 		return serializedDocuments;
-	}
-
-	private void createFixedIndices() throws IOException {
-		for (GdeltIndexKind kind : GdeltIndexKind.values()) {
-			try {
-				boolean acknowledged = client.indices()
-						.create(request -> request.index(kind.indexName()))
-						.acknowledged();
-				if (!acknowledged) {
-					throw new IndexingAccessException(
-							IndexingErrorCode.INDEXING_UNAVAILABLE);
-				}
-			}
-			catch (ElasticsearchException exception) {
-				if (!isIndexAlreadyCreated(exception)) {
-					throw exception;
-				}
-			}
-		}
 	}
 
 	private static BulkRequest request(
@@ -272,7 +263,7 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			GdeltIndexedDocument document = command.documents().get(position);
 			BinaryData serializedDocument = serializedDocuments.get(position);
 			builder.operations(operation -> operation.index(index -> index
-					.index(command.kind().indexName())
+					.index(command.target().indexName())
 					.id(document.documentId())
 					.document(serializedDocument)));
 		}
@@ -285,22 +276,76 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		}
 	}
 
-	private static ArchiveReceiptVerification absentReceipt(ArchiveReceiptQuery query) {
-		return new ArchiveReceiptVerification(
-				query.kind(),
-				query.expectedDocumentCount(),
-				0,
-				ArchiveReceiptStatus.INDEX_ABSENT);
-	}
-
 	private static boolean isIndexNotFound(ElasticsearchException exception) {
 		return exception.error() != null
 				&& INDEX_NOT_FOUND_ERROR_TYPE.equals(exception.error().type());
 	}
 
-	private static boolean isIndexAlreadyCreated(ElasticsearchException exception) {
+	private static boolean isClusterBlock(ElasticsearchException exception) {
 		return exception.error() != null
-				&& INDEX_ALREADY_EXISTS_ERROR_TYPE.equals(exception.error().type());
+				&& CLUSTER_BLOCK_ERROR_TYPE.equals(exception.error().type());
+	}
+
+	private void verifyExactTarget(
+			GdeltIndexKind kind,
+			ExactIndexTarget target
+	) throws IOException {
+		requireMatchingTarget(kind, target);
+		IndexState state;
+		try {
+			state = client.indices()
+					.get(request -> request
+							.index(target.indexName())
+							.allowNoIndices(false)
+							.ignoreUnavailable(false))
+					.get(target.indexName());
+		}
+		catch (ElasticsearchException exception) {
+			throw classifyTargetAware(exception);
+		}
+		if (state == null) {
+			throw new IndexTargetUnavailableException(
+					IndexTargetUnavailableReason.MISSING);
+		}
+		IndexSettings settings = indexSettings(state);
+		if (!target.indexUuid().equals(settings.uuid())) {
+			throw new IndexTargetUnavailableException(
+					IndexTargetUnavailableReason.REPLACED);
+		}
+		if (isWriteBlocked(settings.blocks())) {
+			throw new IndexTargetUnavailableException(
+					IndexTargetUnavailableReason.WRITE_BLOCKED);
+		}
+	}
+
+	private static IndexSettings indexSettings(IndexState state) {
+		IndexSettings settings = state.settings();
+		if (settings == null) {
+			throw new IndexingProtocolException(
+					IndexingErrorCode.INDEXING_RESPONSE_INVALID);
+		}
+		IndexSettings nested = settings.index();
+		IndexSettings result = nested == null ? settings : nested;
+		if (result.uuid() == null || result.uuid().isBlank()) {
+			throw new IndexingProtocolException(
+					IndexingErrorCode.INDEXING_RESPONSE_INVALID);
+		}
+		return result;
+	}
+
+	private static boolean isWriteBlocked(IndexSettingBlocks blocks) {
+		return blocks != null && (Boolean.TRUE.equals(blocks.write())
+				|| Boolean.TRUE.equals(blocks.readOnly())
+				|| Boolean.TRUE.equals(blocks.readOnlyAllowDelete()));
+	}
+
+	private static void requireMatchingTarget(
+			GdeltIndexKind kind,
+			ExactIndexTarget target
+	) {
+		if (!kind.accepts(target)) {
+			throw new IllegalArgumentException("target must match index kind");
+		}
 	}
 
 	private static RuntimeException classify(ElasticsearchException exception) {
@@ -312,6 +357,22 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		return new IndexingProtocolException(
 				IndexingErrorCode.INDEXING_REQUEST_REJECTED,
 				exception);
+	}
+
+	private static RuntimeException classifyTargetAware(
+			ElasticsearchException exception
+	) {
+		if (isIndexNotFound(exception)) {
+			return new IndexTargetUnavailableException(
+					IndexTargetUnavailableReason.MISSING,
+					exception);
+		}
+		if (isClusterBlock(exception)) {
+			return new IndexTargetUnavailableException(
+					IndexTargetUnavailableReason.WRITE_BLOCKED,
+					exception);
+		}
+		return classify(exception);
 	}
 
 	private static RuntimeException ioFailure(IOException exception) {

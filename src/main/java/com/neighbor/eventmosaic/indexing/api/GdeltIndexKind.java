@@ -31,4 +31,14 @@ public enum GdeltIndexKind {
 		return indexName;
 	}
 
+	/**
+	 * Проверяет, что exact target относится к этому виду schema v1.
+	 *
+	 * @param target exact physical target
+	 * @return {@code true}, если physical имя имеет ожидаемый kind prefix
+	 */
+	public boolean accepts(ExactIndexTarget target) {
+		return target != null && target.indexName().startsWith(indexName + "-");
+	}
+
 }

@@ -1,6 +1,7 @@
 package com.neighbor.eventmosaic.processing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvAccessException;
@@ -23,9 +24,12 @@ import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexedDocument;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingDiagnosticListener;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingOutcome;
@@ -63,12 +67,17 @@ class DefaultGdeltArchiveProcessorTest {
 		assertThat(result.outcome()).isEqualTo(ArchiveProcessingOutcome.COMPLETED);
 		assertThat(writer.commands).hasSize(1);
 		assertThat(writer.commands.getFirst().documents()).hasSize(2);
-		assertThat(writer.prepared).isTrue();
 		assertThat(writer.refreshedKinds).containsExactly(GdeltIndexKind.MENTION);
 		assertThat(writer.receiptQueries).containsExactly(new ArchiveReceiptQuery(
 				writer.commands.getFirst().kind(),
+				ProcessingTestFixtures.ACTIVE_TARGETS.mention(),
 				ProcessingTestFixtures.SOURCE_ARCHIVE_KEY,
+				"1".repeat(64),
 				2));
+		assertThat(writer.commands.getFirst().target())
+				.isEqualTo(ProcessingTestFixtures.ACTIVE_TARGETS.mention());
+		assertThat(writer.estimatedTargets)
+				.containsOnly(ProcessingTestFixtures.ACTIVE_TARGETS.mention());
 		assertThat(result.progress()).isEqualTo(
 				new ArchiveProcessingProgress(2, 0, 0, 2, 2, 0, 2, null));
 	}
@@ -148,7 +157,9 @@ class DefaultGdeltArchiveProcessorTest {
 		assertThat(writer.refreshedKinds).containsExactly(GdeltIndexKind.MENTION);
 		assertThat(writer.receiptQueries).containsExactly(new ArchiveReceiptQuery(
 				GdeltIndexKind.MENTION,
+				ProcessingTestFixtures.ACTIVE_TARGETS.mention(),
 				ProcessingTestFixtures.SOURCE_ARCHIVE_KEY,
+				"1".repeat(64),
 				0));
 		assertThat(result.progress()).isEqualTo(
 				new ArchiveProcessingProgress(3, 0, 3, 0, 0, 0, 0, null));
@@ -185,6 +196,72 @@ class DefaultGdeltArchiveProcessorTest {
 		assertThat(delivered).hasValue(3);
 		assertThat(writer.commands).hasSize(1);
 		assertThat(writer.receiptQueries).isEmpty();
+	}
+
+	@Test
+	@DisplayName("Передает typed missing target owning processing boundary")
+	void propagatesMissingExactTarget() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		IndexTargetUnavailableException failure = new IndexTargetUnavailableException(
+				IndexTargetUnavailableReason.MISSING);
+		writer.writeFailure = failure;
+		AtomicReference<RuntimeException> diagnostic = new AtomicReference<>();
+		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(2), null);
+
+		assertThatThrownBy(() -> processor.process(
+					ProcessingTestFixtures.mentionRequest(),
+					ArchiveProcessingProgressListener.continuing(),
+					diagnostic::set))
+				.isSameAs(failure);
+
+		assertThat(diagnostic).hasNullValue();
+		assertThat(writer.receiptQueries).isEmpty();
+	}
+
+	@Test
+	@DisplayName("Передает typed write block при refresh exact generation")
+	void propagatesWriteBlockDuringRefresh() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		IndexTargetUnavailableException failure = new IndexTargetUnavailableException(
+				IndexTargetUnavailableReason.WRITE_BLOCKED);
+		writer.refreshFailure = failure;
+		AtomicReference<RuntimeException> diagnostic = new AtomicReference<>();
+		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(2), null);
+
+		assertThatThrownBy(() -> processor.process(
+					ProcessingTestFixtures.mentionRequest(),
+					ArchiveProcessingProgressListener.continuing(),
+					diagnostic::set))
+				.isSameAs(failure);
+
+		assertThat(diagnostic).hasNullValue();
+		assertThat(writer.receiptQueries).isEmpty();
+	}
+
+	@Test
+	@DisplayName("Передает typed replaced target при count receipt")
+	void propagatesReplacedTargetDuringReceipt() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		IndexTargetUnavailableException failure = new IndexTargetUnavailableException(
+				IndexTargetUnavailableReason.REPLACED);
+		writer.receiptFailure = failure;
+		AtomicReference<RuntimeException> diagnostic = new AtomicReference<>();
+		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(2), null);
+
+		assertThatThrownBy(() -> processor.process(
+					ProcessingTestFixtures.mentionRequest(),
+					ArchiveProcessingProgressListener.continuing(),
+					diagnostic::set))
+				.isSameAs(failure);
+
+		assertThat(diagnostic).hasNullValue();
+		assertThat(writer.receiptQueries).containsExactly(
+				new ArchiveReceiptQuery(
+						GdeltIndexKind.MENTION,
+						ProcessingTestFixtures.mentionRequest().indexTargets().mention(),
+						ProcessingTestFixtures.mentionRequest().sourceArchiveKey(),
+						ProcessingTestFixtures.mentionRequest().processingFingerprint(),
+						2));
 	}
 
 	@Test
@@ -361,7 +438,7 @@ class DefaultGdeltArchiveProcessorTest {
 	@DisplayName("Не завершает archive без совпавшей terminal receipt")
 	void failsOnTerminalReceiptMismatch() {
 		FakeIndexWriter writer = new FakeIndexWriter(2);
-		writer.receiptStatus = ArchiveReceiptStatus.INDEX_ABSENT;
+		writer.receiptStatus = ArchiveReceiptStatus.MISMATCHED;
 		writer.receiptActualDocuments = 0;
 		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(1), null);
 
@@ -534,10 +611,13 @@ class DefaultGdeltArchiveProcessorTest {
 				new ArrayList<>();
 		private final List<ArchiveReceiptQuery> receiptQueries = new ArrayList<>();
 		private final List<GdeltIndexKind> refreshedKinds = new ArrayList<>();
+		private final List<ExactIndexTarget> refreshedTargets = new ArrayList<>();
+		private final List<ExactIndexTarget> estimatedTargets = new ArrayList<>();
 
-		private boolean prepared;
 		private BulkIndexResult nextResult;
 		private RuntimeException writeFailure;
+		private RuntimeException refreshFailure;
+		private RuntimeException receiptFailure;
 		private ArchiveReceiptStatus receiptStatus = ArchiveReceiptStatus.MATCHED;
 		private long receiptActualDocuments = -1;
 
@@ -566,20 +646,23 @@ class DefaultGdeltArchiveProcessorTest {
 		}
 
 		@Override
-		public long estimateBulkOperationBytes(GdeltIndexedDocument document) {
+		public long estimateBulkOperationBytes(
+				ExactIndexTarget target,
+				GdeltIndexedDocument document
+		) {
+			estimatedTargets.add(target);
 			return operationBytes;
 		}
 
 		@Override
 		public void prepareReadModel() {
-			prepared = true;
+			// Lifecycle coordinator owns preparation; processor не вызывает этот метод.
 		}
 
 		@Override
 		public BulkIndexResult write(
 				BulkIndexCommand<? extends GdeltIndexedDocument> command
 		) {
-			requirePrepared();
 			commands.add(command);
 			if (writeFailure != null) {
 				throw writeFailure;
@@ -599,18 +682,24 @@ class DefaultGdeltArchiveProcessorTest {
 		}
 
 		@Override
-		public void refresh(GdeltIndexKind kind) {
-			requirePrepared();
+		public void refresh(GdeltIndexKind kind, ExactIndexTarget target) {
 			refreshedKinds.add(kind);
+			refreshedTargets.add(target);
+			if (refreshFailure != null) {
+				throw refreshFailure;
+			}
 		}
 
 		@Override
 		public ArchiveReceiptVerification verifyReceipt(ArchiveReceiptQuery query) {
-			requirePrepared();
-			if (!refreshedKinds.contains(query.kind())) {
+			if (!refreshedKinds.contains(query.kind())
+					|| !refreshedTargets.contains(query.target())) {
 				throw new AssertionError("Receipt must follow target index refresh");
 			}
 			receiptQueries.add(query);
+			if (receiptFailure != null) {
+				throw receiptFailure;
+			}
 			long actualDocuments = receiptActualDocuments < 0
 					? query.expectedDocumentCount()
 					: receiptActualDocuments;
@@ -619,12 +708,6 @@ class DefaultGdeltArchiveProcessorTest {
 					query.expectedDocumentCount(),
 					actualDocuments,
 					receiptStatus);
-		}
-
-		private void requirePrepared() {
-			if (!prepared) {
-				throw new AssertionError("Read model must be prepared before index operations");
-			}
 		}
 	}
 }

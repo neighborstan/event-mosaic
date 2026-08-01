@@ -16,6 +16,7 @@ import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexedDocument;
@@ -26,6 +27,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingFailureContract;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingDiagnosticListener;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingFailure;
@@ -83,19 +85,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		Objects.requireNonNull(progressListener, "progressListener must not be null");
 		Objects.requireNonNull(diagnosticListener, "diagnosticListener must not be null");
 		GdeltIndexKind indexKind = toIndexKind(request.kind());
-		try {
-			indexWriter.prepareReadModel();
-		}
-		catch (IndexingAccessException
-				| IndexingInterruptedException
-				| IndexingProtocolException exception) {
-			return indexingFailure(
-					request.kind(),
-					ArchiveProcessingProgress.empty(),
-					exception,
-					exception,
-					diagnosticListener);
-		}
+		ExactIndexTarget indexTarget = request.indexTargets().target(indexKind);
 
 		int bulkSize = indexWriter.bulkSize();
 		if (bulkSize <= 0) {
@@ -111,6 +101,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 					progressListener,
 					diagnosticListener,
 					indexKind,
+					indexTarget,
 					(consumer, sourceProgressListener) -> eventReader.read(
 							request.csvPath(),
 							consumer,
@@ -123,6 +114,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 					progressListener,
 					diagnosticListener,
 					indexKind,
+					indexTarget,
 					(consumer, sourceProgressListener) -> mentionReader.read(
 							request.csvPath(),
 							consumer,
@@ -145,6 +137,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			ArchiveProcessingProgressListener progressListener,
 			ArchiveProcessingDiagnosticListener diagnosticListener,
 			GdeltIndexKind indexKind,
+			ExactIndexTarget indexTarget,
 			CsvReadOperation<S> readOperation,
 			RecordMappingOperation<S, D> mappingOperation,
 			int bulkSize,
@@ -153,7 +146,9 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		BatchAccumulator<D> accumulator = new BatchAccumulator<>(
 				request.kind(),
 				indexKind,
+				indexTarget,
 				request.sourceArchiveKey(),
+				request.processingFingerprint(),
 				bulkSize,
 				maxBulkBytes,
 				indexWriter,
@@ -329,7 +324,9 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 
 		private final GdeltArchiveKind archiveKind;
 		private final GdeltIndexKind indexKind;
+		private final ExactIndexTarget indexTarget;
 		private final String sourceArchiveKey;
+		private final String processingFingerprint;
 		private final int bulkSize;
 		private final long maxBulkBytes;
 		private final GdeltIndexWriter indexWriter;
@@ -351,7 +348,9 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		private BatchAccumulator(
 				GdeltArchiveKind archiveKind,
 				GdeltIndexKind indexKind,
+				ExactIndexTarget indexTarget,
 				String sourceArchiveKey,
+				String processingFingerprint,
 				int bulkSize,
 				long maxBulkBytes,
 				GdeltIndexWriter indexWriter,
@@ -360,7 +359,9 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		) {
 			this.archiveKind = archiveKind;
 			this.indexKind = indexKind;
+			this.indexTarget = indexTarget;
 			this.sourceArchiveKey = sourceArchiveKey;
+			this.processingFingerprint = processingFingerprint;
 			this.bulkSize = bulkSize;
 			this.maxBulkBytes = maxBulkBytes;
 			this.indexWriter = indexWriter;
@@ -379,7 +380,9 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				metrics.mapped(archiveKind);
 				metrics.invalidGeoCandidates(archiveKind, mapping.invalidGeoCandidates());
 				D document = mapping.document();
-				long operationBytes = indexWriter.estimateBulkOperationBytes(document);
+				long operationBytes = indexWriter.estimateBulkOperationBytes(
+						indexTarget,
+						document);
 				if (operationBytes <= 0) {
 					throw new IllegalStateException(
 							"index writer operation byte estimate must be positive");
@@ -435,9 +438,11 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			try {
 				result = indexWriter.write(new BulkIndexCommand<>(
 						indexKind,
+						indexTarget,
 						documents));
 			}
-			catch (IndexingAccessException
+			catch (IndexTargetUnavailableException
+					| IndexingAccessException
 					| IndexingInterruptedException
 					| IndexingProtocolException exception) {
 				checkpoint();
@@ -462,13 +467,15 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void refreshIndex() {
-			indexWriter.refresh(indexKind);
+			indexWriter.refresh(indexKind, indexTarget);
 		}
 
 		private void verifyReceipt() {
 			ArchiveReceiptVerification receipt = indexWriter.verifyReceipt(new ArchiveReceiptQuery(
 					indexKind,
+					indexTarget,
 					sourceArchiveKey,
+					processingFingerprint,
 					succeededOperations));
 			receiptDocuments = receipt.actualDocumentCount();
 			checkpoint();

@@ -3,6 +3,7 @@ package com.neighbor.eventmosaic.indexing;
 import static com.neighbor.eventmosaic.indexing.api.GdeltIndexKind.EVENT;
 import static com.neighbor.eventmosaic.indexing.api.GdeltIndexKind.MENTION;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
@@ -17,12 +18,15 @@ import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexOutcome;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventLocation;
 import com.neighbor.eventmosaic.indexing.api.IndexedGeoPoint;
 import com.neighbor.eventmosaic.indexing.api.IndexedLocationRole;
 import com.neighbor.eventmosaic.indexing.api.IndexedMentionDocument;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -167,10 +171,10 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				.value()).isTrue();
 		assertThat(client.indices()
 				.exists(request -> request.index(EVENT.indexName()))
-				.value()).isTrue();
+				.value()).isFalse();
 		assertThat(client.indices()
 				.exists(request -> request.index(MENTION.indexName()))
-				.value()).isTrue();
+				.value()).isFalse();
 
 		BulkResponse eventFailure = indexUnknownField(EVENT_GENERATION, "unknown-event");
 		BulkResponse mentionFailure = indexUnknownField(
@@ -186,7 +190,10 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 		assertStrictMappingFailure(nestedFailure);
 
 		var classified = BulkResponseAnalyzer.analyze(
-				new BulkIndexCommand<>(EVENT, List.of(event(1001, 1, "Actor before"))),
+				new BulkIndexCommand<>(
+						EVENT,
+						target(EVENT_GENERATION),
+						List.of(event(1001, 1, "Actor before"))),
 				eventFailure.items());
 		assertThat(classified.outcome())
 				.isEqualTo(BulkIndexOutcome.NON_RETRYABLE_PARTIAL_FAILURE);
@@ -209,9 +216,9 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				.indexTemplate();
 
 		assertThat(eventTemplate.indexPatterns())
-				.containsExactly(EVENT.indexName(), "gdelt-events-v1-*-g*");
+				.containsExactly("gdelt-events-v1-p*-g*");
 		assertThat(mentionTemplate.indexPatterns())
-				.containsExactly(MENTION.indexName(), "gdelt-mentions-v1-*-g*");
+				.containsExactly("gdelt-mentions-v1-p*-g*");
 		assertThat(eventTemplate.allowAutoCreate()).isFalse();
 		assertThat(mentionTemplate.allowAutoCreate()).isFalse();
 
@@ -285,9 +292,20 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	@Test
 	@DisplayName("Missing physical generation не создается автоматически")
 	void rejectsAutoCreateForMissingPhysicalGeneration() throws IOException {
+		ExactIndexTarget missingTarget = new ExactIndexTarget(
+				MISSING_EVENT_GENERATION,
+				"missing-event-index-uuid");
 		assertThat(client.indices()
 				.exists(request -> request.index(MISSING_EVENT_GENERATION))
 				.value()).isFalse();
+
+		assertThatExceptionOfType(IndexTargetUnavailableException.class)
+				.isThrownBy(() -> writer.write(new BulkIndexCommand<>(
+						EVENT,
+						missingTarget,
+						List.of(event(1, 1, "Missing target")))))
+				.satisfies(exception -> assertThat(exception.reason())
+						.isEqualTo(IndexTargetUnavailableReason.MISSING));
 
 		assertThatThrownBy(() -> client.index(request -> request
 				.index(MISSING_EVENT_GENERATION)
@@ -338,31 +356,75 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	}
 
 	@Test
+	@DisplayName("Templates и exact writer сохраняют legacy fixed indices без изменений")
+	void preservesLegacyFixedIndices() throws IOException {
+		client.indices().create(request -> request.index(EVENT.indexName()));
+		client.indices().create(request -> request.index(MENTION.indexName()));
+		client.index(request -> request
+				.index(EVENT.indexName())
+				.id("legacy-event")
+				.refresh(Refresh.WaitFor)
+				.document(Map.of("legacyMarker", "event")));
+		client.index(request -> request
+				.index(MENTION.indexName())
+				.id("legacy-mention")
+				.refresh(Refresh.WaitFor)
+				.document(Map.of("legacyMarker", "mention")));
+		String legacyEventUuid = indexUuid(EVENT.indexName());
+		String legacyMentionUuid = indexUuid(MENTION.indexName());
+
+		writer.prepareReadModel();
+		createPhysicalIndices();
+		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
+		writer.write(new BulkIndexCommand<>(
+				EVENT,
+				eventTarget,
+				List.of(event(1501, 15, "Physical event"))));
+		writer.refresh(EVENT, eventTarget);
+
+		assertThat(indexUuid(EVENT.indexName())).isEqualTo(legacyEventUuid);
+		assertThat(indexUuid(MENTION.indexName())).isEqualTo(legacyMentionUuid);
+		assertThat(client.count(request -> request.index(EVENT.indexName())).count())
+				.isEqualTo(1);
+		assertThat(client.count(request -> request.index(MENTION.indexName())).count())
+				.isEqualTo(1);
+		assertThat(client.count(request -> request.index(EVENT_GENERATION)).count())
+				.isEqualTo(1);
+	}
+
+	@Test
 	@DisplayName("Стабильные IDs перезаписывают Event и Mention без дубликатов")
 	void overwritesDocumentsByStableIds() throws IOException {
+		createPhysicalIndices();
+		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
+		ExactIndexTarget mentionTarget = target(MENTION_GENERATION);
 		IndexedEventDocument initialEvent = event(2001, 2, "Actor before");
 		IndexedEventDocument updatedEvent = event(2001, 2, "Actor after");
 		IndexedMentionDocument initialMention = mention("m1", 2001, 3, -1.5);
 		IndexedMentionDocument updatedMention = mention("m1", 2001, 3, 2.5);
 
-		assertThat(writer.write(new BulkIndexCommand<>(EVENT, List.of(initialEvent))).successful())
+		assertThat(writer.write(new BulkIndexCommand<>(
+				EVENT, eventTarget, List.of(initialEvent))).successful())
 				.isTrue();
-		assertThat(writer.write(new BulkIndexCommand<>(EVENT, List.of(updatedEvent))).successful())
+		assertThat(writer.write(new BulkIndexCommand<>(
+				EVENT, eventTarget, List.of(updatedEvent))).successful())
 				.isTrue();
-		assertThat(writer.write(new BulkIndexCommand<>(MENTION, List.of(initialMention))).successful())
+		assertThat(writer.write(new BulkIndexCommand<>(
+				MENTION, mentionTarget, List.of(initialMention))).successful())
 				.isTrue();
-		assertThat(writer.write(new BulkIndexCommand<>(MENTION, List.of(updatedMention))).successful())
+		assertThat(writer.write(new BulkIndexCommand<>(
+				MENTION, mentionTarget, List.of(updatedMention))).successful())
 				.isTrue();
-		writer.refresh(EVENT);
-		writer.refresh(MENTION);
+		writer.refresh(EVENT, eventTarget);
+		writer.refresh(MENTION, mentionTarget);
 
-		assertThat(client.count(request -> request.index(EVENT.indexName())).count()).isEqualTo(1);
-		assertThat(client.count(request -> request.index(MENTION.indexName())).count()).isEqualTo(1);
+		assertThat(client.count(request -> request.index(EVENT_GENERATION)).count()).isEqualTo(1);
+		assertThat(client.count(request -> request.index(MENTION_GENERATION)).count()).isEqualTo(1);
 		var storedEvent = client.get(
-				request -> request.index(EVENT.indexName()).id(initialEvent.documentId()),
+				request -> request.index(EVENT_GENERATION).id(initialEvent.documentId()),
 				IndexedEventDocument.class);
 		var storedMention = client.get(
-				request -> request.index(MENTION.indexName()).id(initialMention.documentId()),
+				request -> request.index(MENTION_GENERATION).id(initialMention.documentId()),
 				IndexedMentionDocument.class);
 		assertThat(storedEvent.found()).isTrue();
 		assertThat(storedEvent.source())
@@ -377,43 +439,105 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Receipt использует точный archive key и различает удаленный индекс")
+	@DisplayName("Receipt использует exact target, archive key и processing fingerprint")
 	void verifiesExactReceiptAndDeletedIndex() throws IOException {
+		client.indices().create(request -> request.index(EVENT_GENERATION));
+		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
 		IndexedEventDocument exactArchive = event(3001, 4, "Exact archive");
 		IndexedEventDocument similarArchive = event(
 				3002,
 				5,
 				"Similar archive",
 				EVENT_ARCHIVE + ".other");
+		IndexedEventDocument otherFingerprint = event(
+				3003,
+				6,
+				"Other fingerprint",
+				EVENT_ARCHIVE,
+				"c".repeat(64));
 		writer.write(new BulkIndexCommand<>(
 				EVENT,
-				List.of(exactArchive, similarArchive)));
-		writer.refresh(EVENT);
+				eventTarget,
+				List.of(exactArchive, similarArchive, otherFingerprint)));
+		writer.refresh(EVENT, eventTarget);
 
-		var matched = writer.verifyReceipt(new ArchiveReceiptQuery(EVENT, EVENT_ARCHIVE, 1));
-		var mismatched = writer.verifyReceipt(new ArchiveReceiptQuery(EVENT, EVENT_ARCHIVE, 2));
+		var matched = writer.verifyReceipt(new ArchiveReceiptQuery(
+				EVENT,
+				eventTarget,
+				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
+				1));
+		var mismatched = writer.verifyReceipt(new ArchiveReceiptQuery(
+				EVENT,
+				eventTarget,
+				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
+				2));
 
 		assertThat(matched.status()).isEqualTo(ArchiveReceiptStatus.MATCHED);
 		assertThat(matched.actualDocumentCount()).isEqualTo(1);
 		assertThat(mismatched.status()).isEqualTo(ArchiveReceiptStatus.MISMATCHED);
 		assertThat(mismatched.actualDocumentCount()).isEqualTo(1);
 
-		client.indices().delete(request -> request.index(EVENT.indexName()));
+		client.indices().delete(request -> request.index(EVENT_GENERATION));
 
-		var absent = writer.verifyReceipt(new ArchiveReceiptQuery(EVENT, EVENT_ARCHIVE, 1));
-		assertThat(absent.status()).isEqualTo(ArchiveReceiptStatus.INDEX_ABSENT);
-		assertThat(absent.actualDocumentCount()).isZero();
+		ArchiveReceiptQuery missingQuery = new ArchiveReceiptQuery(
+				EVENT,
+				eventTarget,
+				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
+				1);
+		assertThatExceptionOfType(IndexTargetUnavailableException.class)
+				.isThrownBy(() -> writer.verifyReceipt(missingQuery))
+				.satisfies(exception -> assertThat(exception.reason())
+						.isEqualTo(IndexTargetUnavailableReason.MISSING));
+	}
+
+	@Test
+	@DisplayName("Receipt считает archive только в exact physical generation")
+	void countsReceiptOnlyInExactTargetGeneration() throws IOException {
+		client.indices().create(request -> request.index(EVENT_GENERATION));
+		client.indices().create(request -> request.index(MISSING_EVENT_GENERATION));
+		ExactIndexTarget activeTarget = target(EVENT_GENERATION);
+		ExactIndexTarget otherGeneration = target(MISSING_EVENT_GENERATION);
+		IndexedEventDocument activeDocument = event(3101, 7, "Active generation");
+		IndexedEventDocument otherDocument = event(3102, 8, "Other generation");
+		writer.write(new BulkIndexCommand<>(EVENT, activeTarget, List.of(activeDocument)));
+		writer.write(new BulkIndexCommand<>(EVENT, otherGeneration, List.of(otherDocument)));
+		writer.refresh(EVENT, activeTarget);
+		writer.refresh(EVENT, otherGeneration);
+
+		var receipt = writer.verifyReceipt(new ArchiveReceiptQuery(
+				EVENT,
+				activeTarget,
+				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
+				1));
+		long bothGenerationsCount = client.count(request -> request
+				.index(EVENT_GENERATION, MISSING_EVENT_GENERATION)
+				.query(root -> root.bool(bool -> bool
+						.filter(filter -> filter.term(term -> term
+								.field("sourceArchiveKey")
+								.value(EVENT_ARCHIVE)))
+						.filter(filter -> filter.term(term -> term
+								.field("processingFingerprint")
+								.value(EVENT_PROCESSING_FINGERPRINT))))))
+				.count();
+
+		assertThat(bothGenerationsCount).isEqualTo(2);
+		assertThat(receipt.status()).isEqualTo(ArchiveReceiptStatus.MATCHED);
+		assertThat(receipt.actualDocumentCount()).isEqualTo(1);
 	}
 
 	@Test
 	@DisplayName("Явный refresh делает видимыми все shards целевого индекса")
 	void refreshesEveryTargetShardBeforeReceipt() throws IOException {
-		client.indices().delete(request -> request.index(EVENT.indexName()));
 		client.indices().create(request -> request
-				.index(EVENT.indexName())
+				.index(EVENT_GENERATION)
 				.settings(settings -> settings
 						.numberOfShards("2")
 						.refreshInterval(interval -> interval.time("-1"))));
+		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
 		List<IndexedEventDocument> documents = java.util.stream.LongStream
 				.rangeClosed(1, 32)
 				.mapToObj(value -> event(
@@ -422,27 +546,83 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 						"Actor " + value))
 				.toList();
 
-		assertThat(writer.write(new BulkIndexCommand<>(EVENT, documents)).successful())
+		assertThat(writer.write(new BulkIndexCommand<>(
+				EVENT,
+				eventTarget,
+				documents)).successful())
 				.isTrue();
 		assertThat(writer.verifyReceipt(new ArchiveReceiptQuery(
 				EVENT,
+				eventTarget,
 				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
 				documents.size())).status())
 				.isEqualTo(ArchiveReceiptStatus.MISMATCHED);
 
-		writer.refresh(EVENT);
+		writer.refresh(EVENT, eventTarget);
 
 		var receipt = writer.verifyReceipt(new ArchiveReceiptQuery(
 				EVENT,
+				eventTarget,
 				EVENT_ARCHIVE,
+				EVENT_PROCESSING_FINGERPRINT,
 				documents.size()));
 		assertThat(receipt.status()).isEqualTo(ArchiveReceiptStatus.MATCHED);
 		assertThat(receipt.actualDocumentCount()).isEqualTo(documents.size());
 	}
 
+	@Test
+	@DisplayName("Writer отклоняет exact имя после замены Elasticsearch UUID")
+	void rejectsRecreatedExactTarget() throws IOException {
+		client.indices().create(request -> request.index(EVENT_GENERATION));
+		ExactIndexTarget staleTarget = target(EVENT_GENERATION);
+		client.indices().delete(request -> request.index(EVENT_GENERATION));
+		client.indices().create(request -> request.index(EVENT_GENERATION));
+		ExactIndexTarget replacement = target(EVENT_GENERATION);
+
+		assertThat(replacement.indexUuid()).isNotEqualTo(staleTarget.indexUuid());
+		assertThatExceptionOfType(IndexTargetUnavailableException.class)
+				.isThrownBy(() -> writer.refresh(EVENT, staleTarget))
+				.satisfies(exception -> assertThat(exception.reason())
+						.isEqualTo(IndexTargetUnavailableReason.REPLACED));
+	}
+
+	@Test
+	@DisplayName("Writer отклоняет следующий bulk после exact write block")
+	void rejectsWriteBlockedExactTarget() throws IOException {
+		client.indices().create(request -> request.index(EVENT_GENERATION));
+		ExactIndexTarget eventTarget = target(EVENT_GENERATION);
+		client.indices().putSettings(request -> request
+				.index(EVENT_GENERATION)
+				.settings(settings -> settings.blocks(blocks -> blocks.write(true))));
+
+		assertThatExceptionOfType(IndexTargetUnavailableException.class)
+				.isThrownBy(() -> writer.write(new BulkIndexCommand<>(
+						EVENT,
+						eventTarget,
+						List.of(event(5001, 50, "Blocked target")))))
+				.satisfies(exception -> assertThat(exception.reason())
+						.isEqualTo(IndexTargetUnavailableReason.WRITE_BLOCKED));
+		assertThat(client.count(request -> request.index(EVENT_GENERATION)).count())
+				.isZero();
+	}
+
 	private void createPhysicalIndices() throws IOException {
 		client.indices().create(request -> request.index(EVENT_GENERATION));
 		client.indices().create(request -> request.index(MENTION_GENERATION));
+	}
+
+	private ExactIndexTarget target(String indexName) throws IOException {
+		return new ExactIndexTarget(indexName, indexUuid(indexName));
+	}
+
+	private String indexUuid(String indexName) throws IOException {
+		var settings = client.indices()
+				.get(request -> request.index(indexName))
+				.get(indexName)
+				.settings();
+		var indexSettings = settings.index() == null ? settings : settings.index();
+		return indexSettings.uuid();
 	}
 
 	private TypeMapping mapping(String indexName) throws IOException {
@@ -527,6 +707,21 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 			String actor1Name,
 			String archiveKey
 	) {
+		return event(
+				id,
+				line,
+				actor1Name,
+				archiveKey,
+				EVENT_PROCESSING_FINGERPRINT);
+	}
+
+	private static IndexedEventDocument event(
+			long id,
+			long line,
+			String actor1Name,
+			String archiveKey,
+			String processingFingerprint
+	) {
 		return new IndexedEventDocument(
 				id,
 				LocalDate.of(2026, 7, 30),
@@ -574,7 +769,7 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 				Instant.parse("2026-07-30T10:15:00Z"),
 				archiveKey,
 				line,
-				EVENT_PROCESSING_FINGERPRINT);
+				processingFingerprint);
 	}
 
 	private static IndexedMentionDocument mention(

@@ -25,11 +25,15 @@ public interface GdeltIndexWriter {
 	 * <p>Реализация обязана учитывать фактически сериализованный document,
 	 * metadata action и оба разделителя строк.</p>
 	 *
+	 * @param target exact physical target, имя которого попадет в metadata action
 	 * @param document индексируемый документ
 	 * @return положительная оценка в байтах
 	 * @throws IndexingProtocolException если document нельзя безопасно сериализовать
 	 */
-	long estimateBulkOperationBytes(GdeltIndexedDocument document);
+	long estimateBulkOperationBytes(
+			ExactIndexTarget target,
+			GdeltIndexedDocument document
+	);
 
 	/**
 	 * Идемпотентно устанавливает версионированные шаблоны read model.
@@ -48,11 +52,12 @@ public interface GdeltIndexWriter {
 	 * Делает все подтвержденные записи целевого индекса видимыми для receipt.
 	 *
 	 * @param kind вид целевого индекса
+	 * @param target exact physical target ожидаемой generation
 	 */
-	void refresh(GdeltIndexKind kind);
+	void refresh(GdeltIndexKind kind, ExactIndexTarget target);
 
 	/**
-	 * Сверяет число документов для точного ключа исходного архива.
+	 * Сверяет число документов exact target по ключу архива и processing fingerprint.
 	 *
 	 * @param query параметры приемочной проверки
 	 * @return различимый результат совпадения, расхождения или отсутствия индекса

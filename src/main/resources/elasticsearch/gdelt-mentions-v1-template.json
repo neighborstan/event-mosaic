@@ -1,7 +1,6 @@
 {
   "index_patterns": [
-    "gdelt-mentions-v1",
-    "gdelt-mentions-v1-*-g*"
+    "gdelt-mentions-v1-p*-g*"
   ],
   "priority": 100,
   "version": 1,

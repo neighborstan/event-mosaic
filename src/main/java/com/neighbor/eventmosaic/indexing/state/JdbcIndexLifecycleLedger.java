@@ -1,5 +1,6 @@
 package com.neighbor.eventmosaic.indexing.state;
 
+import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
 import com.neighbor.eventmosaic.indexing.api.IndexLifecycleLedger;
@@ -65,6 +66,20 @@ public class JdbcIndexLifecycleLedger implements IndexLifecycleLedger {
 				partitionKey,
 				type,
 				names,
+				leaseDuration,
+				clock.instant());
+	}
+
+	@Override
+	@Transactional
+	public Optional<IndexMaintenanceOperation> reclaimExpiredMaintenance(
+			String partitionKey,
+			Duration leaseDuration
+	) {
+		requirePartitionKey(partitionKey);
+		requirePositive(leaseDuration);
+		return repository.reclaimExpiredMaintenance(
+				partitionKey,
 				leaseDuration,
 				clock.instant());
 	}
@@ -170,6 +185,13 @@ public class JdbcIndexLifecycleLedger implements IndexLifecycleLedger {
 	public Optional<IndexPartition> findPartition(String partitionKey) {
 		requirePartitionKey(partitionKey);
 		return repository.findPartition(partitionKey);
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public Optional<ActiveIndexTargets> findActiveTargets(String partitionKey) {
+		requirePartitionKey(partitionKey);
+		return repository.findActiveTargets(partitionKey);
 	}
 
 	@Override

@@ -36,8 +36,8 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 @DisplayName("Интеграция lifecycle logical partitions с PostgreSQL")
 class IndexLifecycleLedgerIntegrationTest {
 
-	private static final String PARTITION_KEY = "p2026_07_28";
-	private static final Instant PARTITION_START = Instant.parse("2026-07-28T00:00:00Z");
+	private static final String PARTITION_KEY = "p20260727";
+	private static final Instant PARTITION_START = Instant.parse("2026-07-27T00:00:00Z");
 	private static final Duration LEASE = Duration.ofMinutes(15);
 
 	@Autowired
@@ -244,6 +244,57 @@ class IndexLifecycleLedgerIntegrationTest {
 				.param("operationId", rebuild.id())
 				.query(String.class)
 				.single()).isEqualTo(IndexMaintenancePhase.COMPLETED.name());
+	}
+
+	@Test
+	@DisplayName("Expired operation получает новый fenced owner без второй generation")
+	void expiredOperationIsConditionallyReclaimedWithoutNewGeneration() {
+		registerPartition();
+		IndexMaintenanceOperation original = lifecycleLedger.startMaintenance(
+				PARTITION_KEY,
+				IndexMaintenanceType.INITIAL_PROMOTION,
+				names(1),
+				LEASE).orElseThrow();
+
+		assertThat(lifecycleLedger.reclaimExpiredMaintenance(PARTITION_KEY, LEASE)).isEmpty();
+		jdbcClient.sql("""
+				update index_maintenance_operations
+				set heartbeat_at = :expiredHeartbeatAt,
+				    lease_expires_at = :expiredAt
+				where id = :operationId
+				""")
+				.param("expiredHeartbeatAt", Timestamp.from(clock.instant().minusSeconds(2)))
+				.param("expiredAt", Timestamp.from(clock.instant().minusSeconds(1)))
+				.param("operationId", original.id())
+				.update();
+
+		IndexMaintenanceOperation reclaimed = lifecycleLedger.reclaimExpiredMaintenance(
+				PARTITION_KEY,
+				LEASE).orElseThrow();
+
+		assertThat(reclaimed.id()).isEqualTo(original.id());
+		assertThat(reclaimed.buildingGenerationId())
+				.isEqualTo(original.buildingGenerationId());
+		assertThat(reclaimed.token()).isNotEqualTo(original.token());
+		assertThat(reclaimed.operationVersion()).isEqualTo(original.operationVersion() + 1);
+		assertThat(reclaimed.leaseExpiresAt()).isAfter(clock.instant());
+		assertThat(lifecycleLedger.findGenerations(PARTITION_KEY)).hasSize(1);
+		assertThat(lifecycleLedger.advancePhase(
+				PARTITION_KEY,
+				original.token(),
+				original.partitionVersion(),
+				original.operationVersion(),
+				IndexMaintenancePhase.PLANNED,
+				IndexMaintenancePhase.BUILDING))
+				.isEqualTo(IndexLifecycleTransitionResult.OWNERSHIP_LOST);
+		assertThat(lifecycleLedger.advancePhase(
+				PARTITION_KEY,
+				reclaimed.token(),
+				reclaimed.partitionVersion(),
+				reclaimed.operationVersion(),
+				IndexMaintenancePhase.PLANNED,
+				IndexMaintenancePhase.BUILDING))
+				.isEqualTo(IndexLifecycleTransitionResult.APPLIED);
 	}
 
 	private void registerPartition() {

@@ -11,9 +11,9 @@ import java.util.regex.Pattern;
  */
 public record IndexGenerationNames(String eventIndexName, String mentionIndexName) {
 	private static final Pattern EVENT_NAME = Pattern.compile(
-			"^gdelt-events-v[0-9]+-[a-z0-9][a-z0-9_-]*-g[0-9]+$");
+			"^gdelt-events-v1-p[0-9]{8}-g[0-9]{4,}$");
 	private static final Pattern MENTION_NAME = Pattern.compile(
-			"^gdelt-mentions-v[0-9]+-[a-z0-9][a-z0-9_-]*-g[0-9]+$");
+			"^gdelt-mentions-v1-p[0-9]{8}-g[0-9]{4,}$");
 
 	/** Проверяет обязательные и различные exact names. */
 	public IndexGenerationNames {
@@ -27,7 +27,8 @@ public record IndexGenerationNames(String eventIndexName, String mentionIndexNam
 	private static void requireName(String value, String field, Pattern pattern) {
 		Objects.requireNonNull(value, field + " must not be null");
 		if (value.length() > 255 || !pattern.matcher(value).matches()) {
-			throw new IllegalArgumentException(field + " must be an exact physical index name");
+			throw new IllegalArgumentException(
+					field + " must be an exact schema v1 physical index name");
 		}
 	}
 }

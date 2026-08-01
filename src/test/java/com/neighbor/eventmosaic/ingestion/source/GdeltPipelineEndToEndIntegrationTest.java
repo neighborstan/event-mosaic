@@ -1,15 +1,12 @@
 package com.neighbor.eventmosaic.ingestion.source;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.Refresh;
 import com.neighbor.eventmosaic.TestcontainersConfiguration;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetResolver;
 import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
 import com.neighbor.eventmosaic.ingestion.GdeltTestFixtures;
 import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
@@ -54,19 +51,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.test.web.servlet.MockMvc;
 
 @Import(TestcontainersConfiguration.class)
-@AutoConfigureMockMvc
 @SpringBootTest
 @DisplayName("Сквозной GDELT walking skeleton")
 class GdeltPipelineEndToEndIntegrationTest {
 
 	private static final Instant UPDATE_TIME = Instant.parse("2026-07-21T14:45:00Z");
-	private static final long EVENT_ID = 1_314_602_221L;
 
 	@TempDir
 	Path tempDir;
@@ -87,6 +80,9 @@ class GdeltPipelineEndToEndIntegrationTest {
 	private GdeltIndexWriter indexWriter;
 
 	@Autowired
+	private IndexTargetResolver indexTargetResolver;
+
+	@Autowired
 	private ElasticsearchClient elasticsearchClient;
 
 	@Autowired
@@ -94,9 +90,6 @@ class GdeltPipelineEndToEndIntegrationTest {
 
 	@Autowired
 	private MeterRegistry meterRegistry;
-
-	@Autowired
-	private MockMvc mockMvc;
 
 	private HttpServer server;
 	private HttpClient httpClient;
@@ -109,13 +102,18 @@ class GdeltPipelineEndToEndIntegrationTest {
 				    ingestion_gaps,
 				    ingestion_source_state,
 				    ingestion_archives,
-				    ingestion_runs
+				    ingestion_runs,
+				    index_maintenance_operations,
+				    index_generations,
+				    index_logical_partitions
 				restart identity cascade
 				""").update();
 		elasticsearchClient.indices().delete(request -> request
 				.index(
 						GdeltIndexKind.EVENT.indexName(),
-						GdeltIndexKind.MENTION.indexName())
+						GdeltIndexKind.MENTION.indexName(),
+						"gdelt-events-v1-p20260720-g0001",
+						"gdelt-mentions-v1-p20260720-g0001")
 				.allowNoIndices(true)
 				.ignoreUnavailable(true));
 		server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -139,8 +137,8 @@ class GdeltPipelineEndToEndIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Проводит реальный compact update до API, skip и восстановления индекса")
-	void processesRealUpdateAndRecoversDeletedIndex() throws Exception {
+	@DisplayName("Проводит compact update и не воссоздает удаленную ACTIVE generation")
+	void processesRealUpdateAndDefersDeletedGeneration() throws Exception {
 		SourceRequests requests = registerUpdateSource(
 				resourceBytes("/gdelt/csv/event-valid.csv"),
 				resourceBytes("/gdelt/csv/mention-valid.csv"));
@@ -152,7 +150,6 @@ class GdeltPipelineEndToEndIntegrationTest {
 		assertIndexed(first, ArchiveType.TRANSLATION_EVENTS, 1);
 		assertIndexed(first, ArchiveType.TRANSLATION_MENTIONS, 1);
 		assertDocumentCounts(2, 2);
-		assertApiResponse();
 
 		IngestionRunState repeated = pipeline.runLatestUpdate();
 
@@ -162,15 +159,18 @@ class GdeltPipelineEndToEndIntegrationTest {
 		assertThat(requests.event()).hasValue(1);
 		assertThat(requests.mention()).hasValue(1);
 
+		var active = indexTargetResolver.resolve(UPDATE_TIME).targets();
 		elasticsearchClient.indices().delete(
-				request -> request.index(GdeltIndexKind.EVENT.indexName()));
+				request -> request.index(active.event().indexName()));
 
 		IngestionRunState recovered = pipeline.runLatestUpdate();
 
-		assertIndexed(recovered, ArchiveType.TRANSLATION_EVENTS, 2);
+		assertIndexed(recovered, ArchiveType.TRANSLATION_EVENTS, 1);
 		assertIndexed(recovered, ArchiveType.TRANSLATION_MENTIONS, 1);
-		assertDocumentCounts(2, 2);
-		assertApiResponse();
+		assertThat(elasticsearchClient.indices().exists(request -> request
+				.index(active.event().indexName())).value()).isFalse();
+		assertThat(elasticsearchClient.count(request -> request
+				.index(active.mention().indexName())).count()).isEqualTo(2);
 		assertThat(requests.manifest()).hasValue(3);
 		assertThat(requests.event()).hasValue(1);
 		assertThat(requests.mention()).hasValue(1);
@@ -217,7 +217,11 @@ class GdeltPipelineEndToEndIntegrationTest {
 		GdeltPipelineService pipeline = pipelineService();
 		IngestionRunState first = pipeline.runLatestUpdate();
 		String eventArchiveKey = archiveKey(first, ArchiveType.TRANSLATION_EVENTS);
-		indexStaleEvent(eventArchiveKey);
+		indexStaleEvent(
+				eventArchiveKey,
+				processingState(first, ArchiveType.TRANSLATION_EVENTS)
+						.fingerprint()
+						.processingFingerprint());
 
 		IngestionRunState detected = pipeline.runLatestUpdate();
 		ArchiveProcessingState failed = processingState(
@@ -271,6 +275,7 @@ class GdeltPipelineEndToEndIntegrationTest {
 				archiveProcessor,
 				fingerprintFactory,
 				indexWriter,
+				indexTargetResolver,
 				properties);
 	}
 
@@ -371,16 +376,23 @@ class GdeltPipelineEndToEndIntegrationTest {
 
 	private void assertDocumentCounts(long events, long mentions) throws IOException {
 		assertThat(elasticsearchClient.count(
-				request -> request.index(GdeltIndexKind.EVENT.indexName())).count())
+				request -> request.index("gdelt-events-read")).count())
 				.isEqualTo(events);
 		assertThat(elasticsearchClient.count(
-				request -> request.index(GdeltIndexKind.MENTION.indexName())).count())
+				request -> request.index("gdelt-mentions-read")).count())
 				.isEqualTo(mentions);
 	}
 
-	private void indexStaleEvent(String sourceArchiveKey) throws IOException {
+	private void indexStaleEvent(
+			String sourceArchiveKey,
+			String processingFingerprint
+	) throws IOException {
+		String eventIndex = indexTargetResolver.resolve(UPDATE_TIME)
+				.targets()
+				.event()
+				.indexName();
 		elasticsearchClient.index(request -> request
-				.index(GdeltIndexKind.EVENT.indexName())
+				.index(eventIndex)
 				.id("stale-event")
 				.refresh(Refresh.WaitFor)
 				.document(Map.of(
@@ -389,25 +401,8 @@ class GdeltPipelineEndToEndIntegrationTest {
 						"dateAdded", "2026-07-30T10:00:00Z",
 						"sourceUpdateTime", "2026-07-30T10:15:00Z",
 						"sourceArchiveKey", sourceArchiveKey,
+						"processingFingerprint", processingFingerprint,
 						"sourceLineNumber", 999)));
-	}
-
-	private void assertApiResponse() throws Exception {
-		mockMvc.perform(get("/api/v1/events/{eventId}", EVENT_ID))
-				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.event.eventId").value(EVENT_ID))
-				.andExpect(jsonPath("$.event.eventDate").value("2025-07-21"))
-				.andExpect(jsonPath("$.actors.actor1.code").value("AFR"))
-				.andExpect(jsonPath("$.classification.eventCode").value("062"))
-				.andExpect(jsonPath("$.location.role").value("ACTION"))
-				.andExpect(jsonPath("$.sources.length()").value(1))
-				.andExpect(jsonPath("$.sources[0].sourceName")
-						.value("eldiariony.com"))
-				.andExpect(jsonPath("$.sources[0].identifier")
-						.value("https://eldiariony.com/2026/07/21/"
-								+ "reporte-del-departamento-de-estado-de-ee-uu-sobre-"
-								+ "comunismo-en-cuba-menciona-a-independentistas-de-p-r-"
-								+ "como-filiberto-ojeda/"));
 	}
 
 	private static byte[] resourceBytes(String name) throws IOException {

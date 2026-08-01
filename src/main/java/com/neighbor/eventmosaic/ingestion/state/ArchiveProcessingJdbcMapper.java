@@ -4,10 +4,13 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttemptState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFingerprint;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingReceipt;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingStatus;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingTargetBinding;
 import com.neighbor.eventmosaic.ingestion.api.AutomaticRetryState;
 import com.neighbor.eventmosaic.ingestion.api.RecordedArchiveProcessingFailure;
+import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -47,23 +50,20 @@ final class ArchiveProcessingJdbcMapper {
 								resultSet.getInt("consecutive_retryable_failures"),
 								resultSet.getInt("automatic_retry_limit"),
 								nullableInstant(resultSet, "retry_not_before"))),
-				mapProgress(resultSet, status),
+				mapTargetBinding(resultSet),
+				mapProgress(resultSet),
+				mapReceipt(resultSet),
 				mapFailure(resultSet),
 				instant(resultSet, "first_seen_at"),
 				nullableInstant(resultSet, "completed_at")
 		);
 	}
 
-	private static ArchiveProcessingProgress mapProgress(
-			ResultSet resultSet,
-			ArchiveProcessingStatus status
-	)
+	private static ArchiveProcessingProgress mapProgress(ResultSet resultSet)
 			throws SQLException {
 		Long actualDocumentCount = resultSet.getObject("actual_document_count", Long.class);
 		long succeededOperations = resultSet.getLong("succeeded_operations");
-		long receiptDocuments = actualDocumentCount == null
-				? transitionalReceiptDocuments(resultSet, status, succeededOperations)
-				: actualDocumentCount;
+		long receiptDocuments = actualDocumentCount == null ? 0 : actualDocumentCount;
 		return new ArchiveProcessingProgress(
 				resultSet.getLong("delivered_records"),
 				resultSet.getLong("source_invalid_records"),
@@ -76,21 +76,34 @@ final class ArchiveProcessingJdbcMapper {
 		);
 	}
 
-	private static long transitionalReceiptDocuments(
-			ResultSet resultSet,
-			ArchiveProcessingStatus status,
-			long succeededOperations
-	) throws SQLException {
-		if (status == ArchiveProcessingStatus.INDEXED) {
-			return succeededOperations;
+	private static ArchiveProcessingTargetBinding mapTargetBinding(ResultSet resultSet)
+			throws SQLException {
+		Long generationId = resultSet.getObject("bound_generation_id", Long.class);
+		if (generationId == null) {
+			return null;
 		}
-		String errorCode = resultSet.getString("last_error_code");
-		if (status == ArchiveProcessingStatus.FAILED
-				&& ("INDEX_RECEIPT_MISMATCH".equals(errorCode)
-				|| "INDEX_RECEIPT_SURPLUS".equals(errorCode))) {
-			return succeededOperations;
+		return new ArchiveProcessingTargetBinding(
+				GdeltIndexKind.valueOf(resultSet.getString("bound_index_kind")),
+				resultSet.getString("logical_partition_key"),
+				resultSet.getLong("bound_partition_state_version"),
+				generationId,
+				resultSet.getObject("bound_generation_uuid", UUID.class),
+				resultSet.getString("bound_index_name"),
+				resultSet.getString("bound_index_uuid"));
+	}
+
+	private static ArchiveProcessingReceipt mapReceipt(ResultSet resultSet)
+			throws SQLException {
+		Long expectedDocumentCount = resultSet.getObject("expected_document_count", Long.class);
+		if (expectedDocumentCount == null) {
+			return null;
 		}
-		return 0;
+		return new ArchiveProcessingReceipt(
+				expectedDocumentCount,
+				resultSet.getLong("actual_document_count"),
+				resultSet.getLong("verified_generation_id"),
+				resultSet.getString("verified_index_uuid"),
+				instant(resultSet, "receipt_verified_at"));
 	}
 
 	private static RecordedArchiveProcessingFailure mapFailure(ResultSet resultSet)

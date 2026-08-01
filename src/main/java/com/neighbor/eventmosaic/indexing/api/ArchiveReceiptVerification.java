@@ -32,9 +32,6 @@ public record ArchiveReceiptVerification(
 		if (status == ArchiveReceiptStatus.MISMATCHED && expectedDocumentCount == actualDocumentCount) {
 			throw new IllegalArgumentException("mismatched receipt must contain different counters");
 		}
-		if (status == ArchiveReceiptStatus.INDEX_ABSENT && actualDocumentCount != 0) {
-			throw new IllegalArgumentException("absent index must have zero actual documents");
-		}
 	}
 
 	/**

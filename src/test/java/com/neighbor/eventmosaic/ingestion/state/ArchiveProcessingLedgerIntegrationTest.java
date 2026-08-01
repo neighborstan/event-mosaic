@@ -7,12 +7,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.neighbor.eventmosaic.FixedClockTestConfiguration;
 import com.neighbor.eventmosaic.PostgreSqlTestcontainersConfiguration;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttempt;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimResult;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimStatus;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFingerprint;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingLedger;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingStatus;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingTargetBinding;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredArchive;
@@ -20,12 +23,13 @@ import com.neighbor.eventmosaic.ingestion.api.DiscoveredUpdate;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveLedger;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
+import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import java.nio.file.Path;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -48,6 +52,11 @@ class ArchiveProcessingLedgerIntegrationTest {
 	private static final String RECEIPT_SURPLUS = "INDEX_RECEIPT_SURPLUS";
 	private static final String BULK_PARTIAL_FAILURE = "BULK_PARTIAL_FAILURE";
 	private static final String MAPPING_FAILURE = "MAPPING_FAILURE";
+	private static final String PARTITION_KEY = "p20260720";
+	private static final String EVENT_INDEX_NAME = "gdelt-events-v1-p20260720-g0001";
+	private static final String MENTION_INDEX_NAME = "gdelt-mentions-v1-p20260720-g0001";
+	private static final String EVENT_INDEX_UUID = "event-index-uuid";
+	private static final String MENTION_INDEX_UUID = "mention-index-uuid";
 
 	@Autowired
 	private ArchiveProcessingLedger processingLedger;
@@ -63,6 +72,9 @@ class ArchiveProcessingLedgerIntegrationTest {
 		jdbcClient.sql("""
 				truncate table
 				    ingestion_archive_processing,
+				    index_maintenance_operations,
+				    index_generations,
+				    index_logical_partitions,
 				    ingestion_gaps,
 				    ingestion_source_state,
 				    ingestion_archives,
@@ -109,13 +121,16 @@ class ArchiveProcessingLedgerIntegrationTest {
 	void concurrentClaimIssuesSingleOwnership() throws Exception {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
 
-		List<Optional<ArchiveProcessingAttempt>> claims = runConcurrently(
-				() -> processingLedger.claim(events.idempotencyKey(), Duration.ofMinutes(10)),
-				() -> processingLedger.claim(events.idempotencyKey(), Duration.ofMinutes(10))
+		List<ArchiveProcessingClaimResult> claims = runConcurrently(
+				() -> claimResult(events, target),
+				() -> claimResult(events, target)
 		);
 
-		assertThat(claims).filteredOn(Optional::isPresent).hasSize(1);
+		assertThat(claims)
+				.filteredOn(claim -> claim.status() == ArchiveProcessingClaimStatus.CLAIMED)
+				.hasSize(1);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
 				.orElseThrow())
 				.satisfies(state -> {
@@ -126,18 +141,169 @@ class ArchiveProcessingLedgerIntegrationTest {
 	}
 
 	@Test
+	@DisplayName("Claim возвращает typed outcomes для stale target и открытого maintenance")
+	void claimReturnsTypedTargetOutcomes() {
+		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
+		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		ArchiveProcessingTargetBinding staleTarget = new ArchiveProcessingTargetBinding(
+				target.indexKind(),
+				target.partitionKey(),
+				target.partitionStateVersion() + 1,
+				target.generationId(),
+				target.generationUuid(),
+				target.indexName(),
+				target.indexUuid());
+
+		assertThat(claimResult(events, staleTarget).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.OWNERSHIP_LOST);
+		updatePartitionBoundaries(
+				Instant.parse("2026-07-13T00:00:00Z"),
+				Instant.parse("2026-07-20T00:00:00Z"));
+		assertThat(claimResult(events, target).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.OWNERSHIP_LOST);
+		updatePartitionBoundaries(
+				Instant.parse("2026-07-20T00:00:00Z"),
+				Instant.parse("2026-07-27T00:00:00Z"));
+
+		insertOpenMaintenance(target);
+		assertThat(claimResult(events, target).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.MAINTENANCE_DEFERRED);
+		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow().status()).isEqualTo(ArchiveProcessingStatus.PENDING);
+	}
+
+	@Test
+	@DisplayName("Claim откладывается, пока partition не имеет ACTIVE generation")
+	void claimDefersWithoutActiveGeneration() {
+		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
+		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		jdbcClient.sql("""
+				update index_generations
+				set state = 'SUPERSEDED',
+				    superseded_at = :supersededAt,
+				    updated_at = :updatedAt
+				where id = :generationId
+				""")
+				.param("supersededAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("generationId", target.generationId())
+				.update();
+
+		assertThat(claimResult(events, target).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.MAINTENANCE_DEFERRED);
+	}
+
+	@Test
+	@DisplayName("Captured partition version и generation UUID fence progress и terminal receipt")
+	void targetBindingFencesProgressAndStoresCountReceipt() {
+		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
+		processingLedger.register(events.idempotencyKey(), fingerprint("f"));
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		ArchiveProcessingAttempt attempt = claimResult(events, target)
+				.claimedAttempt().orElseThrow();
+		ArchiveProcessingProgress completed = progress(
+				2, 0, 0, 2, 2, 0, 2, null);
+		ArchiveProcessingTargetBinding wrongGeneration = new ArchiveProcessingTargetBinding(
+				target.indexKind(),
+				target.partitionKey(),
+				target.partitionStateVersion(),
+				target.generationId(),
+				UUID.randomUUID(),
+				target.indexName(),
+				target.indexUuid());
+		ArchiveProcessingAttempt staleAttempt = new ArchiveProcessingAttempt(
+				attempt.archiveIdempotencyKey(),
+				attempt.fingerprint(),
+				wrongGeneration,
+				attempt.token(),
+				attempt.leaseExpiresAt(),
+				attempt.attemptCount(),
+				attempt.recovered());
+
+		assertThat(processingLedger.checkpoint(
+				staleAttempt,
+				ArchiveProcessingProgress.empty(),
+				Duration.ofMinutes(20)))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		assertThat(processingLedger.markIndexed(staleAttempt, completed))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
+				.orElseThrow())
+				.satisfies(current -> {
+					assertThat(current.status()).isEqualTo(ArchiveProcessingStatus.PROCESSING);
+					assertThat(current.receipt()).isNull();
+					assertThat(current.completedAt()).isNull();
+				});
+		assertThat(processingLedger.markIndexed(attempt, completed))
+				.isEqualTo(AttemptTransitionResult.APPLIED);
+
+		ArchiveProcessingState state = processingLedger.findByArchiveIdempotencyKey(
+				events.idempotencyKey()).orElseThrow();
+		assertThat(state.targetBinding()).isEqualTo(target);
+		assertThat(state.receipt()).satisfies(receipt -> {
+			assertThat(receipt.expectedDocumentCount()).isEqualTo(2);
+			assertThat(receipt.actualDocumentCount()).isEqualTo(2);
+			assertThat(receipt.verifiedGenerationId()).isEqualTo(target.generationId());
+			assertThat(receipt.verifiedIndexUuid()).isEqualTo(target.indexUuid());
+		});
+		assertThat(jdbcClient.sql("""
+				select count(*)
+				from ingestion_archive_processing
+				where archive_idempotency_key = :archiveIdempotencyKey
+				  and bound_generation_uuid = :generationUuid
+				  and bound_index_name = :indexName
+				  and receipt_digest_algorithm is null
+				  and expected_identity_digest is null
+				  and actual_identity_digest is null
+				""")
+				.param("archiveIdempotencyKey", events.idempotencyKey())
+				.param("generationUuid", target.generationUuid())
+				.param("indexName", target.indexName())
+				.query(Integer.class)
+				.single()).isEqualTo(1);
+
+		DiscoveredArchive mentions = stagedArchive(ArchiveType.TRANSLATION_MENTIONS);
+		processingLedger.register(mentions.idempotencyKey(), fingerprint("b"));
+		ArchiveProcessingAttempt mentionAttempt = claim(mentions);
+		jdbcClient.sql("""
+				update index_logical_partitions
+				set state_version = state_version + 1,
+				    updated_at = :updatedAt
+				where partition_key = :partitionKey
+				""")
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("partitionKey", PARTITION_KEY)
+				.update();
+		assertThat(processingLedger.checkpoint(
+				mentionAttempt,
+				ArchiveProcessingProgress.empty(),
+				Duration.ofMinutes(20)))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		assertThat(processingLedger.markIndexed(mentionAttempt, completed))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		assertThat(processingLedger.findByArchiveIdempotencyKey(mentions.idempotencyKey())
+				.orElseThrow())
+				.satisfies(current -> {
+					assertThat(current.status()).isEqualTo(ArchiveProcessingStatus.PROCESSING);
+					assertThat(current.receipt()).isNull();
+					assertThat(current.completedAt()).isNull();
+				});
+	}
+
+	@Test
 	@DisplayName("Просроченный lease восстанавливается и stale token не меняет progress")
 	void recoversExpiredLeaseAndRejectsStaleToken() {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
-		ArchiveProcessingAttempt first = processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		ArchiveProcessingAttempt first = claimResult(events, target)
+				.claimedAttempt().orElseThrow();
 		expireLease(events);
 
-		ArchiveProcessingAttempt recovered = processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingAttempt recovered = claimResult(events, target)
+				.claimedAttempt().orElseThrow();
 		ArchiveProcessingProgress checkpoint = progress(
 				2, 1, 1, 1, 1, 0, 0, null);
 
@@ -146,27 +312,23 @@ class ArchiveProcessingLedgerIntegrationTest {
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
 				.orElseThrow().attempt().retry().automaticRetriesUsed()).isEqualTo(1);
 		assertThat(processingLedger.checkpoint(
-				events.idempotencyKey(),
-				first.token(),
+				first,
 				checkpoint,
 				Duration.ofMinutes(20)))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(processingLedger.markFailed(
-				events.idempotencyKey(),
-				first.token(),
+				first,
 				new ArchiveProcessingFailure(MAPPING_FAILURE, false),
 				ArchiveProcessingProgress.empty()))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 
 		assertThat(processingLedger.checkpoint(
-				events.idempotencyKey(),
-				recovered.token(),
+				recovered,
 				checkpoint,
 				Duration.ofMinutes(20)))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 		assertThat(processingLedger.checkpoint(
-				events.idempotencyKey(),
-				recovered.token(),
+				recovered,
 				ArchiveProcessingProgress.empty(),
 				Duration.ofMinutes(20)))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
@@ -183,9 +345,7 @@ class ArchiveProcessingLedgerIntegrationTest {
 	void retryableFailurePersistsCountersAndRetryResetsThem() {
 		DiscoveredArchive mentions = stagedArchive(ArchiveType.TRANSLATION_MENTIONS);
 		processingLedger.register(mentions.idempotencyKey(), fingerprint("b"));
-		ArchiveProcessingAttempt first = processingLedger.claim(
-				mentions.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingAttempt first = claim(mentions);
 		ArchiveProcessingProgress partial = progress(
 				2, 1, 0, 2, 1, 1, 0, 4L);
 		ArchiveProcessingFailure retryable = new ArchiveProcessingFailure(
@@ -193,8 +353,7 @@ class ArchiveProcessingLedgerIntegrationTest {
 				true);
 
 		assertThat(processingLedger.markFailed(
-				mentions.idempotencyKey(),
-				first.token(),
+				first,
 				retryable,
 				partial))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
@@ -212,9 +371,7 @@ class ArchiveProcessingLedgerIntegrationTest {
 							.isEqualTo(FixedClockTestConfiguration.NOW);
 				});
 
-		ArchiveProcessingAttempt retry = processingLedger.claim(
-				mentions.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingAttempt retry = claim(mentions);
 		assertThat(retry.attemptCount()).isEqualTo(2);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(mentions.idempotencyKey())
 				.orElseThrow().attempt().retry().automaticRetriesUsed()).isEqualTo(1);
@@ -223,15 +380,12 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.isEqualTo(ArchiveProcessingProgress.empty());
 
 		assertThat(processingLedger.markFailed(
-				mentions.idempotencyKey(),
-				retry.token(),
+				retry,
 				new ArchiveProcessingFailure(MAPPING_FAILURE, false),
 				ArchiveProcessingProgress.empty()))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
-		assertThat(processingLedger.claim(
-				mentions.idempotencyKey(),
-				Duration.ofMinutes(10)))
-				.isEmpty();
+		assertThat(claimResult(mentions, activeTarget(mentions.archiveType())).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
 	}
 
 	@Test
@@ -239,16 +393,13 @@ class ArchiveProcessingLedgerIntegrationTest {
 	void terminalReceiptInvariantDistinguishesIndexedAndFailed() {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
-		ArchiveProcessingAttempt attempt = processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingAttempt attempt = claim(events);
 		ArchiveProcessingProgress unverified = progress(
 				2, 0, 0, 2, 2, 0, 1, null);
 		String eventArchiveKey = events.idempotencyKey();
-		var attemptToken = attempt.token();
 
 		assertThatThrownBy(() ->
-				processingLedger.markIndexed(eventArchiveKey, attemptToken, unverified))
+				processingLedger.markIndexed(attempt, unverified))
 				.isInstanceOf(IllegalArgumentException.class)
 				.hasMessageContaining("receipt");
 		assertThat(processingLedger.findByArchiveIdempotencyKey(eventArchiveKey)
@@ -258,8 +409,7 @@ class ArchiveProcessingLedgerIntegrationTest {
 		ArchiveProcessingProgress extraDocuments = progress(
 				2, 0, 0, 2, 2, 0, 3, null);
 		assertThat(processingLedger.markFailed(
-				events.idempotencyKey(),
-				attempt.token(),
+				attempt,
 				new ArchiveProcessingFailure(RECEIPT_MISMATCH, true),
 				extraDocuments))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
@@ -277,12 +427,11 @@ class ArchiveProcessingLedgerIntegrationTest {
 	void futureRetryAndExhaustedBudgetDoNotCreateProcessingToken() {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		processingLedger.register(events.idempotencyKey(), fingerprint("e"));
-		ArchiveProcessingAttempt attempt = processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		ArchiveProcessingAttempt attempt = claimResult(events, target)
+				.claimedAttempt().orElseThrow();
 		assertThat(processingLedger.markFailed(
-				events.idempotencyKey(),
-				attempt.token(),
+				attempt,
 				new ArchiveProcessingFailure(BULK_PARTIAL_FAILURE, true),
 				ArchiveProcessingProgress.empty()))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
@@ -298,8 +447,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.param("archiveIdempotencyKey", events.idempotencyKey())
 				.update();
 
-		assertThat(processingLedger.claim(events.idempotencyKey(), Duration.ofMinutes(10)))
-				.isEmpty();
+		assertThat(claimResult(events, target).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
 				.orElseThrow().attempt().count()).isEqualTo(1);
 
@@ -314,8 +463,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.param("archiveIdempotencyKey", events.idempotencyKey())
 				.update();
 
-		assertThat(processingLedger.claim(events.idempotencyKey(), Duration.ofMinutes(10)))
-				.isEmpty();
+		assertThat(claimResult(events, target).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
 				.orElseThrow())
 				.satisfies(state -> {
@@ -331,21 +480,18 @@ class ArchiveProcessingLedgerIntegrationTest {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		ArchiveProcessingFingerprint fingerprint = fingerprint("a");
 		processingLedger.register(events.idempotencyKey(), fingerprint);
-		ArchiveProcessingAttempt attempt = processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		ArchiveProcessingAttempt attempt = claimResult(events, target)
+				.claimedAttempt().orElseThrow();
 		ArchiveProcessingProgress completed = progress(
 				3, 1, 1, 2, 2, 0, 2, null);
 
 		assertThat(processingLedger.markIndexed(
-				events.idempotencyKey(),
-				attempt.token(),
+				attempt,
 				completed))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
-		assertThat(processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)))
-				.isEmpty();
+		assertThat(claimResult(events, target).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
 
 		ArchiveProcessingFailure mismatch = new ArchiveProcessingFailure(
 				RECEIPT_MISMATCH,
@@ -354,12 +500,14 @@ class ArchiveProcessingLedgerIntegrationTest {
 				events.idempotencyKey(),
 				"c".repeat(64),
 				1,
+				target,
 				mismatch))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(processingLedger.recordReceiptMismatch(
 				events.idempotencyKey(),
 				fingerprint.processingFingerprint(),
 				1,
+				target,
 				mismatch))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 
@@ -371,22 +519,21 @@ class ArchiveProcessingLedgerIntegrationTest {
 					assertThat(state.completedAt()).isNull();
 					assertThat(state.failure().failure()).isEqualTo(mismatch);
 				});
-		ArchiveProcessingAttempt reindex = processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingAttempt reindex = claimResult(events, target)
+				.claimedAttempt().orElseThrow();
 		assertThat(reindex.attemptCount()).isEqualTo(2);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
 				.orElseThrow().progress())
 				.isEqualTo(ArchiveProcessingProgress.empty());
 		assertThat(processingLedger.markIndexed(
-				events.idempotencyKey(),
-				reindex.token(),
+				reindex,
 				completed))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 		assertThat(processingLedger.recordReceiptMismatch(
 				events.idempotencyKey(),
 				fingerprint.processingFingerprint(),
 				1,
+				target,
 				mismatch))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey())
@@ -403,12 +550,12 @@ class ArchiveProcessingLedgerIntegrationTest {
 		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
 		ArchiveProcessingFingerprint fingerprint = fingerprint("d");
 		processingLedger.register(events.idempotencyKey(), fingerprint);
-		ArchiveProcessingAttempt attempt = processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)).orElseThrow();
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		ArchiveProcessingAttempt attempt = claimResult(events, target)
+				.claimedAttempt().orElseThrow();
 		ArchiveProcessingProgress completed = progress(
 				2, 0, 0, 2, 2, 0, 2, null);
-		processingLedger.markIndexed(events.idempotencyKey(), attempt.token(), completed);
+		processingLedger.markIndexed(attempt, completed);
 		ArchiveProcessingFailure surplus = new ArchiveProcessingFailure(
 				RECEIPT_SURPLUS,
 				false);
@@ -417,6 +564,7 @@ class ArchiveProcessingLedgerIntegrationTest {
 				events.idempotencyKey(),
 				fingerprint.processingFingerprint(),
 				1,
+				target,
 				surplus))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
 
@@ -426,10 +574,8 @@ class ArchiveProcessingLedgerIntegrationTest {
 					assertThat(state.status()).isEqualTo(ArchiveProcessingStatus.FAILED);
 					assertThat(state.failure().failure()).isEqualTo(surplus);
 				});
-		assertThat(processingLedger.claim(
-				events.idempotencyKey(),
-				Duration.ofMinutes(10)))
-				.isEmpty();
+		assertThat(claimResult(events, target).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
 	}
 
 	private DiscoveredUpdate registerUpdate() {
@@ -458,6 +604,178 @@ class ArchiveProcessingLedgerIntegrationTest {
 						archive.expectedSizeBytes(),
 						archive.expectedMd5())))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
+	}
+
+	private ArchiveProcessingAttempt claim(DiscoveredArchive archive) {
+		return claimResult(archive, activeTarget(archive.archiveType()))
+				.claimedAttempt()
+				.orElseThrow();
+	}
+
+	private ArchiveProcessingClaimResult claimResult(
+			DiscoveredArchive archive,
+			ArchiveProcessingTargetBinding target
+	) {
+		return processingLedger.claim(
+				archive.idempotencyKey(),
+				target,
+				Duration.ofMinutes(10));
+	}
+
+	private ArchiveProcessingTargetBinding activeTarget(ArchiveType archiveType) {
+		Instant partitionStart = Instant.parse("2026-07-20T00:00:00Z");
+		jdbcClient.sql("""
+				insert into index_logical_partitions (
+				    partition_key,
+				    partition_start_at,
+				    partition_end_at,
+				    partition_interval,
+				    state_version,
+				    created_at,
+				    updated_at
+				)
+				values (
+				    :partitionKey,
+				    :partitionStartAt,
+				    :partitionEndAt,
+				    'P7D',
+				    1,
+				    :createdAt,
+				    :updatedAt
+				)
+				on conflict (partition_key) do nothing
+				""")
+				.param("partitionKey", PARTITION_KEY)
+				.param("partitionStartAt", Timestamp.from(partitionStart))
+				.param("partitionEndAt", Timestamp.from(partitionStart.plus(Duration.ofDays(7))))
+				.param("createdAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.update();
+		jdbcClient.sql("""
+				insert into index_generations (
+				    generation_uuid,
+				    partition_key,
+				    generation_number,
+				    state,
+				    event_index_name,
+				    event_index_uuid,
+				    mention_index_name,
+				    mention_index_uuid,
+				    heartbeat_at,
+				    activated_at,
+				    created_at,
+				    updated_at
+				)
+				values (
+				    :generationUuid,
+				    :partitionKey,
+				    1,
+				    'ACTIVE',
+				    :eventIndexName,
+				    :eventIndexUuid,
+				    :mentionIndexName,
+				    :mentionIndexUuid,
+				    :heartbeatAt,
+				    :activatedAt,
+				    :createdAt,
+				    :updatedAt
+				)
+				on conflict (partition_key, generation_number) do nothing
+				""")
+				.param("generationUuid", UUID.randomUUID())
+				.param("partitionKey", PARTITION_KEY)
+				.param("eventIndexName", EVENT_INDEX_NAME)
+				.param("eventIndexUuid", EVENT_INDEX_UUID)
+				.param("mentionIndexName", MENTION_INDEX_NAME)
+				.param("mentionIndexUuid", MENTION_INDEX_UUID)
+				.param("heartbeatAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("activatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("createdAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.update();
+		return jdbcClient.sql("""
+				select
+				    partition_state.state_version,
+				    generation.id,
+				    generation.generation_uuid
+				from index_logical_partitions partition_state
+				join index_generations generation
+				  on generation.partition_key = partition_state.partition_key
+				 and generation.state = 'ACTIVE'
+				where partition_state.partition_key = :partitionKey
+				""")
+				.param("partitionKey", PARTITION_KEY)
+				.query((resultSet, rowNumber) -> {
+					GdeltIndexKind kind = archiveType == ArchiveType.TRANSLATION_EVENTS
+							? GdeltIndexKind.EVENT
+							: GdeltIndexKind.MENTION;
+					return new ArchiveProcessingTargetBinding(
+							kind,
+							PARTITION_KEY,
+							resultSet.getLong("state_version"),
+							resultSet.getLong("id"),
+							resultSet.getObject("generation_uuid", UUID.class),
+							kind == GdeltIndexKind.EVENT
+									? EVENT_INDEX_NAME : MENTION_INDEX_NAME,
+							kind == GdeltIndexKind.EVENT
+									? EVENT_INDEX_UUID : MENTION_INDEX_UUID);
+				})
+				.single();
+	}
+
+	private void insertOpenMaintenance(ArchiveProcessingTargetBinding target) {
+		jdbcClient.sql("""
+				insert into index_maintenance_operations (
+				    operation_token,
+				    partition_key,
+				    operation_kind,
+				    phase,
+				    expected_partition_state_version,
+				    cleanup_generation_id,
+				    lease_expires_at,
+				    heartbeat_at,
+				    created_at,
+				    updated_at
+				)
+				values (
+				    :operationToken,
+				    :partitionKey,
+				    'CLEANUP',
+				    'PLANNED',
+				    :partitionStateVersion,
+				    :cleanupGenerationId,
+				    :leaseExpiresAt,
+				    :heartbeatAt,
+				    :createdAt,
+				    :updatedAt
+				)
+				""")
+				.param("operationToken", UUID.randomUUID())
+				.param("partitionKey", target.partitionKey())
+				.param("partitionStateVersion", target.partitionStateVersion())
+				.param("cleanupGenerationId", target.generationId())
+				.param(
+						"leaseExpiresAt",
+						Timestamp.from(FixedClockTestConfiguration.NOW.plus(Duration.ofMinutes(10))))
+				.param("heartbeatAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("createdAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.update();
+	}
+
+	private void updatePartitionBoundaries(Instant startAt, Instant endAt) {
+		jdbcClient.sql("""
+				update index_logical_partitions
+				set partition_start_at = :startAt,
+				    partition_end_at = :endAt,
+				    updated_at = :updatedAt
+				where partition_key = :partitionKey
+				""")
+				.param("startAt", Timestamp.from(startAt))
+				.param("endAt", Timestamp.from(endAt))
+				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("partitionKey", PARTITION_KEY)
+				.update();
 	}
 
 	private void expireLease(DiscoveredArchive archive) {

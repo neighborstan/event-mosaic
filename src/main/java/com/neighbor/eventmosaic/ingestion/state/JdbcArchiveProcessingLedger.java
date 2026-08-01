@@ -1,18 +1,19 @@
 package com.neighbor.eventmosaic.ingestion.state;
 
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttempt;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimResult;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFingerprint;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingLedger;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingTargetBinding;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,8 +26,7 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 
 	private static final String RECEIPT_MISMATCH_CODE = "INDEX_RECEIPT_MISMATCH";
 	private static final String RECEIPT_SURPLUS_CODE = "INDEX_RECEIPT_SURPLUS";
-	private static final String ATTEMPT_TOKEN_REQUIRED =
-			"attemptToken must not be null";
+	private static final String ATTEMPT_REQUIRED = "attempt must not be null";
 	private static final String PROGRESS_REQUIRED = "progress must not be null";
 	private static final String FAILURE_REQUIRED = "failure must not be null";
 	private static final Pattern PROCESSING_FINGERPRINT = Pattern.compile("^[0-9a-f]{64}$");
@@ -61,31 +61,34 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 
 	@Override
 	@Transactional
-	public Optional<ArchiveProcessingAttempt> claim(
+	public ArchiveProcessingClaimResult claim(
 			String archiveIdempotencyKey,
+			ArchiveProcessingTargetBinding targetBinding,
 			Duration leaseDuration
 	) {
 		requireArchiveKey(archiveIdempotencyKey);
+		Objects.requireNonNull(targetBinding, "targetBinding must not be null");
 		requirePositive(leaseDuration);
-		return repository.claim(archiveIdempotencyKey, leaseDuration, clock.instant());
+		return repository.claim(
+				archiveIdempotencyKey,
+				targetBinding,
+				leaseDuration,
+				clock.instant());
 	}
 
 	@Override
 	@Transactional
 	public AttemptTransitionResult checkpoint(
-			String archiveIdempotencyKey,
-			UUID attemptToken,
+			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingProgress progress,
 			Duration leaseDuration
 	) {
-		requireArchiveKey(archiveIdempotencyKey);
-		Objects.requireNonNull(attemptToken, ATTEMPT_TOKEN_REQUIRED);
+		Objects.requireNonNull(attempt, ATTEMPT_REQUIRED);
 		Objects.requireNonNull(progress, PROGRESS_REQUIRED);
 		requirePositive(leaseDuration);
 		Instant now = clock.instant();
 		return repository.checkpoint(
-				archiveIdempotencyKey,
-				attemptToken,
+				attempt,
 				progress,
 				now.plus(leaseDuration),
 				now
@@ -95,17 +98,14 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 	@Override
 	@Transactional
 	public AttemptTransitionResult markIndexed(
-			String archiveIdempotencyKey,
-			UUID attemptToken,
+			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingProgress progress
 	) {
-		requireArchiveKey(archiveIdempotencyKey);
-		Objects.requireNonNull(attemptToken, ATTEMPT_TOKEN_REQUIRED);
+		Objects.requireNonNull(attempt, ATTEMPT_REQUIRED);
 		Objects.requireNonNull(progress, PROGRESS_REQUIRED)
 				.requireIndexedCompletion();
 		return repository.markIndexed(
-				archiveIdempotencyKey,
-				attemptToken,
+				attempt,
 				progress,
 				clock.instant()
 		);
@@ -114,18 +114,15 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 	@Override
 	@Transactional
 	public AttemptTransitionResult markFailed(
-			String archiveIdempotencyKey,
-			UUID attemptToken,
+			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingFailure failure,
 			ArchiveProcessingProgress progress
 	) {
-		requireArchiveKey(archiveIdempotencyKey);
-		Objects.requireNonNull(attemptToken, ATTEMPT_TOKEN_REQUIRED);
+		Objects.requireNonNull(attempt, ATTEMPT_REQUIRED);
 		Objects.requireNonNull(failure, FAILURE_REQUIRED);
 		Objects.requireNonNull(progress, PROGRESS_REQUIRED);
 		return repository.markFailed(
-				archiveIdempotencyKey,
-				attemptToken,
+				attempt,
 				failure,
 				progress,
 				clock.instant()
@@ -138,6 +135,7 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 			String archiveIdempotencyKey,
 			String expectedProcessingFingerprint,
 			int expectedAttemptCount,
+			ArchiveProcessingTargetBinding expectedTargetBinding,
 			ArchiveProcessingFailure failure
 	) {
 		requireArchiveKey(archiveIdempotencyKey);
@@ -145,6 +143,9 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 		if (expectedAttemptCount <= 0) {
 			throw new IllegalArgumentException("expectedAttemptCount must be positive");
 		}
+		Objects.requireNonNull(
+				expectedTargetBinding,
+				"expectedTargetBinding must not be null");
 		Objects.requireNonNull(failure, FAILURE_REQUIRED);
 		boolean retryableShortage = failure.retryable()
 				&& RECEIPT_MISMATCH_CODE.equals(failure.errorCode());
@@ -158,6 +159,7 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 				archiveIdempotencyKey,
 				expectedProcessingFingerprint,
 				expectedAttemptCount,
+				expectedTargetBinding,
 				failure,
 				clock.instant()
 		);

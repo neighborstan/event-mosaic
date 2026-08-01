@@ -1,6 +1,7 @@
 package com.neighbor.eventmosaic.ingestion;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
+import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
@@ -8,11 +9,19 @@ import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingFailureContract;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetResolution;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetResolutionStatus;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetResolver;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimResult;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimStatus;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttempt;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFingerprint;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingLedger;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingStatus;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingTargetBinding;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveState;
@@ -28,7 +37,6 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
 import com.neighbor.eventmosaic.shared.error.SafeExceptionProjection;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,6 +66,7 @@ public class GdeltPipelineService {
 	private final GdeltArchiveProcessor archiveProcessor;
 	private final ProcessingFingerprintFactory fingerprintFactory;
 	private final GdeltIndexWriter indexWriter;
+	private final IndexTargetResolver indexTargetResolver;
 	private final GdeltIngestionProperties properties;
 
 	/**
@@ -68,6 +77,7 @@ public class GdeltPipelineService {
 	 * @param archiveProcessor потоковый mapper и indexer
 	 * @param fingerprintFactory versioned processing identity
 	 * @param indexWriter проверка Elasticsearch receipts
+	 * @param indexTargetResolver lifecycle exact ACTIVE generation
 	 * @param properties runtime lease policy
 	 */
 	public GdeltPipelineService(
@@ -76,6 +86,7 @@ public class GdeltPipelineService {
 			GdeltArchiveProcessor archiveProcessor,
 			ProcessingFingerprintFactory fingerprintFactory,
 			GdeltIndexWriter indexWriter,
+			IndexTargetResolver indexTargetResolver,
 			GdeltIngestionProperties properties
 	) {
 		this.ingestionRunService = ingestionRunService;
@@ -83,6 +94,7 @@ public class GdeltPipelineService {
 		this.archiveProcessor = archiveProcessor;
 		this.fingerprintFactory = fingerprintFactory;
 		this.indexWriter = indexWriter;
+		this.indexTargetResolver = indexTargetResolver;
 		this.properties = properties;
 	}
 
@@ -103,6 +115,12 @@ public class GdeltPipelineService {
 				} catch (IndexingInterruptedException exception) {
 					logExpectedArchiveFailure(archiveState, exception, exception);
 					throw exception;
+				} catch (IndexTargetUnavailableException exception) {
+					logOutcome(
+							archiveState,
+							toGdeltKind(archiveState.archive().archiveType()),
+							targetUnavailableOutcome(exception.reason()),
+							exception.reason().errorCode().code());
 				} catch (IndexingAccessException | IndexingProtocolException exception) {
 					logExpectedArchiveFailure(archiveState, exception, exception);
 					if (deferredFailure == null) {
@@ -125,6 +143,21 @@ public class GdeltPipelineService {
 
 	private void processStagedArchive(IngestionArchiveState archiveState) {
 		GdeltArchiveKind kind = toGdeltKind(archiveState.archive().archiveType());
+		GdeltIndexKind indexKind = toIndexKind(kind);
+		IndexTargetResolution targetResolution = indexTargetResolver.resolve(
+				archiveState.archive().sourceUpdateTime());
+		if (targetResolution.status() != IndexTargetResolutionStatus.READY) {
+			logOutcome(
+					archiveState,
+					kind,
+					resolutionOutcome(targetResolution),
+					null);
+			return;
+		}
+		ActiveIndexTargets indexTargets = targetResolution.targets();
+		ArchiveProcessingTargetBinding targetBinding = toTargetBinding(
+				indexTargets,
+				indexKind);
 		String archiveKey = archiveState.archive().idempotencyKey();
 		String processingFingerprint = fingerprintFactory.create(
 				archiveKey,
@@ -139,7 +172,11 @@ public class GdeltPipelineService {
 				processingLedger.register(archiveKey, fingerprint);
 		if (processingState.status() == ArchiveProcessingStatus.INDEXED) {
 			ReceiptDecision receiptDecision =
-					reconcileIndexedReceipt(archiveState, kind, processingState);
+					reconcileIndexedReceipt(
+							archiveState,
+							kind,
+							indexTargets,
+							processingState);
 			if (receiptDecision != ReceiptDecision.REINDEX) {
 				logOutcome(
 						archiveState,
@@ -150,28 +187,37 @@ public class GdeltPipelineService {
 			}
 		}
 
-		Optional<ArchiveProcessingAttempt> claimed = processingLedger.claim(
+		ArchiveProcessingClaimResult claimResult = processingLedger.claim(
 				archiveKey,
+				targetBinding,
 				properties.continuity().recoveryLease());
-		if (claimed.isEmpty()) {
-			logOutcome(archiveState, kind, "SKIPPED_NOT_CLAIMABLE", null);
+		if (claimResult.status() != ArchiveProcessingClaimStatus.CLAIMED) {
+			logOutcome(archiveState, kind, claimOutcome(claimResult.status()), null);
 			return;
+		}
+		ArchiveProcessingAttempt attempt = claimResult.attempt();
+		if (!attempt.targetBinding().equals(targetBinding)) {
+			throw new IllegalStateException("Processing claim returned another target binding");
 		}
 		processClaimedArchive(
 				archiveState,
 				kind,
 				processingFingerprint,
-				claimed.orElseThrow());
+				indexTargets,
+				attempt);
 	}
 
 	private ReceiptDecision reconcileIndexedReceipt(
 			IngestionArchiveState archiveState,
 			GdeltArchiveKind kind,
+			ActiveIndexTargets indexTargets,
 			ArchiveProcessingState processingState
 	) {
 		var query = new ArchiveReceiptQuery(
 				toIndexKind(kind),
+				indexTargets.target(toIndexKind(kind)),
 				archiveState.archive().idempotencyKey(),
+				processingState.fingerprint().processingFingerprint(),
 				processingState.progress().receiptDocuments());
 		var verification = indexWriter.verifyReceipt(query);
 		if (verification.matched()) {
@@ -186,6 +232,7 @@ public class GdeltPipelineService {
 				archiveState.archive().idempotencyKey(),
 				processingState.fingerprint().processingFingerprint(),
 				processingState.attempt().count(),
+				processingState.targetBinding(),
 				new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 						receiptCode.code(),
 						!surplus));
@@ -199,6 +246,7 @@ public class GdeltPipelineService {
 			IngestionArchiveState archiveState,
 			GdeltArchiveKind kind,
 			String processingFingerprint,
+			ActiveIndexTargets indexTargets,
 			ArchiveProcessingAttempt attempt
 	) {
 		AtomicReference<ArchiveProcessingProgress> latestProgress =
@@ -209,6 +257,7 @@ public class GdeltPipelineService {
 				archiveState.archive().sourceUpdateTime(),
 				archiveState.archive().idempotencyKey(),
 				processingFingerprint,
+				indexTargets,
 				archiveState.stagedArchive().csvPath());
 		ArchiveProcessingResult result;
 		try {
@@ -217,13 +266,14 @@ public class GdeltPipelineService {
 					progress -> {
 						latestProgress.set(progress);
 						return processingLedger.checkpoint(
-								attempt.archiveIdempotencyKey(),
-								attempt.token(),
+								attempt,
 								toLedgerProgress(progress),
 								properties.continuity().recoveryLease())
 								== AttemptTransitionResult.APPLIED;
 					},
 					diagnosticFailure::set);
+		} catch (IndexTargetUnavailableException exception) {
+			throw exception;
 		} catch (RuntimeException exception) {
 			recordUnexpectedFailure(attempt, latestProgress.get(), exception);
 			throw exception;
@@ -252,8 +302,7 @@ public class GdeltPipelineService {
 			ArchiveProcessingResult result
 	) {
 		AttemptTransitionResult transition = processingLedger.markIndexed(
-				attempt.archiveIdempotencyKey(),
-				attempt.token(),
+				attempt,
 				toLedgerProgress(result.progress()));
 		logOutcome(
 				archiveState,
@@ -283,8 +332,7 @@ public class GdeltPipelineService {
 		AttemptTransitionResult transition;
 		try {
 			transition = processingLedger.markFailed(
-					attempt.archiveIdempotencyKey(),
-					attempt.token(),
+					attempt,
 					new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 							failure.code().code(),
 							failure.retryable()),
@@ -330,8 +378,7 @@ public class GdeltPipelineService {
 		String outcome;
 		try {
 			AttemptTransitionResult transition = processingLedger.markFailed(
-					attempt.archiveIdempotencyKey(),
-					attempt.token(),
+					attempt,
 					new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 							result.failure().code().code(),
 							true),
@@ -371,8 +418,7 @@ public class GdeltPipelineService {
 	) {
 		try {
 			processingLedger.markFailed(
-					attempt.archiveIdempotencyKey(),
-					attempt.token(),
+					attempt,
 					new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 							IngestionErrorCode.INTERNAL_ERROR.code(),
 							false),
@@ -534,6 +580,47 @@ public class GdeltPipelineService {
 		return switch (kind) {
 			case TRANSLATION_EVENTS -> GdeltIndexKind.EVENT;
 			case TRANSLATION_MENTIONS -> GdeltIndexKind.MENTION;
+		};
+	}
+
+	private static ArchiveProcessingTargetBinding toTargetBinding(
+			ActiveIndexTargets targets,
+			GdeltIndexKind kind
+	) {
+		var target = targets.target(kind);
+		return new ArchiveProcessingTargetBinding(
+				kind,
+				targets.partitionKey(),
+				targets.partitionStateVersion(),
+				targets.generationId(),
+				targets.generationUuid(),
+				target.indexName(),
+				target.indexUuid());
+	}
+
+	private static String resolutionOutcome(IndexTargetResolution resolution) {
+		return switch (resolution.status()) {
+			case READY -> throw new IllegalArgumentException("READY is not a deferred outcome");
+			case MAINTENANCE_DEFERRED -> "DEFERRED_MAINTENANCE";
+			case OWNERSHIP_LOST -> OUTCOME_OWNERSHIP_LOST;
+			case MISSING -> "DEFERRED_TARGET_MISSING";
+			case WRITE_BLOCKED -> "DEFERRED_WRITE_BLOCKED";
+		};
+	}
+
+	private static String claimOutcome(ArchiveProcessingClaimStatus status) {
+		return switch (status) {
+			case CLAIMED -> throw new IllegalArgumentException("CLAIMED is not a skipped outcome");
+			case NOT_CLAIMABLE -> "SKIPPED_NOT_CLAIMABLE";
+			case MAINTENANCE_DEFERRED -> "DEFERRED_MAINTENANCE";
+			case OWNERSHIP_LOST -> OUTCOME_OWNERSHIP_LOST;
+		};
+	}
+
+	static String targetUnavailableOutcome(IndexTargetUnavailableReason reason) {
+		return switch (reason) {
+			case WRITE_BLOCKED -> "DEFERRED_WRITE_BLOCKED";
+			case MISSING, REPLACED -> OUTCOME_OWNERSHIP_LOST;
 		};
 	}
 

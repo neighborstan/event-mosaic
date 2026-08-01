@@ -1,11 +1,15 @@
 package com.neighbor.eventmosaic.ingestion.state;
 
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttempt;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimResult;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimStatus;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFingerprint;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingStatus;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingTargetBinding;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
@@ -28,6 +32,13 @@ class JdbcArchiveProcessingRepository {
 
 	private static final String PARAM_ARCHIVE_KEY = "archiveIdempotencyKey";
 	private static final String PARAM_ATTEMPT_TOKEN = "attemptToken";
+	private static final String PARAM_PARTITION_KEY = "partitionKey";
+	private static final String PARAM_PARTITION_VERSION = "partitionStateVersion";
+	private static final String PARAM_GENERATION_ID = "generationId";
+	private static final String PARAM_GENERATION_UUID = "generationUuid";
+	private static final String PARAM_INDEX_KIND = "indexKind";
+	private static final String PARAM_INDEX_NAME = "indexName";
+	private static final String PARAM_INDEX_UUID = "indexUuid";
 	private static final String PARAM_PROCESSING_STATUS = "processingStatus";
 	private static final String PARAM_STATUS = "status";
 	private static final String PARAM_UPDATED_AT = "updatedAt";
@@ -38,6 +49,45 @@ class JdbcArchiveProcessingRepository {
 	private static final String PARAM_SUCCEEDED = "succeededOperations";
 	private static final String PARAM_FAILED = "failedOperations";
 	private static final String PARAM_FIRST_FAILED_LINE = "firstFailedLine";
+	private static final String ACTIVE_BINDING_PREDICATE = """
+			and logical_partition_key = :partitionKey
+			and bound_partition_state_version = :partitionStateVersion
+			and bound_generation_id = :generationId
+			and bound_generation_uuid = :generationUuid
+			and bound_index_kind = :indexKind
+			and bound_index_name = :indexName
+			and bound_index_uuid = :indexUuid
+			and exists (
+			    select 1
+			    from index_logical_partitions partition_state
+			    join index_generations generation
+			      on generation.partition_key = partition_state.partition_key
+			    where partition_state.partition_key = :partitionKey
+			      and partition_state.state_version = :partitionStateVersion
+			      and generation.id = :generationId
+			      and generation.generation_uuid = :generationUuid
+			      and generation.state = 'ACTIVE'
+			      and (
+			          (
+			              :indexKind = 'EVENT'
+			              and generation.event_index_name = :indexName
+			              and generation.event_index_uuid = :indexUuid
+			          )
+			          or
+			          (
+			              :indexKind = 'MENTION'
+			              and generation.mention_index_name = :indexName
+			              and generation.mention_index_uuid = :indexUuid
+			          )
+			      )
+			      and not exists (
+			          select 1
+			          from index_maintenance_operations maintenance
+			          where maintenance.partition_key = partition_state.partition_key
+			            and maintenance.phase not in ('COMPLETED', 'FAILED')
+			      )
+			)
+			""";
 	private static final String SELECT_PROCESSING_STATE_BY_ARCHIVE_KEY = """
 			select
 			    archive_idempotency_key,
@@ -47,6 +97,13 @@ class JdbcArchiveProcessingRepository {
 			    status,
 			    attempt_token,
 			    lease_expires_at,
+			    logical_partition_key,
+			    bound_partition_state_version,
+			    bound_generation_id,
+			    bound_generation_uuid,
+			    bound_index_kind,
+			    bound_index_name,
+			    bound_index_uuid,
 			    total_attempt_count,
 			    automatic_retries_used,
 			    consecutive_retryable_failures,
@@ -60,6 +117,10 @@ class JdbcArchiveProcessingRepository {
 			    succeeded_operations,
 			    failed_operations,
 			    actual_document_count,
+			    expected_document_count,
+			    verified_generation_id,
+			    verified_index_uuid,
+			    receipt_verified_at,
 			    first_failed_line,
 			    failed_at,
 			    completed_at,
@@ -133,14 +194,23 @@ class JdbcArchiveProcessingRepository {
 						"Registered archive processing state disappeared"));
 	}
 
-	Optional<ArchiveProcessingAttempt> claim(
+	ArchiveProcessingClaimResult claim(
 			String archiveIdempotencyKey,
+			ArchiveProcessingTargetBinding targetBinding,
 			Duration leaseDuration,
 			Instant now
 	) {
 		ArchiveProcessingState state = findForUpdate(archiveIdempotencyKey).orElse(null);
 		if (state == null || !isClaimable(state, now)) {
-			return Optional.empty();
+			return ArchiveProcessingClaimResult.outcome(
+					ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
+		}
+
+		ArchiveProcessingClaimStatus targetStatus = validateAndLockTarget(
+				archiveIdempotencyKey,
+				targetBinding);
+		if (targetStatus != ArchiveProcessingClaimStatus.CLAIMED) {
+			return ArchiveProcessingClaimResult.outcome(targetStatus);
 		}
 
 		UUID token = UUID.randomUUID();
@@ -156,6 +226,13 @@ class JdbcArchiveProcessingRepository {
 				    automatic_retries_used = automatic_retries_used + :automaticRetryIncrement,
 				    retry_not_before = null,
 				    last_attempt_at = :lastAttemptAt,
+				    logical_partition_key = :partitionKey,
+				    bound_partition_state_version = :partitionStateVersion,
+				    bound_generation_id = :generationId,
+				    bound_generation_uuid = :generationUuid,
+				    bound_index_kind = :indexKind,
+				    bound_index_name = :indexName,
+				    bound_index_uuid = :indexUuid,
 				    delivered_records = 0,
 				    source_invalid_records = 0,
 				    mapping_rejected_records = 0,
@@ -184,6 +261,13 @@ class JdbcArchiveProcessingRepository {
 				.param("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
 				.param("lastAttemptAt", Timestamp.from(now))
 				.param("automaticRetryIncrement", automaticRetry ? 1 : 0)
+				.param(PARAM_PARTITION_KEY, targetBinding.partitionKey())
+				.param(PARAM_PARTITION_VERSION, targetBinding.partitionStateVersion())
+				.param(PARAM_GENERATION_ID, targetBinding.generationId())
+				.param(PARAM_GENERATION_UUID, targetBinding.generationUuid())
+				.param(PARAM_INDEX_KIND, targetBinding.indexKind().name())
+				.param(PARAM_INDEX_NAME, targetBinding.indexName())
+				.param(PARAM_INDEX_UUID, targetBinding.indexUuid())
 				.param(PARAM_UPDATED_AT, Timestamp.from(now))
 				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
 				.update();
@@ -192,9 +276,10 @@ class JdbcArchiveProcessingRepository {
 					"Claim changed an unexpected number of processing rows: " + updated);
 		}
 
-		return Optional.of(new ArchiveProcessingAttempt(
+		return ArchiveProcessingClaimResult.claimed(new ArchiveProcessingAttempt(
 				archiveIdempotencyKey,
 				state.fingerprint(),
+				targetBinding,
 				token,
 				leaseExpiresAt,
 				state.attempt().count() + 1,
@@ -203,14 +288,17 @@ class JdbcArchiveProcessingRepository {
 	}
 
 	AttemptTransitionResult checkpoint(
-			String archiveIdempotencyKey,
-			UUID attemptToken,
+			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingProgress progress,
 			Instant leaseExpiresAt,
 			Instant now
 	) {
-		int updated = bindProgress(
-				jdbcClient.sql("""
+		if (!ownsCurrentTarget(attempt)) {
+			return AttemptTransitionResult.OWNERSHIP_LOST;
+		}
+		int updated = bindTarget(
+				bindProgress(
+						jdbcClient.sql("""
 						update ingestion_archive_processing
 						set delivered_records = :deliveredRecords,
 						    source_invalid_records = :sourceInvalidRecords,
@@ -235,25 +323,28 @@ class JdbcArchiveProcessingRepository {
 						      first_failed_line is null
 						      or first_failed_line = :firstFailedLine
 						  )
-						""")
+						""" + ACTIVE_BINDING_PREDICATE)
 						.param("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
 						.param(PARAM_UPDATED_AT, Timestamp.from(now))
-						.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
+						.param(PARAM_ARCHIVE_KEY, attempt.archiveIdempotencyKey())
 						.param(PARAM_PROCESSING_STATUS, ArchiveProcessingStatus.PROCESSING.name())
-						.param(PARAM_ATTEMPT_TOKEN, attemptToken),
-				progress
-		).update();
+						.param(PARAM_ATTEMPT_TOKEN, attempt.token()),
+						progress),
+				attempt.targetBinding()).update();
 		return AttemptTransitionResult.fromUpdatedRows(updated);
 	}
 
 	AttemptTransitionResult markIndexed(
-			String archiveIdempotencyKey,
-			UUID attemptToken,
+			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingProgress progress,
 			Instant now
 	) {
-		int updated = bindProgress(
-				jdbcClient.sql("""
+		if (!ownsCurrentTarget(attempt)) {
+			return AttemptTransitionResult.OWNERSHIP_LOST;
+		}
+		int updated = bindTarget(
+				bindProgress(
+						jdbcClient.sql("""
 						update ingestion_archive_processing
 						set status = :status,
 						    delivered_records = :deliveredRecords,
@@ -272,6 +363,14 @@ class JdbcArchiveProcessingRepository {
 						    retry_not_before = null,
 						    last_error_code = null,
 						    last_error_retryable = null,
+						    expected_document_count = :expectedDocumentCount,
+						    receipt_digest_algorithm = null,
+						    expected_identity_digest = null,
+						    verified_generation_id = :generationId,
+						    verified_index_uuid = :indexUuid,
+						    actual_document_count = :actualDocumentCount,
+						    actual_identity_digest = null,
+						    receipt_verified_at = :receiptVerifiedAt,
 						    state_version = state_version + 1,
 						    updated_at = :updatedAt
 						where archive_idempotency_key = :archiveIdempotencyKey
@@ -287,30 +386,36 @@ class JdbcArchiveProcessingRepository {
 						      first_failed_line is null
 						      or first_failed_line = :firstFailedLine
 						  )
-						""")
+						""" + ACTIVE_BINDING_PREDICATE)
 						.param(PARAM_STATUS, ArchiveProcessingStatus.INDEXED.name())
 						.param("completedAt", Timestamp.from(now))
+						.param("expectedDocumentCount", progress.succeededOperations())
+						.param("actualDocumentCount", progress.receiptDocuments())
+						.param("receiptVerifiedAt", Timestamp.from(now))
 						.param(PARAM_UPDATED_AT, Timestamp.from(now))
-						.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
+						.param(PARAM_ARCHIVE_KEY, attempt.archiveIdempotencyKey())
 						.param(PARAM_PROCESSING_STATUS, ArchiveProcessingStatus.PROCESSING.name())
-						.param(PARAM_ATTEMPT_TOKEN, attemptToken),
-				progress
-		).update();
+						.param(PARAM_ATTEMPT_TOKEN, attempt.token()),
+						progress),
+				attempt.targetBinding()).update();
 		return AttemptTransitionResult.fromUpdatedRows(updated);
 	}
 
 	AttemptTransitionResult markFailed(
-			String archiveIdempotencyKey,
-			UUID attemptToken,
+			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingFailure failure,
 			ArchiveProcessingProgress progress,
 			Instant now
 	) {
+		if (!ownsCurrentTarget(attempt)) {
+			return AttemptTransitionResult.OWNERSHIP_LOST;
+		}
 		OffsetDateTime retryNotBefore = failure.retryable()
 				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
 				: null;
-		int updated = bindProgress(
-				jdbcClient.sql("""
+		int updated = bindTarget(
+				bindProgress(
+						jdbcClient.sql("""
 						update ingestion_archive_processing
 						set status = :status,
 						    delivered_records = :deliveredRecords,
@@ -324,6 +429,10 @@ class JdbcArchiveProcessingRepository {
 						    lease_expires_at = null,
 						    bound_partition_state_version = null,
 						    bound_generation_id = null,
+						    bound_generation_uuid = null,
+						    bound_index_kind = null,
+						    bound_index_name = null,
+						    bound_index_uuid = null,
 						    failed_at = :failedAt,
 						    completed_at = null,
 						    consecutive_retryable_failures = case
@@ -348,18 +457,18 @@ class JdbcArchiveProcessingRepository {
 						      first_failed_line is null
 						      or first_failed_line = :firstFailedLine
 						  )
-						""")
+						""" + ACTIVE_BINDING_PREDICATE)
 						.param(PARAM_STATUS, ArchiveProcessingStatus.FAILED.name())
 						.param("failedAt", Timestamp.from(now))
 						.param("errorCode", failure.errorCode())
 						.param("retryable", failure.retryable())
 						.param("retryNotBefore", retryNotBefore, Types.TIMESTAMP_WITH_TIMEZONE)
 						.param(PARAM_UPDATED_AT, Timestamp.from(now))
-						.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
+						.param(PARAM_ARCHIVE_KEY, attempt.archiveIdempotencyKey())
 						.param(PARAM_PROCESSING_STATUS, ArchiveProcessingStatus.PROCESSING.name())
-						.param(PARAM_ATTEMPT_TOKEN, attemptToken),
-				progress
-		).update();
+						.param(PARAM_ATTEMPT_TOKEN, attempt.token()),
+						progress),
+				attempt.targetBinding()).update();
 		return AttemptTransitionResult.fromUpdatedRows(updated);
 	}
 
@@ -367,19 +476,29 @@ class JdbcArchiveProcessingRepository {
 			String archiveIdempotencyKey,
 			String expectedProcessingFingerprint,
 			int expectedAttemptCount,
+			ArchiveProcessingTargetBinding expectedTargetBinding,
 			ArchiveProcessingFailure failure,
 			Instant now
 	) {
+		if (!lockProcessingRow(archiveIdempotencyKey)
+				|| validateAndLockTarget(archiveIdempotencyKey, expectedTargetBinding)
+						!= ArchiveProcessingClaimStatus.CLAIMED) {
+			return AttemptTransitionResult.OWNERSHIP_LOST;
+		}
 		OffsetDateTime retryNotBefore = failure.retryable()
 				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
 				: null;
-		int updated = jdbcClient.sql("""
+		int updated = bindTarget(jdbcClient.sql("""
 				update ingestion_archive_processing
 				set status = :status,
 				    failed_at = :failedAt,
 				    completed_at = null,
 				    bound_partition_state_version = null,
 				    bound_generation_id = null,
+				    bound_generation_uuid = null,
+				    bound_index_kind = null,
+				    bound_index_name = null,
+				    bound_index_uuid = null,
 				    consecutive_retryable_failures = case
 				        when :retryable then consecutive_retryable_failures + 1
 				        else 0
@@ -393,7 +512,7 @@ class JdbcArchiveProcessingRepository {
 				  and processing_fingerprint = :processingFingerprint
 				  and total_attempt_count = :expectedAttemptCount
 				  and status = :indexedStatus
-				""")
+				""" + ACTIVE_BINDING_PREDICATE)
 				.param(PARAM_STATUS, ArchiveProcessingStatus.FAILED.name())
 				.param("failedAt", Timestamp.from(now))
 				.param("errorCode", failure.errorCode())
@@ -403,8 +522,8 @@ class JdbcArchiveProcessingRepository {
 				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
 				.param("processingFingerprint", expectedProcessingFingerprint)
 				.param("expectedAttemptCount", expectedAttemptCount)
-				.param("indexedStatus", ArchiveProcessingStatus.INDEXED.name())
-				.update();
+				.param("indexedStatus", ArchiveProcessingStatus.INDEXED.name()),
+				expectedTargetBinding).update();
 		return AttemptTransitionResult.fromUpdatedRows(updated);
 	}
 
@@ -456,6 +575,125 @@ class JdbcArchiveProcessingRepository {
 		}
 	}
 
+	private ArchiveProcessingClaimStatus validateAndLockTarget(
+			String archiveIdempotencyKey,
+			ArchiveProcessingTargetBinding binding
+	) {
+		PartitionTargetState partition = jdbcClient.sql("""
+				select
+				    partition_state.state_version,
+				    (
+				        select active.id
+				        from index_generations active
+				        where active.partition_key = partition_state.partition_key
+				          and active.state = 'ACTIVE'
+				    ) as active_generation_id,
+				    partition_state.partition_start_at,
+				    partition_state.partition_end_at
+				from index_logical_partitions partition_state
+				where partition_state.partition_key = :partitionKey
+				for share
+				""")
+				.param(PARAM_PARTITION_KEY, binding.partitionKey())
+				.query((resultSet, rowNumber) -> new PartitionTargetState(
+						resultSet.getLong("state_version"),
+						resultSet.getObject("active_generation_id", Long.class),
+						resultSet.getTimestamp("partition_start_at").toInstant(),
+						resultSet.getTimestamp("partition_end_at").toInstant()))
+				.optional()
+				.orElse(null);
+		if (partition == null) {
+			return ArchiveProcessingClaimStatus.OWNERSHIP_LOST;
+		}
+		ArchiveTargetState archive = jdbcClient.sql("""
+				select source_update_time, archive_type
+				from ingestion_archives
+				where idempotency_key = :archiveIdempotencyKey
+				""")
+				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
+				.query((resultSet, rowNumber) -> new ArchiveTargetState(
+						resultSet.getTimestamp("source_update_time").toInstant(),
+						ArchiveType.valueOf(resultSet.getString("archive_type"))))
+				.optional()
+				.orElse(null);
+		if (archive == null
+				|| archive.sourceUpdateTime().isBefore(partition.startAt())
+				|| !archive.sourceUpdateTime().isBefore(partition.endAt())
+				|| !archive.matches(binding)) {
+			return ArchiveProcessingClaimStatus.OWNERSHIP_LOST;
+		}
+
+		boolean maintenanceOpen = jdbcClient.sql("""
+				select exists (
+				    select 1
+				    from index_maintenance_operations
+				    where partition_key = :partitionKey
+				      and phase not in ('COMPLETED', 'FAILED')
+				)
+				""")
+				.param(PARAM_PARTITION_KEY, binding.partitionKey())
+				.query(Boolean.class)
+				.single();
+		if (maintenanceOpen || partition.activeGenerationId() == null) {
+			return ArchiveProcessingClaimStatus.MAINTENANCE_DEFERRED;
+		}
+		if (partition.stateVersion() != binding.partitionStateVersion()
+				|| partition.activeGenerationId() != binding.generationId()) {
+			return ArchiveProcessingClaimStatus.OWNERSHIP_LOST;
+		}
+
+		GenerationTargetState generation = jdbcClient.sql("""
+				select
+				    generation_uuid,
+				    state,
+				    event_index_name,
+				    event_index_uuid,
+				    mention_index_name,
+				    mention_index_uuid
+				from index_generations
+				where id = :generationId
+				  and partition_key = :partitionKey
+				""")
+				.param(PARAM_GENERATION_ID, binding.generationId())
+				.param(PARAM_PARTITION_KEY, binding.partitionKey())
+				.query((resultSet, rowNumber) -> new GenerationTargetState(
+						resultSet.getObject("generation_uuid", UUID.class),
+						resultSet.getString("state"),
+						resultSet.getString("event_index_name"),
+						resultSet.getString("event_index_uuid"),
+						resultSet.getString("mention_index_name"),
+						resultSet.getString("mention_index_uuid")))
+				.optional()
+				.orElse(null);
+		if (generation == null
+				|| !"ACTIVE".equals(generation.state())
+				|| !binding.generationUuid().equals(generation.generationUuid())
+				|| !generation.matches(binding)) {
+			return ArchiveProcessingClaimStatus.OWNERSHIP_LOST;
+		}
+		return ArchiveProcessingClaimStatus.CLAIMED;
+	}
+
+	private boolean ownsCurrentTarget(ArchiveProcessingAttempt attempt) {
+		return lockProcessingRow(attempt.archiveIdempotencyKey())
+				&& validateAndLockTarget(
+						attempt.archiveIdempotencyKey(),
+						attempt.targetBinding()) == ArchiveProcessingClaimStatus.CLAIMED;
+	}
+
+	private boolean lockProcessingRow(String archiveIdempotencyKey) {
+		return jdbcClient.sql("""
+				select archive_idempotency_key
+				from ingestion_archive_processing
+				where archive_idempotency_key = :archiveIdempotencyKey
+				for update
+				""")
+				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
+				.query(String.class)
+				.optional()
+				.isPresent();
+	}
+
 	private static boolean isClaimable(ArchiveProcessingState state, Instant now) {
 		return switch (state.status()) {
 			case PENDING -> true;
@@ -481,5 +719,54 @@ class JdbcArchiveProcessingRepository {
 				.param(PARAM_SUCCEEDED, progress.succeededOperations())
 				.param(PARAM_FAILED, progress.failedOperations())
 				.param(PARAM_FIRST_FAILED_LINE, progress.firstFailedLine(), Types.BIGINT);
+	}
+
+	private static JdbcClient.StatementSpec bindTarget(
+			JdbcClient.StatementSpec statement,
+			ArchiveProcessingTargetBinding binding
+	) {
+		return statement
+				.param(PARAM_PARTITION_KEY, binding.partitionKey())
+				.param(PARAM_PARTITION_VERSION, binding.partitionStateVersion())
+				.param(PARAM_GENERATION_ID, binding.generationId())
+				.param(PARAM_GENERATION_UUID, binding.generationUuid())
+				.param(PARAM_INDEX_KIND, binding.indexKind().name())
+				.param(PARAM_INDEX_NAME, binding.indexName())
+				.param(PARAM_INDEX_UUID, binding.indexUuid());
+	}
+
+	private record PartitionTargetState(
+			long stateVersion,
+			Long activeGenerationId,
+			Instant startAt,
+			Instant endAt
+	) {
+	}
+
+	private record ArchiveTargetState(Instant sourceUpdateTime, ArchiveType archiveType) {
+		private boolean matches(ArchiveProcessingTargetBinding binding) {
+			return switch (binding.indexKind()) {
+				case EVENT -> archiveType == ArchiveType.TRANSLATION_EVENTS;
+				case MENTION -> archiveType == ArchiveType.TRANSLATION_MENTIONS;
+			};
+		}
+	}
+
+	private record GenerationTargetState(
+			UUID generationUuid,
+			String state,
+			String eventIndexName,
+			String eventIndexUuid,
+			String mentionIndexName,
+			String mentionIndexUuid
+	) {
+		private boolean matches(ArchiveProcessingTargetBinding binding) {
+			return switch (binding.indexKind()) {
+				case EVENT -> binding.indexName().equals(eventIndexName)
+						&& binding.indexUuid().equals(eventIndexUuid);
+				case MENTION -> binding.indexName().equals(mentionIndexName)
+						&& binding.indexUuid().equals(mentionIndexUuid);
+			};
+		}
 	}
 }

@@ -33,6 +33,16 @@ public interface IndexLifecycleLedger {
 	);
 
 	/**
+	 * Условно передает expired незавершенную operation новому owner без новой generation.
+	 *
+	 * @return operation с новым token/lease либо empty, если lease еще принадлежит owner
+	 */
+	Optional<IndexMaintenanceOperation> reclaimExpiredMaintenance(
+			String partitionKey,
+			Duration leaseDuration
+	);
+
+	/**
 	 * Условно сохраняет один или оба exact Elasticsearch UUID BUILDING generation.
 	 *
 	 * @return APPLIED либо OWNERSHIP_LOST для stale token/version
@@ -81,6 +91,9 @@ public interface IndexLifecycleLedger {
 
 	/** Возвращает current logical partition state. */
 	Optional<IndexPartition> findPartition(String partitionKey);
+
+	/** Одним coherent SQL read возвращает exact ACTIVE generation binding. */
+	Optional<ActiveIndexTargets> findActiveTargets(String partitionKey);
 
 	/** Возвращает generations logical partition в порядке generation number. */
 	List<IndexGeneration> findGenerations(String partitionKey);

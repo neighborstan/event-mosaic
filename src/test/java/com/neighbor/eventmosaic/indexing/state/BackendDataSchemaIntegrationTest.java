@@ -89,6 +89,10 @@ class BackendDataSchemaIntegrationTest {
 		// Then
 		assertThat(applicationTables()).containsExactlyElementsOf(TARGET_TABLES);
 		assertThat(processingColumns).contains(
+				"bound_generation_uuid",
+				"bound_index_kind",
+				"bound_index_name",
+				"bound_index_uuid",
 				"expected_document_count",
 				"receipt_digest_algorithm",
 				"expected_identity_digest",

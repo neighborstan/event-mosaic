@@ -3,16 +3,30 @@ package com.neighbor.eventmosaic.processing;
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.gdelt.api.GdeltEvent;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMention;
+import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
+import java.util.UUID;
 
 final class ProcessingTestFixtures {
 
 	static final Instant SOURCE_UPDATE_TIME = Instant.parse("2026-07-21T14:45:00Z");
 	static final String SOURCE_ARCHIVE_KEY = "20260721144500.translation.mentions.CSV.zip";
+	static final ActiveIndexTargets ACTIVE_TARGETS = new ActiveIndexTargets(
+			"p20260720",
+			3,
+			17,
+			UUID.fromString("11111111-1111-1111-1111-111111111111"),
+			new ExactIndexTarget(
+					"gdelt-events-v1-p20260720-g0001",
+					"event-index-uuid"),
+			new ExactIndexTarget(
+					"gdelt-mentions-v1-p20260720-g0001",
+					"mention-index-uuid"));
 
 	private ProcessingTestFixtures() {
 	}
@@ -23,6 +37,7 @@ final class ProcessingTestFixtures {
 				SOURCE_UPDATE_TIME,
 				SOURCE_ARCHIVE_KEY,
 				"1".repeat(64),
+				ACTIVE_TARGETS,
 				Path.of("mentions.csv"));
 	}
 
@@ -32,6 +47,7 @@ final class ProcessingTestFixtures {
 				SOURCE_UPDATE_TIME,
 				"20260721144500.translation.export.CSV.zip",
 				"2".repeat(64),
+				ACTIVE_TARGETS,
 				Path.of("events.csv"));
 	}
 

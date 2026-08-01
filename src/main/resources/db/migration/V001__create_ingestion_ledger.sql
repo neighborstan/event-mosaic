@@ -434,6 +434,8 @@ create table index_generations (
         unique (partition_key, generation_number),
     constraint uq_index_generations_id_partition
         unique (id, partition_key),
+    constraint uq_index_generations_id_partition_uuid
+        unique (id, partition_key, generation_uuid),
     constraint uq_index_generations_event_name
         unique (event_index_name),
     constraint uq_index_generations_mention_name
@@ -599,6 +601,10 @@ create table ingestion_archive_processing (
     lease_expires_at timestamptz,
     bound_partition_state_version bigint,
     bound_generation_id bigint,
+    bound_generation_uuid uuid,
+    bound_index_kind varchar(16),
+    bound_index_name varchar(255),
+    bound_index_uuid varchar(128),
     total_attempt_count integer not null default 0,
     automatic_retries_used integer not null default 0,
     consecutive_retryable_failures integer not null default 0,
@@ -635,8 +641,8 @@ create table ingestion_archive_processing (
         foreign key (logical_partition_key)
         references index_logical_partitions (partition_key),
     constraint fk_ingestion_archive_processing_bound_generation
-        foreign key (bound_generation_id, logical_partition_key)
-        references index_generations (id, partition_key),
+        foreign key (bound_generation_id, logical_partition_key, bound_generation_uuid)
+        references index_generations (id, partition_key, generation_uuid),
     constraint fk_ingestion_archive_processing_verified_generation
         foreign key (verified_generation_id, logical_partition_key)
         references index_generations (id, partition_key),
@@ -709,6 +715,10 @@ create table ingestion_archive_processing (
             (
                 bound_partition_state_version is null
                 and bound_generation_id is null
+                and bound_generation_uuid is null
+                and bound_index_kind is null
+                and bound_index_name is null
+                and bound_index_uuid is null
             )
             or
             (
@@ -717,6 +727,29 @@ create table ingestion_archive_processing (
                 bound_partition_state_version is not null
                 and bound_partition_state_version >= 0
                 and bound_generation_id is not null
+                and bound_generation_uuid is not null
+                and bound_index_kind in ('EVENT', 'MENTION')
+                and bound_index_name is not null
+                and btrim(bound_index_name) <> ''
+                and bound_index_name !~ '[*?,[:space:]]'
+                and (
+                    (
+                        bound_index_kind = 'EVENT'
+                        and bound_index_name ~ (
+                            '^gdelt-events-v1-' || logical_partition_key || '-g[0-9]+$'
+                        )
+                    )
+                    or
+                    (
+                        bound_index_kind = 'MENTION'
+                        and bound_index_name ~ (
+                            '^gdelt-mentions-v1-' || logical_partition_key || '-g[0-9]+$'
+                        )
+                    )
+                )
+                and bound_index_uuid is not null
+                and btrim(bound_index_uuid) <> ''
+                and bound_index_uuid !~ '[*?,[:space:]]'
             )
         ),
     constraint ck_ingestion_archive_processing_failure
@@ -756,6 +789,22 @@ create table ingestion_archive_processing (
                 logical_partition_key is not null
                 and expected_document_count is not null
                 and expected_document_count >= 0
+                and receipt_digest_algorithm is null
+                and expected_identity_digest is null
+                and verified_generation_id is not null
+                and verified_index_uuid is not null
+                and btrim(verified_index_uuid) <> ''
+                and verified_index_uuid !~ '[*?,[:space:]]'
+                and actual_document_count is not null
+                and actual_document_count >= 0
+                and actual_identity_digest is null
+                and receipt_verified_at is not null
+            )
+            or
+            (
+                logical_partition_key is not null
+                and expected_document_count is not null
+                and expected_document_count >= 0
                 and receipt_digest_algorithm is not null
                 and receipt_digest_algorithm = 'sha256-length-prefix-v1'
                 and expected_identity_digest is not null
@@ -783,6 +832,10 @@ create table ingestion_archive_processing (
                 and lease_expires_at is null
                 and bound_partition_state_version is null
                 and bound_generation_id is null
+                and bound_generation_uuid is null
+                and bound_index_kind is null
+                and bound_index_name is null
+                and bound_index_uuid is null
                 and failed_at is null
                 and completed_at is null
                 and last_error_code is null
@@ -806,19 +859,13 @@ create table ingestion_archive_processing (
                 and completed_at is null
                 and last_error_code is null
                 and expected_document_count is null
-                and (
-                    (
-                        logical_partition_key is null
-                        and bound_partition_state_version is null
-                        and bound_generation_id is null
-                    )
-                    or
-                    (
-                        logical_partition_key is not null
-                        and bound_partition_state_version is not null
-                        and bound_generation_id is not null
-                    )
-                )
+                and logical_partition_key is not null
+                and bound_partition_state_version is not null
+                and bound_generation_id is not null
+                and bound_generation_uuid is not null
+                and bound_index_kind is not null
+                and bound_index_name is not null
+                and bound_index_uuid is not null
             )
             or
             (
@@ -829,6 +876,10 @@ create table ingestion_archive_processing (
                 and lease_expires_at is null
                 and bound_partition_state_version is null
                 and bound_generation_id is null
+                and bound_generation_uuid is null
+                and bound_index_kind is null
+                and bound_index_name is null
+                and bound_index_uuid is null
                 and failed_at is not null
                 and completed_at is null
                 and last_error_code is not null
@@ -849,18 +900,24 @@ create table ingestion_archive_processing (
                 and first_failed_line is null
                 and submitted_operations = succeeded_operations
                 and submitted_operations = delivered_records - mapping_rejected_records
+                and logical_partition_key is not null
+                and bound_partition_state_version is not null
+                and bound_generation_id is not null
+                and bound_generation_uuid is not null
+                and bound_index_kind is not null
+                and bound_index_name is not null
+                and bound_index_uuid is not null
+                and expected_document_count is not null
+                and expected_document_count = succeeded_operations
+                and actual_document_count = expected_document_count
+                and verified_generation_id = bound_generation_id
+                and verified_index_uuid = bound_index_uuid
                 and (
                     (
-                        logical_partition_key is null
-                        and expected_document_count is null
+                        expected_identity_digest is null
+                        and actual_identity_digest is null
                     )
-                    or
-                    (
-                        logical_partition_key is not null
-                        and expected_document_count is not null
-                        and actual_document_count = expected_document_count
-                        and actual_identity_digest = expected_identity_digest
-                    )
+                    or actual_identity_digest = expected_identity_digest
                 )
             )
         )

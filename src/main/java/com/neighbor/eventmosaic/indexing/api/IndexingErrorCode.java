@@ -34,7 +34,28 @@ public enum IndexingErrorCode implements ApplicationErrorCode {
 	 */
 	INDEXING_RESPONSE_INVALID(
 			"INDEXING_RESPONSE_INVALID",
-			"Elasticsearch вернул некорректный ответ");
+			"Elasticsearch вернул некорректный ответ"),
+
+	/**
+	 * Exact physical target больше не существует.
+	 */
+	INDEX_TARGET_MISSING(
+			"INDEX_TARGET_MISSING",
+			"Exact Elasticsearch target отсутствует"),
+
+	/**
+	 * Exact physical имя теперь принадлежит другому index UUID.
+	 */
+	INDEX_TARGET_REPLACED(
+			"INDEX_TARGET_REPLACED",
+			"Exact Elasticsearch target был заменен"),
+
+	/**
+	 * Exact physical target закрыт для записи maintenance block.
+	 */
+	INDEX_TARGET_WRITE_BLOCKED(
+			"INDEX_TARGET_WRITE_BLOCKED",
+			"Exact Elasticsearch target временно закрыт для записи");
 
 	/** Стабильное значение для durable diagnostics. */
 	private final String code;

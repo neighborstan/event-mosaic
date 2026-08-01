@@ -7,10 +7,13 @@ import co.elastic.clients.elasticsearch.core.bulk.BulkResponseItem;
 import co.elastic.clients.elasticsearch.core.bulk.OperationType;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexCommand;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexOutcome;
+import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -19,6 +22,9 @@ import org.junit.jupiter.api.Test;
 
 @DisplayName("Полный анализ Elasticsearch bulk response")
 class BulkResponseAnalyzerTest {
+	private static final ExactIndexTarget TARGET = new ExactIndexTarget(
+			"gdelt-events-v1-p20260727-g0001",
+			"event-index-uuid");
 
 	@Test
 	@DisplayName("Постоянный отказ делает весь partial outcome неповторяемым")
@@ -77,17 +83,67 @@ class BulkResponseAnalyzerTest {
 				});
 	}
 
+	@Test
+	@DisplayName("Item другого physical target отклоняется как нарушение response contract")
+	void rejectsItemFromAnotherTarget() {
+		BulkIndexCommand<IndexedEventDocument> command = command(40);
+		BulkResponseItem responseItem = BulkResponseItem.of(builder -> builder
+				.operationType(OperationType.Index)
+				.index("gdelt-events-v1-p20260727-g0002")
+				.id("40")
+				.status(201));
+
+		assertThatExceptionOfType(IndexingProtocolException.class)
+				.isThrownBy(() -> BulkResponseAnalyzer.analyze(
+						command,
+						List.of(responseItem)))
+				.satisfies(exception -> assertThat(exception.errorCode())
+						.isEqualTo(IndexingErrorCode.INDEXING_RESPONSE_INVALID));
+	}
+
+	@Test
+	@DisplayName("Missing target bulk item становится typed ownership outcome")
+	void classifiesMissingTargetItem() {
+		BulkIndexCommand<IndexedEventDocument> command = command(50);
+		BulkResponseItem responseItem = targetFailureItem(
+				404,
+				"index_not_found_exception");
+
+		assertThatExceptionOfType(IndexTargetUnavailableException.class)
+				.isThrownBy(() -> BulkResponseAnalyzer.analyze(
+						command,
+						List.of(responseItem)))
+				.satisfies(exception -> assertThat(exception.reason())
+						.isEqualTo(IndexTargetUnavailableReason.MISSING));
+	}
+
+	@Test
+	@DisplayName("Write block bulk item становится typed maintenance outcome")
+	void classifiesWriteBlockedTargetItem() {
+		BulkIndexCommand<IndexedEventDocument> command = command(60);
+		BulkResponseItem responseItem = targetFailureItem(
+				403,
+				"cluster_block_exception");
+
+		assertThatExceptionOfType(IndexTargetUnavailableException.class)
+				.isThrownBy(() -> BulkResponseAnalyzer.analyze(
+						command,
+						List.of(responseItem)))
+				.satisfies(exception -> assertThat(exception.reason())
+						.isEqualTo(IndexTargetUnavailableReason.WRITE_BLOCKED));
+	}
+
 	private static BulkIndexCommand<IndexedEventDocument> command(long... lines) {
 		List<IndexedEventDocument> documents = java.util.Arrays.stream(lines)
 				.mapToObj(line -> event(line, line))
 				.toList();
-		return new BulkIndexCommand<>(GdeltIndexKind.EVENT, documents);
+		return new BulkIndexCommand<>(GdeltIndexKind.EVENT, TARGET, documents);
 	}
 
 	private static BulkResponseItem item(int status, boolean failed) {
 		return BulkResponseItem.of(builder -> {
 			builder.operationType(OperationType.Index)
-					.index(GdeltIndexKind.EVENT.indexName())
+					.index(TARGET.indexName())
 					.id("id-" + status)
 					.status(status);
 			if (failed) {
@@ -97,6 +153,17 @@ class BulkResponseAnalyzerTest {
 			}
 			return builder;
 		});
+	}
+
+	private static BulkResponseItem targetFailureItem(int status, String errorType) {
+		return BulkResponseItem.of(builder -> builder
+				.operationType(OperationType.Index)
+				.index(TARGET.indexName())
+				.id("failed-id")
+				.status(status)
+				.error(error -> error
+						.type(errorType)
+						.reason("remote reason must not escape")));
 	}
 
 	private static IndexedEventDocument event(long globalEventId, long line) {

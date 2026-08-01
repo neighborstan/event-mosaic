@@ -8,6 +8,8 @@ import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProperties;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import com.neighbor.eventmosaic.shared.error.NonRetryableException;
 import com.neighbor.eventmosaic.shared.error.RetryableException;
 import java.io.IOException;
@@ -64,6 +66,26 @@ class IndexingApiContractsTest {
 		assertThat(interruption.interruptsProcessing()).isTrue();
 		assertThat(interruption.errorCode())
 				.isEqualTo(IndexingErrorCode.INDEXING_INTERRUPTED);
+	}
+
+	@Test
+	@DisplayName("Target outcome различает bounded ownership и maintenance причины")
+	void exposesBoundedTargetUnavailableReason() {
+		IndexTargetUnavailableException missing = new IndexTargetUnavailableException(
+				IndexTargetUnavailableReason.MISSING,
+				new IOException("gdelt-events-v1-p20260727-g0001 secret reason"));
+		IndexTargetUnavailableException blocked = new IndexTargetUnavailableException(
+				IndexTargetUnavailableReason.WRITE_BLOCKED);
+
+		assertThat(missing).isInstanceOf(NonRetryableException.class);
+		assertThat(missing.reason()).isEqualTo(IndexTargetUnavailableReason.MISSING);
+		assertThat(missing.errorCode()).isEqualTo(IndexingErrorCode.INDEX_TARGET_MISSING);
+		assertThat(missing.retryable()).isFalse();
+		assertThat(missing.getMessage()).doesNotContain("gdelt-events", "secret");
+		assertThat(blocked.reason())
+				.isEqualTo(IndexTargetUnavailableReason.WRITE_BLOCKED);
+		assertThat(blocked.errorCode())
+				.isEqualTo(IndexingErrorCode.INDEX_TARGET_WRITE_BLOCKED);
 	}
 
 }
