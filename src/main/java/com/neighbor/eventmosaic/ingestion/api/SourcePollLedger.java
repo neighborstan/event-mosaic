@@ -43,10 +43,28 @@ public interface SourcePollLedger {
 	 * @param failure безопасная failure projection
 	 * @return результат conditional transition
 	 */
-	AttemptTransitionResult markFailed(
+	default AttemptTransitionResult markFailed(
 			String sourceName,
 			UUID attemptToken,
 			IngestionFailure failure
+	) {
+		return markFailed(sourceName, attemptToken, failure, Duration.ZERO);
+	}
+
+	/**
+	 * Сохраняет failure и учитывает корректный HTTP Retry-After hint.
+	 *
+	 * @param sourceName стабильное имя source
+	 * @param attemptToken token текущего owner
+	 * @param failure безопасная failure projection
+	 * @param retryAfter серверная нижняя граница задержки либо zero
+	 * @return результат conditional transition
+	 */
+	AttemptTransitionResult markFailed(
+			String sourceName,
+			UUID attemptToken,
+			IngestionFailure failure,
+			Duration retryAfter
 	);
 
 	/**

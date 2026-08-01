@@ -33,6 +33,7 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionRunState;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
@@ -40,6 +41,7 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
 import com.neighbor.eventmosaic.shared.error.SafeExceptionProjection;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -111,12 +113,55 @@ public class GdeltPipelineService {
 	 * @return неизмененное acquisition state текущего update
 	 */
 	public IngestionRunState runLatestUpdate() {
+		OperationBudget budget = OperationBudget.start(
+				backendDataProperties.operationDeadline());
 		IngestionRunState runState = ingestionRunService.runLatestUpdate();
+		processRunState(runState, budget);
+		return runState;
+	}
+
+	/**
+	 * Выполняет ровно один bounded latest-first cycle без sleep и scheduling.
+	 *
+	 * @return typed terminal outcome one-shot cycle
+	 */
+	public IngestionOneShotOutcome runOneShot() {
+		return runOneShot(OperationBudget.start(
+				backendDataProperties.operationDeadline()));
+	}
+
+	IngestionOneShotOutcome runOneShot(OperationBudget budget) {
+		try {
+			AcquisitionCycleResult acquisition = ingestionRunService.runOneShot(budget);
+			if (acquisition.runState().isPresent()
+					&& processRunState(acquisition.runState().orElseThrow(), budget)) {
+				return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
+			}
+			return acquisition.sourcePollDeferred()
+					? IngestionOneShotOutcome.RETRY_DEFERRED
+					: IngestionOneShotOutcome.COMPLETED;
+		}
+		catch (OperationDeadlineExceededException _) {
+			return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
+		}
+	}
+
+	private boolean processRunState(
+			IngestionRunState runState,
+			OperationBudget budget
+	) {
 		RuntimeException deferredFailure = null;
 		for (IngestionArchiveState archiveState : runState.archives()) {
 			if (isStaged(archiveState)) {
+				if (!budget.hasRemaining()) {
+					return true;
+				}
 				try {
-					processStagedArchive(archiveState);
+					if (processStagedArchive(archiveState, budget)) {
+						return true;
+					}
+				} catch (OperationDeadlineExceededException _) {
+					return true;
 				} catch (IngestionInterruptedException exception) {
 					throw exception;
 				} catch (IndexingInterruptedException exception) {
@@ -145,10 +190,14 @@ public class GdeltPipelineService {
 		if (deferredFailure != null) {
 			throw deferredFailure;
 		}
-		return runState;
+		return false;
 	}
 
-	private void processStagedArchive(IngestionArchiveState archiveState) {
+	private boolean processStagedArchive(
+			IngestionArchiveState archiveState,
+			OperationBudget budget
+	) {
+		requireRemaining(budget);
 		GdeltArchiveKind kind = toGdeltKind(archiveState.archive().archiveType());
 		GdeltIndexKind indexKind = toIndexKind(kind);
 		IndexTargetResolution targetResolution = indexTargetResolver.resolve(
@@ -159,7 +208,7 @@ public class GdeltPipelineService {
 					kind,
 					resolutionOutcome(targetResolution),
 					null);
-			return;
+			return false;
 		}
 		ActiveIndexTargets indexTargets = targetResolution.targets();
 		ArchiveProcessingTargetBinding targetBinding = toTargetBinding(
@@ -175,6 +224,7 @@ public class GdeltPipelineService {
 				archiveState.stagedArchive().actualMd5(),
 				PROJECTION_REVISION,
 				processingFingerprint);
+		requireRemaining(budget);
 		ArchiveProcessingState processingState =
 				processingLedger.register(archiveKey, fingerprint);
 		if (processingState.status() == ArchiveProcessingStatus.INDEXED) {
@@ -183,43 +233,48 @@ public class GdeltPipelineService {
 							archiveState,
 							kind,
 							indexTargets,
-							processingState);
+							processingState,
+							budget);
 			if (receiptDecision != ReceiptDecision.REINDEX) {
 				logOutcome(
 						archiveState,
 						kind,
 						receiptDecision.outcome(),
 						receiptDecision.errorCode());
-				return;
+				return false;
 			}
 		}
 
+		requireRemaining(budget);
 		ArchiveProcessingClaimResult claimResult = processingLedger.claim(
 				archiveKey,
 				targetBinding,
 				properties.continuity().recoveryLease());
 		if (claimResult.status() != ArchiveProcessingClaimStatus.CLAIMED) {
 			logOutcome(archiveState, kind, claimOutcome(claimResult.status()), null);
-			return;
+			return false;
 		}
 		ArchiveProcessingAttempt attempt = claimResult.attempt();
 		if (!attempt.targetBinding().equals(targetBinding)) {
 			throw new IllegalStateException("Processing claim returned another target binding");
 		}
-		processClaimedArchive(
+		return processClaimedArchive(
 				archiveState,
 				kind,
 				processingFingerprint,
 				indexTargets,
-				attempt);
+				attempt,
+				budget);
 	}
 
 	private ReceiptDecision reconcileIndexedReceipt(
 			IngestionArchiveState archiveState,
 			GdeltArchiveKind kind,
 			ActiveIndexTargets indexTargets,
-			ArchiveProcessingState processingState
+			ArchiveProcessingState processingState,
+			OperationBudget budget
 	) {
+		requireRemaining(budget);
 		var persistedReceipt = processingState.receipt();
 		var query = new ArchiveReceiptQuery(
 				toIndexKind(kind),
@@ -267,12 +322,13 @@ public class GdeltPipelineService {
 		return surplus ? ReceiptDecision.SURPLUS : ReceiptDecision.REINDEX;
 	}
 
-	private void processClaimedArchive(
+	private boolean processClaimedArchive(
 			IngestionArchiveState archiveState,
 			GdeltArchiveKind kind,
 			String processingFingerprint,
 			ActiveIndexTargets indexTargets,
-			ArchiveProcessingAttempt attempt
+			ArchiveProcessingAttempt attempt,
+			OperationBudget budget
 	) {
 		AtomicReference<ArchiveProcessingProgress> latestProgress =
 				new AtomicReference<>(ArchiveProcessingProgress.empty());
@@ -284,7 +340,8 @@ public class GdeltPipelineService {
 				processingFingerprint,
 				indexTargets,
 				archiveState.stagedArchive().csvPath(),
-				backendDataProperties.receiptPageSize());
+				backendDataProperties.receiptPageSize(),
+				budget);
 		ArchiveProcessingResult result;
 		try {
 			result = archiveProcessor.process(
@@ -319,6 +376,9 @@ public class GdeltPipelineService {
 					attempt,
 					diagnosticFailure.get());
 		}
+		return result.outcome() == com.neighbor.eventmosaic.processing.api.ArchiveProcessingOutcome.FAILED
+				&& result.failure().code()
+				== ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED;
 	}
 
 	private void completeAttempt(
@@ -592,6 +652,12 @@ public class GdeltPipelineService {
 	private static boolean isStaged(IngestionArchiveState archiveState) {
 		return archiveState.status() == IngestionArchiveStatus.STAGED
 				&& archiveState.stagedArchive() != null;
+	}
+
+	private static void requireRemaining(OperationBudget budget) {
+		if (!budget.hasRemaining()) {
+			throw new OperationDeadlineExceededException();
+		}
 	}
 
 	private static boolean isInterruption(ArchiveProcessingErrorCode code) {

@@ -10,11 +10,14 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionErrorContext;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruption;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteResponseRejectedException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.ingestion.error.StagingStorageException;
 import com.neighbor.eventmosaic.ingestion.error.TransferredArtifactIntegrityException;
 import com.neighbor.eventmosaic.ingestion.source.ArchiveDownloadUriResolver;
+import com.neighbor.eventmosaic.ingestion.source.HttpRetryAfterParser;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -29,6 +32,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.time.Clock;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +54,7 @@ public class HttpArchiveDownloader {
 	private final long maxArchiveBytes;
 	private final IngestionMetrics metrics;
 	private final ArchiveDownloadUriResolver downloadUriResolver;
+	private final HttpRetryAfterParser retryAfterParser;
 
 	/**
 	 * Создает production downloader с общим HTTP transport и runtime limits.
@@ -58,8 +63,27 @@ public class HttpArchiveDownloader {
 	 * @param properties timeout и ограничения размера archive
 	 * @param metrics publisher cleanup diagnostics
 	 * @param downloadUriResolver доверенная политика разрешения URI объекта
+	 * @param retryAfterParser parser разрешенной серверной retry-подсказки
 	 */
 	@Autowired
+	public HttpArchiveDownloader(
+			HttpClient httpClient,
+			GdeltIngestionProperties properties,
+			IngestionMetrics metrics,
+			ArchiveDownloadUriResolver downloadUriResolver,
+			HttpRetryAfterParser retryAfterParser
+	) {
+		this(
+				httpClient,
+				properties.http().requestTimeout(),
+				properties.http().maxArchiveBytes(),
+				metrics,
+				downloadUriResolver,
+				retryAfterParser
+		);
+	}
+
+	/** Создает adapter с system UTC parser для прямого wiring вне Spring. */
 	public HttpArchiveDownloader(
 			HttpClient httpClient,
 			GdeltIngestionProperties properties,
@@ -68,11 +92,10 @@ public class HttpArchiveDownloader {
 	) {
 		this(
 				httpClient,
-				properties.http().requestTimeout(),
-				properties.http().maxArchiveBytes(),
+				properties,
 				metrics,
-				downloadUriResolver
-		);
+				downloadUriResolver,
+				new HttpRetryAfterParser(Clock.systemUTC()));
 	}
 
 	HttpArchiveDownloader(
@@ -81,6 +104,23 @@ public class HttpArchiveDownloader {
 			long maxArchiveBytes,
 			IngestionMetrics metrics,
 			ArchiveDownloadUriResolver downloadUriResolver
+	) {
+		this(
+				httpClient,
+				requestTimeout,
+				maxArchiveBytes,
+				metrics,
+				downloadUriResolver,
+				new HttpRetryAfterParser(Clock.systemUTC()));
+	}
+
+	HttpArchiveDownloader(
+			HttpClient httpClient,
+			Duration requestTimeout,
+			long maxArchiveBytes,
+			IngestionMetrics metrics,
+			ArchiveDownloadUriResolver downloadUriResolver,
+			HttpRetryAfterParser retryAfterParser
 	) {
 		if (maxArchiveBytes <= 0) {
 			throw new IllegalArgumentException("maxArchiveBytes must be positive");
@@ -95,6 +135,9 @@ public class HttpArchiveDownloader {
 		this.downloadUriResolver = Objects.requireNonNull(
 				downloadUriResolver,
 				"downloadUriResolver must not be null");
+		this.retryAfterParser = Objects.requireNonNull(
+				retryAfterParser,
+				"retryAfterParser must not be null");
 	}
 
 	/**
@@ -105,7 +148,17 @@ public class HttpArchiveDownloader {
 	 * @return проверенный опубликованный ZIP
 	 */
 	public DownloadedArchive download(ArchiveAttempt attempt, StagingPaths paths) {
+		return download(attempt, paths, OperationBudget.start(Duration.ofDays(1)));
+	}
+
+	/** Скачивает archive в пределах общего monotonic cycle budget. */
+	public DownloadedArchive download(
+			ArchiveAttempt attempt,
+			StagingPaths paths,
+			OperationBudget budget
+	) {
 		IngestionInterruption.throwIfRequested();
+		throwIfExpired(budget);
 		if (attempt.archive().expectedSizeBytes() > maxArchiveBytes) {
 			throw new RemoteResponseRejectedException(
 					IngestionErrorCode.DOWNLOAD_SIZE_LIMIT_EXCEEDED);
@@ -113,19 +166,26 @@ public class HttpArchiveDownloader {
 		try {
 			StagingPathGuard.prepareDirectory(
 					paths.root(),
-					paths.archivePath().getParent());
+					paths.archivePath().getParent(),
+					budget);
 			Files.deleteIfExists(paths.archivePartPath());
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
 			throw new StagingStorageException(IngestionErrorCode.FILESYSTEM_IO_FAILURE, exception);
 		}
 		if (Files.exists(paths.archivePath(), LinkOption.NOFOLLOW_LINKS)) {
-			return verifyExisting(attempt, paths.archivePath());
+			return verifyExisting(attempt, paths.archivePath(), budget);
 		}
 
 		try {
-			long deadlineNanos = GdeltHttpBodyDeadline.deadlineAfter(requestTimeout);
-			HttpResponse<InputStream> response = send(attempt);
+			Duration effectiveTimeout = requireRemaining(budget);
+			boolean cycleLimited = effectiveTimeout.compareTo(requestTimeout) < 0;
+			long deadlineNanos = GdeltHttpBodyDeadline.deadlineAfter(effectiveTimeout);
+			HttpResponse<InputStream> response = send(
+					attempt,
+					effectiveTimeout,
+					budget,
+					cycleLimited);
 			DownloadedArchive downloaded;
 			try (InputStream input = response.body();
 					GdeltHttpBodyDeadline deadline = GdeltHttpBodyDeadline.start(input, deadlineNanos)) {
@@ -134,21 +194,30 @@ public class HttpArchiveDownloader {
 					if (GdeltHttpStatusPolicy.isTransient(status)) {
 						throw new RemoteSourceAccessException(
 								IngestionErrorCode.DOWNLOAD_HTTP_ERROR,
-								IngestionErrorContext.forHttpStatus(status));
+								IngestionErrorContext.forHttpStatus(status),
+								retryAfterParser.parse(response.headers()));
 					}
 					throw new RemoteResponseRejectedException(
 							IngestionErrorCode.DOWNLOAD_HTTP_STATUS_REJECTED,
 							IngestionErrorContext.forHttpStatus(status));
 				}
 				validateContentLength(response, attempt);
-				downloaded = writeAndVerify(input, attempt, paths.archivePartPath(), deadline);
+				downloaded = writeAndVerify(
+						input,
+						attempt,
+						paths.archivePartPath(),
+						deadline,
+						budget,
+						cycleLimited);
 				if (deadline.expired()) {
+					throwIfCycleLimited(cycleLimited);
+					throwIfExpired(budget);
 					throw new RemoteSourceAccessException(IngestionErrorCode.DOWNLOAD_TIMEOUT);
 				}
 			}
 			IngestionInterruption.throwIfRequested();
 			if (!publishAtomically(paths.archivePartPath(), paths.archivePath())) {
-				return verifyExisting(attempt, paths.archivePath());
+				return verifyExisting(attempt, paths.archivePath(), budget);
 			}
 			return new DownloadedArchive(
 					paths.archivePath(),
@@ -164,10 +233,15 @@ public class HttpArchiveDownloader {
 		}
 	}
 
-	private HttpResponse<InputStream> send(ArchiveAttempt attempt) {
+	private HttpResponse<InputStream> send(
+			ArchiveAttempt attempt,
+			Duration effectiveTimeout,
+			OperationBudget budget,
+			boolean cycleLimited
+	) {
 		HttpRequest request = HttpRequest.newBuilder(downloadUriResolver.resolve(
 				GdeltArchiveName.requireSupported(attempt.archive().archiveName())))
-				.timeout(requestTimeout)
+				.timeout(effectiveTimeout)
 				.GET()
 				.build();
 		try {
@@ -176,15 +250,23 @@ public class HttpArchiveDownloader {
 			Thread.currentThread().interrupt();
 			throw new IngestionInterruptedException(exception);
 		} catch (HttpTimeoutException exception) {
+			throwIfCycleLimited(cycleLimited);
+			throwIfExpired(budget);
 			throw new RemoteSourceAccessException(IngestionErrorCode.DOWNLOAD_TIMEOUT, exception);
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
+			throwIfExpired(budget);
 			throw new RemoteSourceAccessException(IngestionErrorCode.DOWNLOAD_HTTP_ERROR, exception);
 		}
 	}
 
-	private DownloadedArchive verifyExisting(ArchiveAttempt attempt, Path archivePath) {
+	private DownloadedArchive verifyExisting(
+			ArchiveAttempt attempt,
+			Path archivePath,
+			OperationBudget budget
+	) {
 		try {
+			throwIfExpired(budget);
 			if (!Files.isRegularFile(archivePath, LinkOption.NOFOLLOW_LINKS)) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
@@ -192,7 +274,7 @@ public class HttpArchiveDownloader {
 			if (size != attempt.archive().expectedSizeBytes() || size > maxArchiveBytes) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
-			String md5 = Md5Checksum.calculate(archivePath);
+			String md5 = Md5Checksum.calculate(archivePath, budget);
 			if (!md5.equalsIgnoreCase(attempt.archive().expectedMd5())) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
@@ -219,7 +301,9 @@ public class HttpArchiveDownloader {
 			InputStream input,
 			ArchiveAttempt attempt,
 			Path partPath,
-			GdeltHttpBodyDeadline deadline
+			GdeltHttpBodyDeadline deadline,
+			OperationBudget budget,
+			boolean cycleLimited
 	) {
 		MessageDigest digest = Md5Checksum.newDigest();
 		long total = 0;
@@ -227,7 +311,9 @@ public class HttpArchiveDownloader {
 		try (OutputStream output = Files.newOutputStream(partPath, StandardOpenOption.CREATE_NEW)) {
 			while (true) {
 				IngestionInterruption.throwIfRequested();
-				int read = readChunk(input, buffer, deadline);
+				throwIfExpired(budget);
+				int read = readChunk(input, buffer, deadline, budget, cycleLimited);
+				throwIfExpired(budget);
 				if (read == -1) {
 					break;
 				}
@@ -256,13 +342,17 @@ public class HttpArchiveDownloader {
 	private static int readChunk(
 			InputStream input,
 			byte[] buffer,
-			GdeltHttpBodyDeadline deadline
+			GdeltHttpBodyDeadline deadline,
+			OperationBudget budget,
+			boolean cycleLimited
 	) {
 		try {
 			return input.read(buffer);
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
+			throwIfExpired(budget);
 			if (deadline.expired()) {
+				throwIfCycleLimited(cycleLimited);
 				throw new RemoteSourceAccessException(
 						IngestionErrorCode.DOWNLOAD_TIMEOUT,
 						exception);
@@ -301,5 +391,25 @@ public class HttpArchiveDownloader {
 
 	private void deleteTemporary(Path path) {
 		TemporaryArtifactCleaner.delete(path, metrics, LOGGER);
+	}
+
+	private Duration requireRemaining(OperationBudget budget) {
+		Duration timeout = budget.cap(requestTimeout);
+		if (timeout.isZero()) {
+			throw new OperationDeadlineExceededException();
+		}
+		return timeout;
+	}
+
+	private static void throwIfExpired(OperationBudget budget) {
+		if (!budget.hasRemaining()) {
+			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void throwIfCycleLimited(boolean cycleLimited) {
+		if (cycleLimited) {
+			throw new OperationDeadlineExceededException();
+		}
 	}
 }

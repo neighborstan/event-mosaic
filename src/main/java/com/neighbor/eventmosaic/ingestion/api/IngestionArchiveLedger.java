@@ -53,10 +53,20 @@ public interface IngestionArchiveLedger {
 	 * @param failure безопасная проекция ошибки
 	 * @return результат conditional transition
 	 */
-	AttemptTransitionResult markFailed(
+	default AttemptTransitionResult markFailed(
 			String idempotencyKey,
 			UUID attemptToken,
 			IngestionFailure failure
+	) {
+		return markFailed(idempotencyKey, attemptToken, failure, Duration.ZERO);
+	}
+
+	/** Сохраняет failure с bounded HTTP Retry-After hint. */
+	AttemptTransitionResult markFailed(
+			String idempotencyKey,
+			UUID attemptToken,
+			IngestionFailure failure,
+			Duration retryAfter
 	);
 
 	/**
@@ -74,6 +84,13 @@ public interface IngestionArchiveLedger {
 	 * @return состояние run либо empty
 	 */
 	Optional<IngestionRunState> findRunByUpdateTime(Instant sourceUpdateTime);
+
+	/**
+	 * Возвращает newest known update для downstream прохода без нового source poll.
+	 *
+	 * @return последний зарегистрированный run либо empty
+	 */
+	Optional<IngestionRunState> findLatestRun();
 
 	/**
 	 * Возвращает последний успешно staged update указанного типа.

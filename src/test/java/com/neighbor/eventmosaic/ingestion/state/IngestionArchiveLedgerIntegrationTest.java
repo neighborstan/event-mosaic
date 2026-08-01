@@ -304,6 +304,16 @@ class IngestionArchiveLedgerIntegrationTest {
 		assertThat(archiveLedger.findCompletionProgress(ArchiveType.TRANSLATION_EVENTS)).contains(updateTime);
 		assertThat(archiveLedger.findCompletionProgress(ArchiveType.TRANSLATION_MENTIONS)).isEmpty();
 
+		assertThat(archiveLedger.claimArchive(mentions.idempotencyKey(), Duration.ofMinutes(15)))
+				.isEmpty();
+		jdbcClient.sql("""
+				update ingestion_archives
+				set retry_not_before = :retryNotBefore
+				where idempotency_key = :idempotencyKey
+				""")
+				.param("retryNotBefore", java.sql.Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("idempotencyKey", mentions.idempotencyKey())
+				.update();
 		var retry = archiveLedger.claimArchive(mentions.idempotencyKey(), Duration.ofMinutes(15)).orElseThrow();
 		assertThat(archiveLedger.markStaged(mentions.idempotencyKey(), retry.token(), staged(mentions)))
 				.isEqualTo(AttemptTransitionResult.APPLIED);

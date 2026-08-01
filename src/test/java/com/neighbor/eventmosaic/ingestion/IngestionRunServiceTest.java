@@ -8,6 +8,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 
 import com.neighbor.eventmosaic.ingestion.api.ArchiveAttempt;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
@@ -22,9 +23,12 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionEventCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
+import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
+import com.neighbor.eventmosaic.ingestion.api.SourcePollAttempt;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.ingestion.error.TransferredArtifactIntegrityException;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestClient;
@@ -34,6 +38,8 @@ import com.neighbor.eventmosaic.ingestion.staging.HttpArchiveDownloader;
 import com.neighbor.eventmosaic.ingestion.staging.StagingLayout;
 import com.neighbor.eventmosaic.ingestion.staging.StagingPaths;
 import com.neighbor.eventmosaic.ingestion.staging.ZipArchiveStager;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -41,6 +47,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -51,6 +58,7 @@ class IngestionRunServiceTest {
 	private GdeltManifestClient manifestClient;
 	private GdeltManifestParser manifestParser;
 	private IngestionArchiveLedger ledger;
+	private SourcePollLedger sourcePollLedger;
 	private StagingLayout layout;
 	private HttpArchiveDownloader downloader;
 	private ZipArchiveStager stager;
@@ -62,6 +70,7 @@ class IngestionRunServiceTest {
 		manifestClient = mock(GdeltManifestClient.class);
 		manifestParser = mock(GdeltManifestParser.class);
 		ledger = mock(IngestionArchiveLedger.class);
+		sourcePollLedger = mock(SourcePollLedger.class);
 		layout = mock(StagingLayout.class);
 		downloader = mock(HttpArchiveDownloader.class);
 		stager = mock(ZipArchiveStager.class);
@@ -70,6 +79,7 @@ class IngestionRunServiceTest {
 				manifestClient,
 				manifestParser,
 				ledger,
+				sourcePollLedger,
 				layout,
 				downloader,
 				stager,
@@ -91,6 +101,63 @@ class IngestionRunServiceTest {
 		verify(metrics).runStarted();
 		verify(metrics).error(IngestionErrorCode.MANIFEST_HTTP_ERROR);
 		verifyNoInteractions(manifestParser, ledger, downloader, stager);
+	}
+
+	@Test
+	@DisplayName("Ранний one-shot возвращает deferred без ожидания и source I/O")
+	void earlyOneShotReturnsDeferredWithoutSourceIo() {
+		when(sourcePollLedger.claim(
+				GdeltSourceContract.SOURCE_NAME,
+				properties().continuity().recoveryLease()))
+				.thenReturn(Optional.empty());
+		when(ledger.findLatestRun()).thenReturn(Optional.empty());
+
+		AcquisitionCycleResult result = service.runOneShot(
+				OperationBudget.start(Duration.ofMinutes(1)));
+
+		assertThat(result.sourcePollDeferred()).isTrue();
+		assertThat(result.runState()).isEmpty();
+		verifyNoInteractions(manifestClient, manifestParser, downloader, stager);
+	}
+
+	@Test
+	@DisplayName("Source poll failure передает Retry-After в durable retry schedule")
+	void sourcePollFailurePersistsRetryAfter() {
+		UUID token = UUID.randomUUID();
+		SourcePollAttempt attempt = new SourcePollAttempt(
+				GdeltSourceContract.SOURCE_NAME,
+				token,
+				Instant.now().plusSeconds(60),
+				1,
+				false);
+		when(sourcePollLedger.claim(any(), any())).thenReturn(Optional.of(attempt));
+		RemoteSourceAccessException failure = new RemoteSourceAccessException(
+				IngestionErrorCode.MANIFEST_HTTP_ERROR,
+				com.neighbor.eventmosaic.ingestion.api.IngestionErrorContext.forHttpStatus(429),
+				Duration.ofMinutes(5));
+		when(manifestClient.fetchLatestManifest(any(OperationBudget.class)))
+				.thenThrow(failure);
+
+		assertThatThrownBy(() -> service.runOneShot(
+				OperationBudget.start(Duration.ofMinutes(1))))
+				.isSameAs(failure);
+		verify(sourcePollLedger).markFailed(
+				GdeltSourceContract.SOURCE_NAME,
+				token,
+				failure.failure(),
+				Duration.ofMinutes(5));
+	}
+
+	@Test
+	@DisplayName("Исчерпанная one-shot deadline не создает source poll state или token")
+	void expiredOneShotDeadlinePreventsPollIo() {
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(1), nanoTime::get);
+		nanoTime.set(Duration.ofSeconds(1).toNanos());
+
+		assertThatThrownBy(() -> service.runOneShot(budget))
+				.isInstanceOf(OperationDeadlineExceededException.class);
+		verifyNoInteractions(sourcePollLedger, manifestClient, manifestParser, ledger, downloader, stager);
 	}
 
 	@Test

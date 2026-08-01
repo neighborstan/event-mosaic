@@ -9,9 +9,17 @@ import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionFailure;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
+import com.neighbor.eventmosaic.ingestion.api.SourcePollAttempt;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollStatus;
+import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
+import java.time.Clock;
 import java.sql.Timestamp;
 import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -33,6 +41,15 @@ class SourcePollLedgerIntegrationTest {
 
 	@Autowired
 	private JdbcClient jdbcClient;
+
+	@Autowired
+	private JdbcSourcePollRepository sourcePollRepository;
+
+	@Autowired
+	private BackendDataProperties backendDataProperties;
+
+	@Autowired
+	private Clock clock;
 
 	@BeforeEach
 	void cleanLedger() {
@@ -57,9 +74,19 @@ class SourcePollLedgerIntegrationTest {
 					assertThat(state.status()).isEqualTo(SourcePollStatus.FAILED);
 					assertThat(state.failure().failure()).isEqualTo(failure);
 					assertThat(state.attempt().retry().retryNotBefore())
-							.isEqualTo(FixedClockTestConfiguration.NOW);
+							.isEqualTo(FixedClockTestConfiguration.NOW.plus(Duration.ofMinutes(1)));
 					assertThat(state.attempt().retry().consecutiveRetryableFailures()).isEqualTo(1);
 				});
+
+		assertThat(sourcePollLedger.claim(SOURCE_NAME, LEASE)).isEmpty();
+		jdbcClient.sql("""
+				update ingestion_source_poll_state
+				set retry_not_before = :retryNotBefore
+				where source_name = :sourceName
+				""")
+				.param("retryNotBefore", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("sourceName", SOURCE_NAME)
+				.update();
 
 		var retry = sourcePollLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
 		assertThat(retry.attemptCount()).isEqualTo(2);
@@ -123,6 +150,80 @@ class SourcePollLedgerIntegrationTest {
 					assertThat(state.attempt().token()).isNull();
 					assertThat(state.attempt().retry().exhausted()).isTrue();
 				});
+	}
+
+	@Test
+	@DisplayName("Retry schedule сохраняется после повторного создания ledger facade")
+	void retryScheduleSurvivesFacadeRecreation() {
+		sourcePollLedger.register(SOURCE_NAME);
+		var attempt = sourcePollLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
+		sourcePollLedger.markFailed(
+				SOURCE_NAME,
+				attempt.token(),
+				new IngestionFailure(IngestionErrorCode.MANIFEST_TIMEOUT, true));
+
+		SourcePollLedger recreated = new JdbcSourcePollLedger(
+				sourcePollRepository,
+				backendDataProperties,
+				clock);
+
+		assertThat(recreated.findBySourceName(SOURCE_NAME).orElseThrow()
+				.attempt().retry().retryNotBefore())
+				.isEqualTo(FixedClockTestConfiguration.NOW.plus(Duration.ofMinutes(1)));
+		assertThat(recreated.claim(SOURCE_NAME, LEASE)).isEmpty();
+	}
+
+	@Test
+	@DisplayName("Retry-After увеличивает durable delay только до configured maximum")
+	void retryAfterIsPersistedWithinConfiguredMaximum() {
+		sourcePollLedger.register(SOURCE_NAME);
+		var attempt = sourcePollLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
+
+		sourcePollLedger.markFailed(
+				SOURCE_NAME,
+				attempt.token(),
+				new IngestionFailure(IngestionErrorCode.MANIFEST_HTTP_ERROR, true),
+				Duration.ofHours(1));
+
+		assertThat(sourcePollLedger.findBySourceName(SOURCE_NAME).orElseThrow()
+				.attempt().retry().retryNotBefore())
+				.isEqualTo(FixedClockTestConfiguration.NOW.plus(Duration.ofMinutes(15)));
+	}
+
+	@Test
+	@DisplayName("Параллельный claim на due boundary выдает только один poll token")
+	void concurrentDueClaimIssuesSingleToken() throws Exception {
+		sourcePollLedger.register(SOURCE_NAME);
+		var initial = sourcePollLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
+		sourcePollLedger.markFailed(
+				SOURCE_NAME,
+				initial.token(),
+				new IngestionFailure(IngestionErrorCode.MANIFEST_TIMEOUT, true));
+		jdbcClient.sql("""
+				update ingestion_source_poll_state
+				set retry_not_before = :retryNotBefore
+				where source_name = :sourceName
+				""")
+				.param("retryNotBefore", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("sourceName", SOURCE_NAME)
+				.update();
+
+		var executor = Executors.newFixedThreadPool(2);
+		try {
+			var results = executor.invokeAll(List.<Callable<Optional<SourcePollAttempt>>>of(
+					() -> sourcePollLedger.claim(SOURCE_NAME, LEASE),
+					() -> sourcePollLedger.claim(SOURCE_NAME, LEASE)));
+			long claimed = 0;
+			for (var result : results) {
+				if (result.get(10, TimeUnit.SECONDS).isPresent()) {
+					claimed++;
+				}
+			}
+			assertThat(claimed).isEqualTo(1);
+		}
+		finally {
+			executor.shutdownNow();
+		}
 	}
 
 	@Test

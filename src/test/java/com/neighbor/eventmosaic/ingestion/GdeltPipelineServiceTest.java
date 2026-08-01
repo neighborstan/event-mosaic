@@ -60,10 +60,14 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -138,6 +142,75 @@ class GdeltPipelineServiceTest {
 				.thenReturn(AttemptTransitionResult.APPLIED);
 		when(processingLedger.markFailed(any(), any(), any(), any()))
 				.thenReturn(AttemptTransitionResult.APPLIED);
+	}
+
+	@Test
+	@DisplayName("Deferred source poll завершает one-shot без downstream I/O")
+	void deferredSourcePollFinishesWithoutDownstreamIo() {
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.empty(), true));
+
+		assertThat(service.runOneShot()).isEqualTo(IngestionOneShotOutcome.RETRY_DEFERRED);
+
+		verifyNoInteractions(processingLedger, archiveProcessor, indexWriter);
+	}
+
+	@Test
+	@DisplayName("Deadline после завершенного Event не начинает Mention и не откатывает Event")
+	void deadlineAfterCompletedEventDoesNotStartMention() {
+		IngestionRunState runState = runState(true);
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		stubPendingRegistrationAndClaims();
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(1), nanoTime::get);
+		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
+			ArchiveProcessingRequest request = invocation.getArgument(0);
+			nanoTime.set(Duration.ofSeconds(1).toNanos());
+			return completed(request.kind(), successfulProgress());
+		});
+
+		assertThat(service.runOneShot(budget))
+				.isEqualTo(IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED);
+
+		verify(archiveProcessor).process(any(), any(), any());
+		verify(processingLedger).markIndexed(any(), any(), any());
+		verify(processingLedger).register(
+				runState.archives().getFirst().archive().idempotencyKey(),
+				new ArchiveProcessingFingerprint(
+						GdeltTestFixtures.EVENT_MD5,
+						"gdelt-processing-v1",
+						EVENT_FINGERPRINT));
+	}
+
+	@Test
+	@DisplayName("Deadline active processing сохраняется как retryable durable failure")
+	void activeProcessingDeadlineIsPersistedAsRetryableFailure() {
+		IngestionRunState runState = runState(false);
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		stubPendingRegistrationAndClaims();
+		ArchiveProcessingProgress partial = new ArchiveProcessingProgress(
+				1, 0, 0, 0, 0, 0, 0, null);
+		when(archiveProcessor.process(any(), any(), any())).thenReturn(
+				ArchiveProcessingResult.failed(
+						GdeltArchiveKind.TRANSLATION_EVENTS,
+						partial,
+						new ArchiveProcessingFailure(
+								ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED,
+								true,
+								null)));
+
+		assertThat(service.runOneShot())
+				.isEqualTo(IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED);
+		verify(processingLedger).markFailed(
+				any(),
+				eq(new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
+						ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED.code(),
+						true)),
+				eq(new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress(
+						1, 0, 0, 0, 0, 0, 0, null)),
+				eq(null));
 	}
 
 	@Test

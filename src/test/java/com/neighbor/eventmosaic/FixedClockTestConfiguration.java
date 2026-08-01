@@ -1,5 +1,6 @@
 package com.neighbor.eventmosaic;
 
+import com.neighbor.eventmosaic.ingestion.retry.RetryJitterSource;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -17,5 +18,11 @@ public class FixedClockTestConfiguration {
 	@Primary
 	Clock fixedClock() {
 		return Clock.fixed(NOW, ZoneOffset.UTC);
+	}
+
+	@Bean
+	@Primary
+	RetryJitterSource fixedRetryJitter() {
+		return () -> 0.5;
 	}
 }

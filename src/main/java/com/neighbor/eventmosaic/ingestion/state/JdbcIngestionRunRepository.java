@@ -64,6 +64,19 @@ class JdbcIngestionRunRepository {
 				.optional();
 	}
 
+	Optional<IngestionRunRow> findLatest() {
+		return jdbcClient.sql("""
+				select *
+				from ingestion_runs
+				where source_name = :sourceName
+				order by source_update_time desc
+				limit 1
+				""")
+				.param(PARAM_SOURCE_NAME, GdeltSourceContract.SOURCE_NAME)
+				.query(IngestionJdbcMappers.RUN)
+				.optional();
+	}
+
 	void recalculate(long runId, Instant now) {
 		lockRun(runId);
 		RunCounts counts = jdbcClient.sql("""

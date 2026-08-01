@@ -15,7 +15,8 @@ public enum ArchiveProcessingErrorCode implements ApplicationErrorCode {
 	INDEXING_INTERRUPTED("Elasticsearch indexing operation was interrupted"),
 	INDEX_RECEIPT_MISMATCH("Elasticsearch archive receipt has an identity mismatch"),
 	INDEX_RECEIPT_SURPLUS("Elasticsearch archive receipt contains surplus documents"),
-	EVENT_IDENTITY_CONFLICT("Elasticsearch Event identity conflicts with stored provenance");
+	EVENT_IDENTITY_CONFLICT("Elasticsearch Event identity conflicts with stored provenance"),
+	OPERATION_DEADLINE_EXCEEDED("GDELT archive processing exceeded the shared deadline");
 
 	private final String safeMessage;
 

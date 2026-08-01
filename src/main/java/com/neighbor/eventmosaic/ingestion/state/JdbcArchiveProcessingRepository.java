@@ -13,6 +13,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
+import com.neighbor.eventmosaic.ingestion.retry.RetryDelayPolicy;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -147,13 +148,16 @@ class JdbcArchiveProcessingRepository {
 
 	private final JdbcClient jdbcClient;
 	private final int automaticRetryLimit;
+	private final RetryDelayPolicy retryDelayPolicy;
 
 	JdbcArchiveProcessingRepository(
 			JdbcClient jdbcClient,
-			BackendDataProperties properties
+			BackendDataProperties properties,
+			RetryDelayPolicy retryDelayPolicy
 	) {
 		this.jdbcClient = jdbcClient;
 		this.automaticRetryLimit = properties.retry().automaticRetryLimit();
+		this.retryDelayPolicy = retryDelayPolicy;
 	}
 
 	ArchiveProcessingState register(
@@ -424,11 +428,21 @@ class JdbcArchiveProcessingRepository {
 			ArchiveReceiptVerification verification,
 			Instant now
 	) {
-		if (!ownsCurrentTarget(attempt)) {
+		ArchiveProcessingState state = findForUpdate(attempt.archiveIdempotencyKey())
+				.orElse(null);
+		if (state == null
+				|| validateAndLockTarget(
+						attempt.archiveIdempotencyKey(),
+						attempt.targetBinding()) != ArchiveProcessingClaimStatus.CLAIMED) {
 			return AttemptTransitionResult.OWNERSHIP_LOST;
 		}
 		OffsetDateTime retryNotBefore = failure.retryable()
-				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
+				? OffsetDateTime.ofInstant(
+						retryDelayPolicy.retryNotBefore(
+								now,
+								state.attempt().retry().consecutiveRetryableFailures(),
+								Duration.ZERO),
+						ZoneOffset.UTC)
 				: null;
 		int updated = bindTarget(
 				bindProgress(
@@ -511,7 +525,8 @@ class JdbcArchiveProcessingRepository {
 			ArchiveReceiptVerification verification,
 			Instant now
 	) {
-		if (!lockProcessingRow(archiveIdempotencyKey)
+		ArchiveProcessingState state = findForUpdate(archiveIdempotencyKey).orElse(null);
+		if (state == null
 				|| validateAndLockTarget(
 						archiveIdempotencyKey,
 						verifiedCurrentTargetBinding)
@@ -571,7 +586,8 @@ class JdbcArchiveProcessingRepository {
 			ArchiveProcessingFailure failure,
 			Instant now
 	) {
-		if (!lockProcessingRow(archiveIdempotencyKey)
+		ArchiveProcessingState state = findForUpdate(archiveIdempotencyKey).orElse(null);
+		if (state == null
 				|| validateAndLockTarget(
 						archiveIdempotencyKey,
 						verifiedCurrentTargetBinding)
@@ -579,7 +595,12 @@ class JdbcArchiveProcessingRepository {
 			return AttemptTransitionResult.OWNERSHIP_LOST;
 		}
 		OffsetDateTime retryNotBefore = failure.retryable()
-				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
+				? OffsetDateTime.ofInstant(
+						retryDelayPolicy.retryNotBefore(
+								now,
+								state.attempt().retry().consecutiveRetryableFailures(),
+								Duration.ZERO),
+						ZoneOffset.UTC)
 				: null;
 		int updated = bindStoredTarget(bindReceiptVerification(jdbcClient.sql("""
 				update ingestion_archive_processing

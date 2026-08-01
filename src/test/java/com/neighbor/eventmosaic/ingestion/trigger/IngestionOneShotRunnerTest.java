@@ -44,7 +44,7 @@ class IngestionOneShotRunnerTest {
 
 					runner.run(new DefaultApplicationArguments(new String[0]));
 
-					verify(pipelineService).runLatestUpdate();
+					verify(pipelineService).runOneShot();
 				});
 	}
 
@@ -52,7 +52,7 @@ class IngestionOneShotRunnerTest {
 	@DisplayName("Runner заменяет неожиданную ошибку безопасной причиной остановки")
 	void sanitizesUnexpectedFailureAtApplicationBoundary() {
 		IllegalStateException unsafe = new IllegalStateException("secret runtime detail");
-		when(pipelineService.runLatestUpdate()).thenThrow(unsafe);
+		when(pipelineService.runOneShot()).thenThrow(unsafe);
 		IngestionOneShotRunner runner = new IngestionOneShotRunner(pipelineService);
 		DefaultApplicationArguments arguments = new DefaultApplicationArguments(new String[0]);
 
@@ -68,7 +68,7 @@ class IngestionOneShotRunnerTest {
 	@Test
 	@DisplayName("Runner сохраняет безопасный код cooperative interruption")
 	void preservesCooperativeInterruptionCode() {
-		when(pipelineService.runLatestUpdate()).thenThrow(new IngestionInterruptedException());
+		when(pipelineService.runOneShot()).thenThrow(new IngestionInterruptedException());
 		IngestionOneShotRunner runner = new IngestionOneShotRunner(pipelineService);
 		DefaultApplicationArguments arguments = new DefaultApplicationArguments(new String[0]);
 

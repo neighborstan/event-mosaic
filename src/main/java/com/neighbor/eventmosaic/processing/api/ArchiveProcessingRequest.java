@@ -2,7 +2,9 @@ package com.neighbor.eventmosaic.processing.api;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 
@@ -16,6 +18,7 @@ import java.util.Objects;
  * @param indexTargets exact ACTIVE generation, зафиксированная для attempt
  * @param csvPath путь к подготовленному CSV
  * @param receiptPageSize максимальный размер PIT/search_after страницы receipt
+ * @param operationBudget общий monotonic budget owning cycle
  */
 public record ArchiveProcessingRequest(
 		GdeltArchiveKind kind,
@@ -24,7 +27,8 @@ public record ArchiveProcessingRequest(
 		String processingFingerprint,
 		ActiveIndexTargets indexTargets,
 		Path csvPath,
-		int receiptPageSize
+		int receiptPageSize,
+		OperationBudget operationBudget
 ) {
 
 	/** Проверяет обязательный source context до открытия CSV. */
@@ -35,10 +39,32 @@ public record ArchiveProcessingRequest(
 		requireText(processingFingerprint, "processingFingerprint");
 		Objects.requireNonNull(indexTargets, "indexTargets must not be null");
 		Objects.requireNonNull(csvPath, "csvPath must not be null");
+		Objects.requireNonNull(operationBudget, "operationBudget must not be null");
 		if (receiptPageSize <= 0 || receiptPageSize > 10_000) {
 			throw new IllegalArgumentException(
 					"receiptPageSize must be between 1 and 10000");
 		}
+	}
+
+	/** Создает запрос с переданным размером receipt и отдельным test budget. */
+	public ArchiveProcessingRequest(
+			GdeltArchiveKind kind,
+			Instant sourceUpdateTime,
+			String sourceArchiveKey,
+			String processingFingerprint,
+			ActiveIndexTargets indexTargets,
+			Path csvPath,
+			int receiptPageSize
+	) {
+		this(
+				kind,
+				sourceUpdateTime,
+				sourceArchiveKey,
+				processingFingerprint,
+				indexTargets,
+				csvPath,
+				receiptPageSize,
+				OperationBudget.start(Duration.ofDays(1)));
 	}
 
 	/** Создает запрос с production default страницы receipt. */
@@ -57,7 +83,8 @@ public record ArchiveProcessingRequest(
 				processingFingerprint,
 				indexTargets,
 				csvPath,
-				500);
+				500,
+				OperationBudget.start(Duration.ofDays(1)));
 	}
 
 	private static void requireText(String value, String fieldName) {

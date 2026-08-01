@@ -11,6 +11,7 @@ import com.neighbor.eventmosaic.ingestion.IngestionRunService;
 import com.neighbor.eventmosaic.ingestion.GdeltTestFixtures;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveLedger;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
+import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.staging.HttpArchiveDownloader;
@@ -53,6 +54,9 @@ class IngestionFakeSourceIntegrationTest {
 
 	@Autowired
 	private IngestionArchiveLedger ledger;
+
+	@Autowired
+	private SourcePollLedger sourcePollLedger;
 
 	@Autowired
 	private JdbcClient jdbcClient;
@@ -118,6 +122,7 @@ class IngestionFakeSourceIntegrationTest {
 				manifestClient,
 				parser,
 				ledger,
+				sourcePollLedger,
 				new StagingLayout(properties),
 				new HttpArchiveDownloader(httpClient, properties, metrics, downloadUriResolver),
 				new ZipArchiveStager(properties, metrics),

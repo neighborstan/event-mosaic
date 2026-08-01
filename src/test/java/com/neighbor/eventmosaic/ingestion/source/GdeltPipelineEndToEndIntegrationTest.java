@@ -18,6 +18,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveLedger;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
+import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.staging.HttpArchiveDownloader;
 import com.neighbor.eventmosaic.ingestion.staging.StagingLayout;
@@ -66,6 +67,9 @@ class GdeltPipelineEndToEndIntegrationTest {
 
 	@Autowired
 	private IngestionArchiveLedger ingestionLedger;
+
+	@Autowired
+	private SourcePollLedger sourcePollLedger;
 
 	@Autowired
 	private ArchiveProcessingLedger processingLedger;
@@ -264,6 +268,7 @@ class GdeltPipelineEndToEndIntegrationTest {
 						65_536),
 				new GdeltManifestParser(),
 				ingestionLedger,
+				sourcePollLedger,
 				new StagingLayout(properties),
 				new HttpArchiveDownloader(httpClient, properties, metrics, resolver),
 				new ZipArchiveStager(properties, metrics),

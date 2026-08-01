@@ -12,16 +12,20 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.error.ArchiveContentViolationException;
 import com.neighbor.eventmosaic.ingestion.error.IngestionFailureContract;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.StagingStorageException;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import org.junit.jupiter.api.AfterEach;
@@ -61,6 +65,31 @@ class ZipArchiveStagerTest {
 					assertThat(Thread.currentThread().isInterrupted()).isTrue();
 				});
 		assertThat(fixture.paths().csvPartPath()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Исчерпанный cycle budget запрещает начало ZIP staging")
+	void expiredCycleBudgetPreventsZipStaging() {
+		Fixture fixture = fixture();
+		DownloadedArchive downloaded = new DownloadedArchive(
+				fixture.paths().archivePath(),
+				1,
+				fixture.attempt().archive().expectedMd5(),
+				false);
+		AtomicLong monotonicNanos = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(
+				Duration.ofNanos(1),
+				monotonicNanos::get);
+		monotonicNanos.incrementAndGet();
+
+		assertThatExceptionOfType(OperationDeadlineExceededException.class)
+				.isThrownBy(() -> stager(4, 1024, 1024).stage(
+						fixture.attempt(),
+						downloaded,
+						fixture.paths(),
+						budget));
+
+		assertThat(fixture.paths().csvPath().getParent()).doesNotExist();
 	}
 
 	@Test

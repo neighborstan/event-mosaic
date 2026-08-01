@@ -9,6 +9,7 @@ import com.neighbor.eventmosaic.ingestion.api.SourcePollAttempt;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollAttemptState;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollState;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollStatus;
+import com.neighbor.eventmosaic.ingestion.retry.RetryDelayPolicy;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -54,9 +55,11 @@ class JdbcSourcePollRepository {
 			""";
 
 	private final JdbcClient jdbcClient;
+	private final RetryDelayPolicy retryDelayPolicy;
 
-	JdbcSourcePollRepository(JdbcClient jdbcClient) {
+	JdbcSourcePollRepository(JdbcClient jdbcClient, RetryDelayPolicy retryDelayPolicy) {
 		this.jdbcClient = jdbcClient;
+		this.retryDelayPolicy = retryDelayPolicy;
 	}
 
 	SourcePollState register(String sourceName, int automaticRetryLimit, Instant now) {
@@ -174,10 +177,22 @@ class JdbcSourcePollRepository {
 			String sourceName,
 			UUID attemptToken,
 			IngestionFailure failure,
+			Duration retryAfter,
 			Instant now
 	) {
+		SourcePollState state = findForUpdate(sourceName).orElse(null);
+		if (state == null
+				|| state.status() != SourcePollStatus.POLLING
+				|| !attemptToken.equals(state.attempt().token())) {
+			return AttemptTransitionResult.OWNERSHIP_LOST;
+		}
 		OffsetDateTime retryNotBefore = failure.retryable()
-				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
+				? OffsetDateTime.ofInstant(
+						retryDelayPolicy.retryNotBefore(
+								now,
+								state.attempt().retry().consecutiveRetryableFailures(),
+								retryAfter),
+						ZoneOffset.UTC)
 				: null;
 		int updated = jdbcClient.sql("""
 				update ingestion_source_poll_state

@@ -39,16 +39,20 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingOutcome;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgressListener;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
+import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -57,6 +61,72 @@ class DefaultGdeltArchiveProcessorTest {
 
 	private static final Instant EVENT_TIME = Instant.parse("2026-07-21T14:30:00Z");
 	private static final Instant MENTION_TIME = Instant.parse("2026-07-21T14:44:00Z");
+
+	@Test
+	@DisplayName("Исчерпанная deadline не открывает CSV и не отправляет bulk")
+	void expiredDeadlinePreventsCsvAndBulk() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(1), null);
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(1), nanoTime::get);
+		nanoTime.set(Duration.ofSeconds(1).toNanos());
+		ArchiveProcessingRequest base = ProcessingTestFixtures.mentionRequest();
+		ArchiveProcessingRequest request = new ArchiveProcessingRequest(
+				base.kind(),
+				base.sourceUpdateTime(),
+				base.sourceArchiveKey(),
+				base.processingFingerprint(),
+				base.indexTargets(),
+				base.csvPath(),
+				base.receiptPageSize(),
+				budget);
+
+		ArchiveProcessingResult result = processor.process(
+				request,
+				ArchiveProcessingProgressListener.continuing());
+
+		assertThat(result.outcome()).isEqualTo(ArchiveProcessingOutcome.FAILED);
+		assertThat(result.failure().code())
+				.isEqualTo(ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED);
+		assertThat(result.failure().retryable()).isTrue();
+		assertThat(result.progress()).isEqualTo(ArchiveProcessingProgress.empty());
+		assertThat(writer.commands).isEmpty();
+	}
+
+	@Test
+	@DisplayName("Deadline во время CSV сохраняет partial progress и не отправляет новый bulk")
+	void deadlineDuringCsvPreservesPartialProgress() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(1), nanoTime::get);
+		List<GdeltMention> mentions = validMentions(2);
+		GdeltMentionCsvReader reader = (path, consumer) -> {
+			consumer.accept(new GdeltCsvRecord<>(1, mentions.getFirst()));
+			nanoTime.set(Duration.ofSeconds(1).toNanos());
+			consumer.accept(new GdeltCsvRecord<>(2, mentions.getLast()));
+			throw new AssertionError("Expired reader callback must stop processing");
+		};
+		ArchiveProcessingRequest base = ProcessingTestFixtures.mentionRequest();
+		ArchiveProcessingRequest request = new ArchiveProcessingRequest(
+				base.kind(),
+				base.sourceUpdateTime(),
+				base.sourceArchiveKey(),
+				base.processingFingerprint(),
+				base.indexTargets(),
+				base.csvPath(),
+				base.receiptPageSize(),
+				budget);
+
+		ArchiveProcessingResult result = processor(writer, reader).process(
+				request,
+				ArchiveProcessingProgressListener.continuing());
+
+		assertThat(result.failure().code())
+				.isEqualTo(ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED);
+		assertThat(result.progress().deliveredRecords()).isEqualTo(1);
+		assertThat(result.progress().submittedOperations()).isZero();
+		assertThat(writer.commands).isEmpty();
+	}
 
 	@Test
 	@DisplayName("Отправляет exact full batch и явно refresh-ит индекс перед receipt")

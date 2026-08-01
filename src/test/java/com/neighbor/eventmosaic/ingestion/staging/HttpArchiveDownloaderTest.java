@@ -10,12 +10,14 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.error.IngestionFailureContract;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteResponseRejectedException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.ingestion.error.StagingStorageException;
 import com.neighbor.eventmosaic.ingestion.error.TransferredArtifactIntegrityException;
 import com.neighbor.eventmosaic.ingestion.source.ArchiveDownloadUriResolver;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -35,6 +37,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -165,6 +168,49 @@ class HttpArchiveDownloaderTest {
 				IngestionErrorCode.DOWNLOAD_HTTP_ERROR,
 				RemoteSourceAccessException.class);
 		assertThat(paths.archivePartPath()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Transient HTTP status передает Retry-After в acquisition retry")
+	void transientStatusCarriesRetryAfter() {
+		server.createContext("/archive.zip", exchange -> {
+			exchange.getResponseHeaders().add("Retry-After", "240");
+			respond(exchange, 429, new byte[0], true);
+		});
+		ArchiveAttempt attempt = attempt(1, "00000000000000000000000000000000");
+		StagingPaths paths = new StagingLayout(tempDir).pathsFor(attempt);
+
+		assertThatExceptionOfType(RemoteSourceAccessException.class)
+				.isThrownBy(() -> downloader(1024).download(attempt, paths))
+				.satisfies(exception -> {
+					assertThat(exception.errorCode())
+							.isEqualTo(IngestionErrorCode.DOWNLOAD_HTTP_ERROR);
+					assertThat(exception.retryAfter()).isEqualTo(Duration.ofMinutes(4));
+				});
+		assertThat(paths.archivePartPath()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Исчерпанный cycle budget запрещает filesystem и HTTP download")
+	void expiredCycleBudgetPreventsFilesystemAndRequest() {
+		AtomicInteger requests = new AtomicInteger();
+		server.createContext("/archive.zip", exchange -> {
+			requests.incrementAndGet();
+			respond(exchange, 200, new byte[]{1}, true);
+		});
+		ArchiveAttempt attempt = attempt(1, md5(new byte[]{1}));
+		StagingPaths paths = new StagingLayout(tempDir).pathsFor(attempt);
+		AtomicLong monotonicNanos = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(
+				Duration.ofNanos(1),
+				monotonicNanos::get);
+		monotonicNanos.incrementAndGet();
+
+		assertThatExceptionOfType(OperationDeadlineExceededException.class)
+				.isThrownBy(() -> downloader(1024).download(attempt, paths, budget));
+
+		assertThat(requests).hasValue(0);
+		assertThat(paths.archivePath().getParent()).doesNotExist();
 	}
 
 	@Test

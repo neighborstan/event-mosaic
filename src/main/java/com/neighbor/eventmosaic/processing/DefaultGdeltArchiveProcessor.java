@@ -40,6 +40,7 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgressListener
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -155,10 +156,12 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				bulkSize,
 				maxBulkBytes,
 				request.receiptPageSize(),
+				request.operationBudget(),
 				indexWriter,
 				progressListener,
 				metrics);
 		try {
+			ensureRemaining(request.operationBudget());
 			GdeltCsvReadSummary summary = readOperation.read(
 					sourceRecord -> accumulator.accept(mappingOperation.map(sourceRecord)),
 					accumulator::sourceInvalidProgress);
@@ -180,6 +183,14 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 					accumulator.progress());
 			metrics.archiveOutcome(request.kind(), result.outcome());
 			return result;
+		}
+		catch (DeadlineExceededSignal _) {
+			return expectedFailure(
+					request.kind(),
+					accumulator.progress(),
+					ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED,
+					true,
+					null);
 		}
 		catch (PartialBulkFailureSignal signal) {
 			reportSuppressedDiagnostic(signal, diagnosticListener);
@@ -361,6 +372,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		private final int bulkSize;
 		private final long maxBulkBytes;
 		private final int receiptPageSize;
+		private final OperationBudget operationBudget;
 		private final GdeltIndexWriter indexWriter;
 		private final ArchiveProcessingProgressListener progressListener;
 		private final ProcessingMetrics metrics;
@@ -388,6 +400,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				int bulkSize,
 				long maxBulkBytes,
 				int receiptPageSize,
+				OperationBudget operationBudget,
 				GdeltIndexWriter indexWriter,
 				ArchiveProcessingProgressListener progressListener,
 				ProcessingMetrics metrics
@@ -400,6 +413,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			this.bulkSize = bulkSize;
 			this.maxBulkBytes = maxBulkBytes;
 			this.receiptPageSize = receiptPageSize;
+			this.operationBudget = operationBudget;
 			this.indexWriter = indexWriter;
 			this.progressListener = progressListener;
 			this.metrics = metrics;
@@ -408,6 +422,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void accept(DocumentMappingResult<D> mapping) {
+			ensureRemaining(operationBudget);
 			deliveredRecords = Math.incrementExact(deliveredRecords);
 			if (!mapping.accepted()) {
 				mappingRejectedRecords = Math.incrementExact(mappingRejectedRecords);
@@ -443,6 +458,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void sourceInvalidProgress(long invalidRecords) {
+			ensureRemaining(operationBudget);
 			if (invalidRecords < sourceInvalidRecords) {
 				throw new IllegalStateException(
 						"source invalid progress must be monotonic");
@@ -454,6 +470,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void sourceCompleted(GdeltCsvReadSummary summary) {
+			ensureRemaining(operationBudget);
 			if (summary.kind() != archiveKind
 					|| summary.validRecords() != deliveredRecords) {
 				throw new IllegalStateException(
@@ -470,6 +487,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void flush() {
+			ensureRemaining(operationBudget);
 			long batchCount = documents.size();
 			submittedOperations = Math.addExact(submittedOperations, batchCount);
 			BulkIndexResult result;
@@ -506,10 +524,12 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void refreshIndex() {
+			ensureRemaining(operationBudget);
 			indexWriter.refresh(indexKind, indexTarget);
 		}
 
 		private ArchiveReceiptVerification verifyReceipt() {
+			ensureRemaining(operationBudget);
 			ArchiveIdentityDigest expected = expectedDigest.finish();
 			receipt = indexWriter.verifyReceipt(new ArchiveReceiptQuery(
 					indexKind,
@@ -528,6 +548,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void checkpoint() {
+			ensureRemaining(operationBudget);
 			ArchiveProcessingProgress current = progress();
 			if (current.equals(lastCheckpoint)) {
 				return;
@@ -555,6 +576,12 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 	}
 
+	private static void ensureRemaining(OperationBudget budget) {
+		if (!budget.hasRemaining()) {
+			throw new DeadlineExceededSignal();
+		}
+	}
+
 	/**
 	 * Внутренний control-flow signal для немедленной остановки callback reader.
 	 */
@@ -564,6 +591,16 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 
 		private OwnershipLostSignal() {
 			super(null, null, true, false);
+		}
+	}
+
+	/** Внутренний control-flow signal исчерпанной operation deadline. */
+	private static final class DeadlineExceededSignal extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		private DeadlineExceededSignal() {
+			super(null, null, false, false);
 		}
 	}
 

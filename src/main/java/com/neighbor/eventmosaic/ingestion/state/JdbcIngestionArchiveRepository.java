@@ -11,6 +11,7 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionFailure;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.error.SourceDataViolationException;
+import com.neighbor.eventmosaic.ingestion.retry.RetryDelayPolicy;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Duration;
@@ -31,13 +32,16 @@ class JdbcIngestionArchiveRepository {
 
 	private final JdbcClient jdbcClient;
 	private final int automaticRetryLimit;
+	private final RetryDelayPolicy retryDelayPolicy;
 
 	JdbcIngestionArchiveRepository(
 			JdbcClient jdbcClient,
-			BackendDataProperties properties
+			BackendDataProperties properties,
+			RetryDelayPolicy retryDelayPolicy
 	) {
 		this.jdbcClient = jdbcClient;
 		this.automaticRetryLimit = properties.retry().automaticRetryLimit();
+		this.retryDelayPolicy = retryDelayPolicy;
 	}
 
 	void register(long runId, DiscoveredArchive archive, Instant now) {
@@ -187,11 +191,23 @@ class JdbcIngestionArchiveRepository {
 			String idempotencyKey,
 			UUID attemptToken,
 			IngestionFailure failure,
+			Duration retryAfter,
 			Instant now
 	) {
-		long runId = requireRunId(idempotencyKey);
+		IngestionArchiveState state = findForUpdate(idempotencyKey)
+				.orElseThrow(() -> new IllegalArgumentException("Unknown archive idempotency key"));
+		long runId = state.runId();
+		if (state.status() != IngestionArchiveStatus.PROCESSING
+				|| !attemptToken.equals(state.attempt().token())) {
+			return new ArchiveTransition(runId, AttemptTransitionResult.OWNERSHIP_LOST);
+		}
 		OffsetDateTime retryNotBefore = failure.retryable()
-				? OffsetDateTime.ofInstant(now, ZoneOffset.UTC)
+				? OffsetDateTime.ofInstant(
+						retryDelayPolicy.retryNotBefore(
+								now,
+								state.attempt().retry().consecutiveRetryableFailures(),
+								retryAfter),
+						ZoneOffset.UTC)
 				: null;
 		int updated = jdbcClient.sql("""
 				update ingestion_archives
@@ -227,6 +243,13 @@ class JdbcIngestionArchiveRepository {
 
 	Optional<IngestionArchiveState> findByIdempotencyKey(String idempotencyKey) {
 		return jdbcClient.sql("select * from ingestion_archives where idempotency_key = :idempotencyKey")
+				.param("idempotencyKey", idempotencyKey)
+				.query(IngestionJdbcMappers.ARCHIVE)
+				.optional();
+	}
+
+	private Optional<IngestionArchiveState> findForUpdate(String idempotencyKey) {
+		return jdbcClient.sql("select * from ingestion_archives where idempotency_key = :idempotencyKey for update")
 				.param("idempotencyKey", idempotencyKey)
 				.query(IngestionJdbcMappers.ARCHIVE)
 				.optional();

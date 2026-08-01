@@ -11,10 +11,13 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionErrorContext;
 import com.neighbor.eventmosaic.ingestion.api.IngestionFailure;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunState;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
+import com.neighbor.eventmosaic.ingestion.api.SourcePollAttempt;
+import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.error.ArchiveContentViolationException;
 import com.neighbor.eventmosaic.ingestion.error.IngestionFailureContract;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteResponseRejectedException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.ingestion.error.SourceDataViolationException;
@@ -27,9 +30,13 @@ import com.neighbor.eventmosaic.ingestion.staging.HttpArchiveDownloader;
 import com.neighbor.eventmosaic.ingestion.staging.StagingLayout;
 import com.neighbor.eventmosaic.ingestion.staging.StagingPaths;
 import com.neighbor.eventmosaic.ingestion.staging.ZipArchiveStager;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
 import com.neighbor.eventmosaic.shared.error.SafeExceptionProjection;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import java.time.Duration;
 import java.util.Optional;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.spi.LoggingEventBuilder;
@@ -52,6 +59,7 @@ public class IngestionRunService {
 	private final GdeltManifestClient manifestClient;
 	private final GdeltManifestParser manifestParser;
 	private final IngestionArchiveLedger archiveLedger;
+	private final SourcePollLedger sourcePollLedger;
 	private final StagingLayout stagingLayout;
 	private final HttpArchiveDownloader archiveDownloader;
 	private final ZipArchiveStager archiveStager;
@@ -64,6 +72,7 @@ public class IngestionRunService {
 	 * @param manifestClient клиент latest manifest
 	 * @param manifestParser parser целостного GDELT update
 	 * @param archiveLedger durable state boundary
+	 * @param sourcePollLedger durable current source-poll boundary
 	 * @param stagingLayout построитель безопасных staging paths
 	 * @param archiveDownloader downloader и verifier ZIP
 	 * @param archiveStager безопасный ZIP stager
@@ -74,6 +83,7 @@ public class IngestionRunService {
 			GdeltManifestClient manifestClient,
 			GdeltManifestParser manifestParser,
 			IngestionArchiveLedger archiveLedger,
+			SourcePollLedger sourcePollLedger,
 			StagingLayout stagingLayout,
 			HttpArchiveDownloader archiveDownloader,
 			ZipArchiveStager archiveStager,
@@ -83,6 +93,7 @@ public class IngestionRunService {
 		this.manifestClient = manifestClient;
 		this.manifestParser = manifestParser;
 		this.archiveLedger = archiveLedger;
+		this.sourcePollLedger = sourcePollLedger;
 		this.stagingLayout = stagingLayout;
 		this.archiveDownloader = archiveDownloader;
 		this.archiveStager = archiveStager;
@@ -97,9 +108,26 @@ public class IngestionRunService {
 	 * @return итоговое производное состояние run
 	 */
 	public IngestionRunState runLatestUpdate() {
+		OperationBudget budget = OperationBudget.start(Duration.ofDays(1));
+		return observeCycle(() -> executeLatestUpdate(budget, false));
+	}
+
+	/** Выполняет acquisition pass в пределах budget owning orchestration. */
+	public IngestionRunState runLatestUpdate(OperationBudget budget) {
+		return observeCycle(() -> executeLatestUpdate(budget, true));
+	}
+
+	/**
+	 * Выполняет source poll либо использует newest known run при deferred retry.
+	 */
+	AcquisitionCycleResult runOneShot(OperationBudget budget) {
+		return observeCycle(() -> executeOneShot(budget));
+	}
+
+	private <T> T observeCycle(Supplier<T> operation) {
 		metrics.runStarted();
 		try {
-			return executeLatestUpdate();
+			return operation.get();
 		} catch (UnexpectedArchiveFailure failure) {
 			metrics.error(IngestionErrorCode.INTERNAL_ERROR);
 			logUnexpectedArchiveFailure(failure);
@@ -110,6 +138,7 @@ public class IngestionRunService {
 				| SourceDataViolationException
 				| ArchiveContentViolationException
 				| StagingStorageException
+				| OperationDeadlineExceededException
 				| IngestionInterruptedException exception) {
 			logExpectedCycleFailure(exception);
 			throw exception;
@@ -127,8 +156,60 @@ public class IngestionRunService {
 		}
 	}
 
-	private IngestionRunState executeLatestUpdate() {
-		DiscoveredUpdate update = manifestParser.parse(manifestClient.fetchLatestManifest());
+	private IngestionRunState executeLatestUpdate(
+			OperationBudget budget,
+			boolean boundedAdapters
+	) {
+		DiscoveredUpdate update = discoverAndRegister(budget, boundedAdapters);
+		return processRegisteredUpdate(update, budget, boundedAdapters);
+	}
+
+	private AcquisitionCycleResult executeOneShot(OperationBudget budget) {
+		requireRemaining(budget);
+		sourcePollLedger.register(GdeltSourceContract.SOURCE_NAME);
+		requireRemaining(budget);
+		Optional<SourcePollAttempt> claimed = sourcePollLedger.claim(
+				GdeltSourceContract.SOURCE_NAME,
+				properties.continuity().recoveryLease());
+		if (claimed.isEmpty()) {
+			return new AcquisitionCycleResult(
+					processNewestKnownRun(budget),
+					true);
+		}
+
+		SourcePollAttempt pollAttempt = claimed.orElseThrow();
+		DiscoveredUpdate update;
+		try {
+			update = discoverAndRegister(budget, true);
+			requireRemaining(budget);
+			sourcePollLedger.markSucceeded(
+					GdeltSourceContract.SOURCE_NAME,
+					pollAttempt.token());
+		}
+		catch (ApplicationException exception) {
+			if (exception instanceof IngestionFailureContract failure) {
+				persistSourcePollFailure(pollAttempt, failure, exception);
+			}
+			throw exception;
+		}
+		catch (RuntimeException exception) {
+			persistSourcePollInternalFailure(pollAttempt, exception);
+			throw exception;
+		}
+		return new AcquisitionCycleResult(
+				Optional.of(processRegisteredUpdate(update, budget, true)),
+				false);
+	}
+
+	private DiscoveredUpdate discoverAndRegister(
+			OperationBudget budget,
+			boolean boundedAdapter
+	) {
+		requireRemaining(budget);
+		String manifest = boundedAdapter
+				? manifestClient.fetchLatestManifest(budget)
+				: manifestClient.fetchLatestManifest();
+		DiscoveredUpdate update = manifestParser.parse(manifest);
 
 		for (DiscoveryDiagnostic diagnostic : update.diagnostics()) {
 			metrics.event(diagnostic.code());
@@ -140,17 +221,46 @@ public class IngestionRunService {
 					.log("GDELT manifest entry ignored");
 		}
 
+		requireRemaining(budget);
 		int gapsCreated = archiveLedger.registerDiscoveredUpdate(
 				update,
 				properties.continuity().firstRunPolicy(),
 				properties.continuity().firstRunStartAt()
 		);
 		metrics.gapsCreated(gapsCreated);
-		for (DiscoveredArchive archive : update.archives()) {
-			processArchive(archive);
-		}
+		return update;
+	}
 
-		IngestionRunState result = archiveLedger.findRunByUpdateTime(update.sourceUpdateTime())
+	private IngestionRunState processRegisteredUpdate(
+			DiscoveredUpdate update,
+			OperationBudget budget,
+			boolean boundedAdapters
+	) {
+		for (DiscoveredArchive archive : update.archives()) {
+			requireRemaining(budget);
+			processArchive(archive, budget, boundedAdapters);
+		}
+		requireRemaining(budget);
+		return completeRun(update.sourceUpdateTime());
+	}
+
+	private Optional<IngestionRunState> processNewestKnownRun(OperationBudget budget) {
+		requireRemaining(budget);
+		Optional<IngestionRunState> latest = archiveLedger.findLatestRun();
+		if (latest.isEmpty()) {
+			return Optional.empty();
+		}
+		IngestionRunState known = latest.orElseThrow();
+		for (var archiveState : known.archives()) {
+			requireRemaining(budget);
+			processArchive(archiveState.archive(), budget, true);
+		}
+		requireRemaining(budget);
+		return Optional.of(completeRun(known.sourceUpdateTime()));
+	}
+
+	private IngestionRunState completeRun(java.time.Instant sourceUpdateTime) {
+		IngestionRunState result = archiveLedger.findRunByUpdateTime(sourceUpdateTime)
 				.orElseThrow(() -> new IllegalStateException("Registered ingestion run disappeared"));
 		metrics.runCompleted(result.status());
 		LOGGER.atInfo()
@@ -161,7 +271,12 @@ public class IngestionRunService {
 		return result;
 	}
 
-	private void processArchive(DiscoveredArchive archive) {
+	private void processArchive(
+			DiscoveredArchive archive,
+			OperationBudget budget,
+			boolean boundedAdapters
+	) {
+		requireRemaining(budget);
 		Optional<ArchiveAttempt> claimed = archiveLedger.claimArchive(
 				archive.idempotencyKey(),
 				properties.continuity().recoveryLease());
@@ -176,14 +291,19 @@ public class IngestionRunService {
 
 		boolean downloadCompleted = false;
 		try {
+			requireRemaining(budget);
 			StagingPaths paths = stagingLayout.pathsFor(attempt);
-			DownloadedArchive downloaded = archiveDownloader.download(attempt, paths);
+			DownloadedArchive downloaded = boundedAdapters
+					? archiveDownloader.download(attempt, paths, budget)
+					: archiveDownloader.download(attempt, paths);
 			downloadCompleted = true;
 			metrics.downloadOutcome(
 					archive.archiveType(),
 					downloaded.reused() ? DownloadOutcome.REUSED : DownloadOutcome.DOWNLOADED
 			);
-			StagedArchive staged = archiveStager.stage(attempt, downloaded, paths);
+			StagedArchive staged = boundedAdapters
+					? archiveStager.stage(attempt, downloaded, paths, budget)
+					: archiveStager.stage(attempt, downloaded, paths);
 			if (ownershipLost(
 					archive,
 					attempt,
@@ -202,12 +322,59 @@ public class IngestionRunService {
 				| RemoteResponseRejectedException
 				| ArchiveContentViolationException
 				| StagingStorageException
+				| OperationDeadlineExceededException
 				| IngestionInterruptedException exception) {
 			handleExpectedArchiveFailure(archive, attempt, exception, !downloadCompleted);
 		} catch (RuntimeException exception) {
 			IngestionFailure failure = IngestionFailure.internalError();
 			persistUnexpectedFailure(archive, attempt, failure, exception);
 			throw new UnexpectedArchiveFailure(archive, attempt, exception);
+		}
+	}
+
+	private void persistSourcePollFailure(
+			SourcePollAttempt attempt,
+			IngestionFailureContract failure,
+			ApplicationException exception
+	) {
+		try {
+			if (failure.retryAfter().isZero()) {
+				sourcePollLedger.markFailed(
+						GdeltSourceContract.SOURCE_NAME,
+						attempt.token(),
+						failure.failure());
+			}
+			else {
+				sourcePollLedger.markFailed(
+						GdeltSourceContract.SOURCE_NAME,
+						attempt.token(),
+						failure.failure(),
+						failure.retryAfter());
+			}
+		}
+		catch (RuntimeException persistenceFailure) {
+			exception.addSuppressed(persistenceFailure);
+		}
+	}
+
+	private void persistSourcePollInternalFailure(
+			SourcePollAttempt attempt,
+			RuntimeException exception
+	) {
+		try {
+			sourcePollLedger.markFailed(
+					GdeltSourceContract.SOURCE_NAME,
+					attempt.token(),
+					IngestionFailure.internalError());
+		}
+		catch (RuntimeException persistenceFailure) {
+			exception.addSuppressed(persistenceFailure);
+		}
+	}
+
+	private static void requireRemaining(OperationBudget budget) {
+		if (!budget.hasRemaining()) {
+			throw new OperationDeadlineExceededException();
 		}
 	}
 
@@ -244,13 +411,21 @@ public class IngestionRunService {
 		addErrorContext(log, exception.context()).log("GDELT archive failed");
 	}
 
-	private AttemptTransitionResult persistExpectedFailure(
+	private <T extends ApplicationException & IngestionFailureContract>
+			AttemptTransitionResult persistExpectedFailure(
 			DiscoveredArchive archive,
 			ArchiveAttempt attempt,
-			ApplicationException exception,
+			T exception,
 			IngestionFailure failure
 	) {
 		try {
+			if (!exception.retryAfter().isZero()) {
+				return archiveLedger.markFailed(
+						archive.idempotencyKey(),
+						attempt.token(),
+						failure,
+						exception.retryAfter());
+			}
 			return archiveLedger.markFailed(
 					archive.idempotencyKey(),
 					attempt.token(),

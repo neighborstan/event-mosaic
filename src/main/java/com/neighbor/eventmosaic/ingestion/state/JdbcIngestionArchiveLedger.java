@@ -114,12 +114,18 @@ public class JdbcIngestionArchiveLedger implements IngestionArchiveLedger {
 	public AttemptTransitionResult markFailed(
 			String idempotencyKey,
 			UUID attemptToken,
-			IngestionFailure failure
+			IngestionFailure failure,
+			Duration retryAfter
 	) {
+		Objects.requireNonNull(retryAfter, "retryAfter must not be null");
+		if (retryAfter.isNegative()) {
+			throw new IllegalArgumentException("retryAfter must not be negative");
+		}
 		ArchiveTransition transition = archiveRepository.markFailed(
 				idempotencyKey,
 				attemptToken,
 				failure,
+				retryAfter,
 				clock.instant()
 		);
 		recalculateApplied(transition);
@@ -135,6 +141,12 @@ public class JdbcIngestionArchiveLedger implements IngestionArchiveLedger {
 	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
 	public Optional<IngestionRunState> findRunByUpdateTime(Instant sourceUpdateTime) {
 		return runRepository.findByUpdateTime(sourceUpdateTime).map(this::loadRun);
+	}
+
+	@Override
+	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+	public Optional<IngestionRunState> findLatestRun() {
+		return runRepository.findLatest().map(this::loadRun);
 	}
 
 	@Override

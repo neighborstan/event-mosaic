@@ -2,6 +2,7 @@ package com.neighbor.eventmosaic.ingestion.error;
 
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorContext;
 import com.neighbor.eventmosaic.ingestion.api.IngestionFailure;
+import java.time.Duration;
 
 /**
  * Предоставляет безопасные module-specific детали для проекции ожидаемого
@@ -27,6 +28,16 @@ public interface IngestionFailureContract {
 	 */
 	default IngestionErrorContext context() {
 		return IngestionErrorContext.empty();
+	}
+
+	/**
+	 * Возвращает корректную серверную нижнюю границу следующего retry.
+	 * Окончательное значение всегда ограничивает application retry policy.
+	 *
+	 * @return Retry-After либо zero при отсутствии подсказки
+	 */
+	default Duration retryAfter() {
+		return Duration.ZERO;
 	}
 
 	/**

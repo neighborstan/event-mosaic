@@ -72,12 +72,22 @@ public class JdbcSourcePollLedger implements SourcePollLedger {
 	public AttemptTransitionResult markFailed(
 			String sourceName,
 			UUID attemptToken,
-			IngestionFailure failure
+			IngestionFailure failure,
+			Duration retryAfter
 	) {
 		requireSourceName(sourceName);
 		Objects.requireNonNull(attemptToken, "attemptToken must not be null");
 		Objects.requireNonNull(failure, "failure must not be null");
-		return repository.markFailed(sourceName, attemptToken, failure, clock.instant());
+		Objects.requireNonNull(retryAfter, "retryAfter must not be null");
+		if (retryAfter.isNegative()) {
+			throw new IllegalArgumentException("retryAfter must not be negative");
+		}
+		return repository.markFailed(
+				sourceName,
+				attemptToken,
+				failure,
+				retryAfter,
+				clock.instant());
 	}
 
 	@Override

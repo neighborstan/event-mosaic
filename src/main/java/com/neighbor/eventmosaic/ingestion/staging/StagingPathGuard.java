@@ -2,10 +2,13 @@ package com.neighbor.eventmosaic.ingestion.staging;
 
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.error.StagingStorageException;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.time.Duration;
 
 /**
  * Создает staging directories без перехода через symbolic links ниже root.
@@ -23,6 +26,15 @@ final class StagingPathGuard {
 	 * @throws IOException при ошибке filesystem operation
 	 */
 	static void prepareDirectory(Path root, Path directory) throws IOException {
+		prepareDirectory(root, directory, OperationBudget.start(Duration.ofDays(1)));
+	}
+
+	static void prepareDirectory(
+			Path root,
+			Path directory,
+			OperationBudget budget
+	) throws IOException {
+		throwIfExpired(budget);
 		Files.createDirectories(root);
 		if (Files.isSymbolicLink(root) || !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
 			throw new StagingStorageException(IngestionErrorCode.STAGING_PATH_REJECTED);
@@ -30,6 +42,7 @@ final class StagingPathGuard {
 
 		Path current = root;
 		for (Path segment : root.relativize(directory)) {
+			throwIfExpired(budget);
 			current = current.resolve(segment);
 			if (Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
 				if (Files.isSymbolicLink(current)
@@ -43,6 +56,12 @@ final class StagingPathGuard {
 
 		if (!directory.toRealPath().startsWith(root.toRealPath())) {
 			throw new StagingStorageException(IngestionErrorCode.STAGING_PATH_REJECTED);
+		}
+	}
+
+	private static void throwIfExpired(OperationBudget budget) {
+		if (!budget.hasRemaining()) {
+			throw new OperationDeadlineExceededException();
 		}
 	}
 }

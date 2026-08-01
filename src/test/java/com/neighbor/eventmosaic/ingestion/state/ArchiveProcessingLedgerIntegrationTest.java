@@ -405,9 +405,12 @@ class ArchiveProcessingLedgerIntegrationTest {
 					assertThat(state.attempt().retry().consecutiveRetryableFailures())
 							.isEqualTo(1);
 					assertThat(state.attempt().retry().retryNotBefore())
-							.isEqualTo(FixedClockTestConfiguration.NOW);
+							.isEqualTo(FixedClockTestConfiguration.NOW.plus(Duration.ofMinutes(1)));
 				});
 
+		assertThat(claimResult(mentions, activeTarget(mentions.archiveType())).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
+		makeProcessingRetryDue(mentions);
 		ArchiveProcessingAttempt retry = claim(mentions);
 		assertThat(retry.attemptCount()).isEqualTo(2);
 		assertThat(processingLedger.findByArchiveIdempotencyKey(mentions.idempotencyKey())
@@ -688,6 +691,9 @@ class ArchiveProcessingLedgerIntegrationTest {
 					assertThat(state.completedAt()).isNull();
 					assertThat(state.failure().failure()).isEqualTo(mismatch);
 				});
+		assertThat(claimResult(events, currentTarget).status())
+				.isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
+		makeProcessingRetryDue(events);
 		ArchiveProcessingAttempt reindex = claimResult(events, currentTarget)
 				.claimedAttempt().orElseThrow();
 		assertThat(reindex.attemptCount()).isEqualTo(2);
@@ -1056,6 +1062,17 @@ class ArchiveProcessingLedgerIntegrationTest {
 				.param(
 						"leaseExpiresAt",
 						Timestamp.from(FixedClockTestConfiguration.NOW.minusSeconds(1)))
+				.param("archiveIdempotencyKey", archive.idempotencyKey())
+				.update();
+	}
+
+	private void makeProcessingRetryDue(DiscoveredArchive archive) {
+		jdbcClient.sql("""
+				update ingestion_archive_processing
+				set retry_not_before = :retryNotBefore
+				where archive_idempotency_key = :archiveIdempotencyKey
+				""")
+				.param("retryNotBefore", Timestamp.from(FixedClockTestConfiguration.NOW))
 				.param("archiveIdempotencyKey", archive.idempotencyKey())
 				.update();
 	}

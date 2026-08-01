@@ -5,9 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteResponseRejectedException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -19,6 +21,7 @@ import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -103,6 +106,40 @@ class GdeltManifestClientTest {
 	}
 
 	@Test
+	@DisplayName("Transient status передает корректный Retry-After в retry policy")
+	void transientStatusCarriesRetryAfter() {
+		server.createContext("/manifest", exchange -> {
+			exchange.getResponseHeaders().add("Retry-After", "120");
+			exchange.sendResponseHeaders(429, -1);
+			exchange.close();
+		});
+
+		assertThatExceptionOfType(RemoteSourceAccessException.class)
+				.isThrownBy(() -> client(1024).fetchLatestManifest())
+				.satisfies(exception -> {
+					assertThat(exception.context().httpStatus()).isEqualTo(429);
+					assertThat(exception.retryAfter()).isEqualTo(Duration.ofMinutes(2));
+				});
+	}
+
+	@Test
+	@DisplayName("Исчерпанный cycle budget запрещает новый HTTP request")
+	void expiredCycleBudgetPreventsRequest() {
+		AtomicInteger requests = new AtomicInteger();
+		server.createContext("/manifest", exchange -> {
+			requests.incrementAndGet();
+			respond(exchange, 200, "unexpected");
+		});
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(1), nanoTime::get);
+		nanoTime.set(Duration.ofSeconds(1).toNanos());
+
+		assertThatExceptionOfType(OperationDeadlineExceededException.class)
+				.isThrownBy(() -> client(1024).fetchLatestManifest(budget));
+		assertThat(requests).hasValue(0);
+	}
+
+	@Test
 	@DisplayName("Тело сверх лимита отклоняется даже без Content-Length")
 	void rejectsBodyThatExceedsLimitEvenWithoutContentLengthHint() {
 		server.createContext("/manifest", exchange -> {
@@ -165,6 +202,32 @@ class GdeltManifestClientTest {
 					IngestionErrorCode.MANIFEST_TIMEOUT,
 					RemoteSourceAccessException.class);
 		} finally {
+			releaseResponse.countDown();
+		}
+	}
+
+	@Test
+	@DisplayName("Cycle deadline во время request получает отдельный typed outcome")
+	void classifiesCycleDeadlineDuringRequest() {
+		CountDownLatch releaseResponse = new CountDownLatch(1);
+		server.createContext("/manifest", exchange -> {
+			try {
+				releaseResponse.await(5, TimeUnit.SECONDS);
+			}
+			catch (InterruptedException _) {
+				Thread.currentThread().interrupt();
+			}
+			finally {
+				exchange.close();
+			}
+		});
+
+		try {
+			assertThatExceptionOfType(OperationDeadlineExceededException.class)
+					.isThrownBy(() -> client(1024, Duration.ofSeconds(5))
+							.fetchLatestManifest(OperationBudget.start(Duration.ofMillis(100))));
+		}
+		finally {
 			releaseResponse.countDown();
 		}
 	}

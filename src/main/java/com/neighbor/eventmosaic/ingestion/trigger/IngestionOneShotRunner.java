@@ -39,7 +39,7 @@ public class IngestionOneShotRunner implements ApplicationRunner {
 	@Override
 	public void run(ApplicationArguments arguments) {
 		try {
-			pipelineService.runLatestUpdate();
+			pipelineService.runOneShot();
 		} catch (ApplicationException exception) {
 			throw new IllegalStateException(
 					exception.errorCode().code() + ": " + exception.errorCode().safeMessage());

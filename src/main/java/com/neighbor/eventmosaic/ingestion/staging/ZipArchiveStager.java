@@ -8,7 +8,9 @@ import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.error.ArchiveContentViolationException;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruption;
+import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.StagingStorageException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.FileAlreadyExistsException;
@@ -17,6 +19,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
@@ -88,11 +91,27 @@ public class ZipArchiveStager {
 			DownloadedArchive downloadedArchive,
 			StagingPaths paths
 	) {
+		return stage(
+				attempt,
+				downloadedArchive,
+				paths,
+				OperationBudget.start(Duration.ofDays(1)));
+	}
+
+	/** Извлекает CSV в пределах общего monotonic cycle budget. */
+	public StagedArchive stage(
+			ArchiveAttempt attempt,
+			DownloadedArchive downloadedArchive,
+			StagingPaths paths,
+			OperationBudget budget
+	) {
 		IngestionInterruption.throwIfRequested();
+		throwIfExpired(budget);
 		try {
 			StagingPathGuard.prepareDirectory(
 					paths.root(),
-					paths.csvPath().getParent());
+					paths.csvPath().getParent(),
+					budget);
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
 			throw new StagingStorageException(IngestionErrorCode.FILESYSTEM_IO_FAILURE, exception);
@@ -103,13 +122,13 @@ public class ZipArchiveStager {
 		try {
 			Files.deleteIfExists(paths.csvPartPath());
 			if (Files.exists(paths.csvPath(), LinkOption.NOFOLLOW_LINKS)) {
-				verifyExistingCsv(attempt, downloadedArchive.path(), paths.csvPath());
+				verifyExistingCsv(attempt, downloadedArchive.path(), paths.csvPath(), budget);
 				return staged(downloadedArchive, paths.csvPath());
 			}
-			extractExpectedCsv(attempt, downloadedArchive.path(), paths);
+			extractExpectedCsv(attempt, downloadedArchive.path(), paths, budget);
 			IngestionInterruption.throwIfRequested();
 			if (!publishAtomically(paths.csvPartPath(), paths.csvPath())) {
-				verifyExistingCsv(attempt, downloadedArchive.path(), paths.csvPath());
+				verifyExistingCsv(attempt, downloadedArchive.path(), paths.csvPath(), budget);
 			}
 			return staged(downloadedArchive, paths.csvPath());
 		} catch (ZipException exception) {
@@ -124,9 +143,14 @@ public class ZipArchiveStager {
 		}
 	}
 
-	private void extractExpectedCsv(ArchiveAttempt attempt, Path archivePath, StagingPaths paths) throws IOException {
+	private void extractExpectedCsv(
+			ArchiveAttempt attempt,
+			Path archivePath,
+			StagingPaths paths,
+			OperationBudget budget
+	) throws IOException {
 		try (OutputStream output = Files.newOutputStream(paths.csvPartPath(), StandardOpenOption.CREATE_NEW)) {
-			inspectExpectedCsv(attempt, archivePath, paths.csvPath().getParent(), output);
+			inspectExpectedCsv(attempt, archivePath, paths.csvPath().getParent(), output, budget);
 		}
 	}
 
@@ -134,7 +158,8 @@ public class ZipArchiveStager {
 			ArchiveAttempt attempt,
 			Path archivePath,
 			Path dataRoot,
-			OutputStream output
+			OutputStream output,
+			OperationBudget budget
 	) throws IOException {
 		String expectedName = expectedCsvName(attempt);
 		int entryCount = 0;
@@ -143,17 +168,19 @@ public class ZipArchiveStager {
 		try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(archivePath))) {
 			while (true) {
 				IngestionInterruption.throwIfRequested();
+				throwIfExpired(budget);
 				ZipEntry entry = zip.getNextEntry();
 				if (entry == null) {
 					break;
 				}
 				entryCount++;
 				validateEntry(entryCount, entry, expectedName, dataRoot);
-				totalBytes = copyEntry(zip, output, digest, totalBytes);
+				totalBytes = copyEntry(zip, output, digest, totalBytes, budget);
 				zip.closeEntry();
 			}
 		}
 		IngestionInterruption.throwIfRequested();
+		throwIfExpired(budget);
 		if (entryCount != 1) {
 			throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_CONTENT_MISMATCH);
 		}
@@ -179,13 +206,16 @@ public class ZipArchiveStager {
 			ZipInputStream zip,
 			OutputStream output,
 			MessageDigest digest,
-			long totalBytes
+			long totalBytes,
+			OperationBudget budget
 	) throws IOException {
 		long entryBytes = 0;
 		byte[] buffer = new byte[BUFFER_SIZE];
 		while (true) {
 			IngestionInterruption.throwIfRequested();
+			throwIfExpired(budget);
 			int read = zip.read(buffer);
+			throwIfExpired(budget);
 			if (read == -1) {
 				return totalBytes;
 			}
@@ -215,8 +245,14 @@ public class ZipArchiveStager {
 		}
 	}
 
-	private void verifyExistingCsv(ArchiveAttempt attempt, Path archivePath, Path csvPath) {
+	private void verifyExistingCsv(
+			ArchiveAttempt attempt,
+			Path archivePath,
+			Path csvPath,
+			OperationBudget budget
+	) {
 		try {
+			throwIfExpired(budget);
 			if (!Files.isRegularFile(csvPath, LinkOption.NOFOLLOW_LINKS)) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
@@ -228,9 +264,10 @@ public class ZipArchiveStager {
 					attempt,
 					archivePath,
 					csvPath.getParent(),
-					OutputStream.nullOutputStream());
+					OutputStream.nullOutputStream(),
+					budget);
 			if (existingSize != expected.sizeBytes()
-					|| !Md5Checksum.calculate(csvPath).equals(expected.md5())) {
+					|| !Md5Checksum.calculate(csvPath, budget).equals(expected.md5())) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
 		} catch (ZipException exception) {
@@ -272,6 +309,12 @@ public class ZipArchiveStager {
 
 	private void deleteTemporary(Path path) {
 		TemporaryArtifactCleaner.delete(path, metrics, LOGGER);
+	}
+
+	private static void throwIfExpired(OperationBudget budget) {
+		if (!budget.hasRemaining()) {
+			throw new OperationDeadlineExceededException();
+		}
 	}
 
 	private record EntryFingerprint(long sizeBytes, String md5) {
