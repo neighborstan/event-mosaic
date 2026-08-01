@@ -3,6 +3,7 @@ package com.neighbor.eventmosaic.ingestion.maintenance;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -19,6 +20,7 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
+import com.neighbor.eventmosaic.indexing.api.CleanupBuildWriteOutcome;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
@@ -47,6 +49,10 @@ import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionR
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionRebuildPlan;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.staging.ZipArchiveStager;
+import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
+import com.neighbor.eventmosaic.processing.api.ArchiveProcessingFailure;
+import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgress;
+import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -114,6 +120,13 @@ class DefaultPartitionRebuildServiceFaultTest {
 				"new-mention-uuid");
 		when(lifecycleLedger.findGenerations(PARTITION_KEY))
 				.thenReturn(List.of(base, target));
+		when(lifecycleLedger.recordBuildWriteOutcome(
+				anyString(),
+				any(UUID.class),
+				anyLong(),
+				anyLong(),
+				any(CleanupBuildWriteOutcome.class)))
+				.thenReturn(IndexLifecycleTransitionResult.APPLIED);
 	}
 
 	@Test
@@ -139,6 +152,189 @@ class DefaultPartitionRebuildServiceFaultTest {
 				.satisfies(exception -> assertThat(exception.errorCode())
 						.isEqualTo(PartitionRebuildErrorCode.STALE_REBUILD_PLAN));
 		verify(lifecycleLedger, never()).startRebuild(any(), any(Duration.class));
+	}
+
+	@Test
+	@DisplayName("При ошибке перестроения прежние данные открываются для записи только после снятия блокировки")
+	void failedBuildUnfreezesBaseBeforeClosingOperation() {
+		IndexMaintenanceOperation expired = operation(
+				IndexMaintenancePhase.BUILDING,
+				4,
+				NOW.minusSeconds(1));
+		IndexMaintenanceOperation reclaimed = operation(
+				IndexMaintenancePhase.BUILDING,
+				5,
+				NOW.plus(Duration.ofMinutes(15)));
+		IndexMaintenanceOperation renewed = operation(
+				IndexMaintenancePhase.BUILDING,
+				6,
+				NOW.plus(Duration.ofMinutes(15)));
+		when(lifecycleLedger.findRecoverableOperation(PARTITION_KEY))
+				.thenReturn(Optional.of(expired));
+		when(lifecycleLedger.reclaimExpiredMaintenance(PARTITION_KEY, Duration.ofMinutes(15)))
+				.thenReturn(Optional.of(reclaimed));
+		when(lifecycleLedger.renewMaintenanceLease(
+				anyString(), any(UUID.class), anyLong(), anyLong(), any(Duration.class)))
+				.thenReturn(Optional.of(renewed));
+		when(lifecycleLedger.advancePhase(
+				anyString(),
+				any(UUID.class),
+				anyLong(),
+				anyLong(),
+				any(IndexMaintenancePhase.class),
+				any(IndexMaintenancePhase.class)))
+				.thenReturn(IndexLifecycleTransitionResult.APPLIED);
+		when(lifecycleLedger.completePreCutoverFailure(
+				anyString(), any(UUID.class), anyLong(), anyLong(), anyString()))
+				.thenReturn(IndexLifecycleTransitionResult.APPLIED);
+		when(elasticsearch.observeExactIndex(TARGET_NAMES.eventIndexName()))
+				.thenReturn(Optional.of(new ObservedIndex(
+						TARGET_NAMES.eventIndexName(), "new-event-uuid", false)));
+		when(elasticsearch.observeExactIndex(TARGET_NAMES.mentionIndexName()))
+				.thenReturn(Optional.of(new ObservedIndex(
+						TARGET_NAMES.mentionIndexName(), "new-mention-uuid", false)));
+		when(elasticsearch.observeExactIndex(BASE_NAMES.eventIndexName()))
+				.thenReturn(Optional.of(new ObservedIndex(
+						BASE_NAMES.eventIndexName(), "old-event-uuid", false)));
+		when(elasticsearch.observeExactIndex(BASE_NAMES.mentionIndexName()))
+				.thenReturn(Optional.of(new ObservedIndex(
+						BASE_NAMES.mentionIndexName(), "old-mention-uuid", false)));
+		when(archiveProcessor.process(any(), any()))
+				.thenReturn(ArchiveProcessingResult.failed(
+						GdeltArchiveKind.TRANSLATION_EVENTS,
+						ArchiveProcessingProgress.empty(),
+						new ArchiveProcessingFailure(
+								ArchiveProcessingErrorCode.INDEXING_OPERATION_FAILURE,
+								true,
+								null)));
+
+		assertThatExceptionOfType(PartitionRebuildException.class)
+				.isThrownBy(() -> service.execute(new PartitionRebuildCommand(
+						plan,
+						"local.operator",
+						"INDEX_RECEIPT_SURPLUS")))
+				.satisfies(exception -> assertThat(exception.errorCode())
+						.isEqualTo(PartitionRebuildErrorCode.REBUILD_PROCESSING_FAILED));
+
+		verify(elasticsearch).removeWriteBlock(anyList());
+		verify(elasticsearch, never()).cutoverAliases(any());
+		verify(elasticsearch, never()).readAliases();
+		verify(lifecycleLedger).completePreCutoverFailure(
+				anyString(), any(UUID.class), anyLong(), anyLong(), anyString());
+	}
+
+	@Test
+	@DisplayName("Неожиданное поколение в читаемом alias останавливает восстановление до переключения")
+	void unexpectedRepairTargetStopsBeforeAliasMutation() {
+		IndexMaintenanceOperation expired = operation(
+				IndexMaintenancePhase.CUTOVER_REQUESTED,
+				4,
+				NOW.minusSeconds(1));
+		IndexMaintenanceOperation reclaimed = operation(
+				IndexMaintenancePhase.CUTOVER_REQUESTED,
+				5,
+				NOW.plus(Duration.ofMinutes(15)));
+		when(lifecycleLedger.findRecoverableOperation(PARTITION_KEY))
+				.thenReturn(Optional.of(expired));
+		when(lifecycleLedger.reclaimExpiredMaintenance(PARTITION_KEY, Duration.ofMinutes(15)))
+				.thenReturn(Optional.of(reclaimed));
+		when(elasticsearch.readAliases()).thenReturn(new AliasMembership(
+				Set.of("gdelt-events-v1-p20260727-g0003"),
+				Set.of(BASE_NAMES.mentionIndexName())));
+
+		assertThatExceptionOfType(PartitionRebuildException.class)
+				.isThrownBy(() -> service.execute(new PartitionRebuildCommand(
+						plan,
+						"local.operator",
+						"INDEX_RECEIPT_SURPLUS")))
+				.satisfies(exception -> assertThat(exception.errorCode())
+						.isEqualTo(PartitionRebuildErrorCode.REBUILD_ALIAS_CONFLICT));
+
+		verify(elasticsearch, never()).cutoverAliases(any());
+		verify(elasticsearch, never()).addStableAliases(
+				anyString(), anyBoolean(), anyString(), anyBoolean());
+		verify(lifecycleLedger, never()).completeObservedCutover(
+				anyString(),
+				any(UUID.class),
+				anyLong(),
+				anyLong(),
+				any(BaseGenerationDisposition.class),
+				anyList());
+	}
+
+	@Test
+	@DisplayName("Тот же владелец дополняет частично переключенную пару читаемых aliases")
+	void partialRepairAddCompletesUnderSameToken() {
+		IndexMaintenanceOperation expired = operation(
+				IndexMaintenancePhase.CUTOVER_REQUESTED,
+				4,
+				NOW.minusSeconds(1));
+		IndexMaintenanceOperation reclaimed = operation(
+				IndexMaintenancePhase.CUTOVER_REQUESTED,
+				5,
+				NOW.plus(Duration.ofMinutes(15)));
+		IndexMaintenanceOperation renewedBeforeAdd = operation(
+				IndexMaintenancePhase.CUTOVER_REQUESTED,
+				6,
+				NOW.plus(Duration.ofMinutes(15)));
+		IndexMaintenanceOperation renewedBeforeCompletion = operation(
+				IndexMaintenancePhase.CUTOVER_OBSERVED,
+				8,
+				NOW.plus(Duration.ofMinutes(15)));
+		when(lifecycleLedger.findRecoverableOperation(PARTITION_KEY))
+				.thenReturn(Optional.of(expired));
+		when(lifecycleLedger.reclaimExpiredMaintenance(PARTITION_KEY, Duration.ofMinutes(15)))
+				.thenReturn(Optional.of(reclaimed));
+		when(lifecycleLedger.renewMaintenanceLease(
+				anyString(), any(UUID.class), anyLong(), anyLong(), any(Duration.class)))
+				.thenReturn(Optional.of(renewedBeforeAdd))
+				.thenReturn(Optional.of(renewedBeforeCompletion));
+		when(lifecycleLedger.advancePhase(
+				anyString(),
+				any(UUID.class),
+				anyLong(),
+				anyLong(),
+				any(IndexMaintenancePhase.class),
+				any(IndexMaintenancePhase.class)))
+				.thenReturn(IndexLifecycleTransitionResult.APPLIED);
+		when(lifecycleLedger.completeObservedCutover(
+				anyString(),
+				any(UUID.class),
+				anyLong(),
+				anyLong(),
+				any(BaseGenerationDisposition.class),
+				anyList()))
+				.thenReturn(IndexLifecycleTransitionResult.APPLIED);
+		AliasMembership completeTargetPair = new AliasMembership(
+				Set.of(TARGET_NAMES.eventIndexName()),
+				Set.of(TARGET_NAMES.mentionIndexName()));
+		when(elasticsearch.readAliases())
+				.thenReturn(new AliasMembership(
+						Set.of(TARGET_NAMES.eventIndexName()),
+						Set.of()))
+				.thenReturn(completeTargetPair)
+				.thenReturn(completeTargetPair);
+		when(elasticsearch.observeExactIndex(BASE_NAMES.eventIndexName()))
+				.thenReturn(Optional.of(new ObservedIndex(
+						BASE_NAMES.eventIndexName(), "old-event-uuid", true)));
+		when(elasticsearch.observeExactIndex(BASE_NAMES.mentionIndexName()))
+				.thenReturn(Optional.of(new ObservedIndex(
+						BASE_NAMES.mentionIndexName(), "old-mention-uuid", true)));
+		when(elasticsearch.verifyReceipt(any())).thenReturn(matchedReceipt());
+
+		var result = service.execute(new PartitionRebuildCommand(
+				plan,
+				"local.operator",
+				"INDEX_RECEIPT_SURPLUS"));
+
+		assertThat(result.outcome()).isEqualTo(PartitionRebuildOutcome.COMPLETED);
+		assertThat(result.operationToken()).isEqualTo(reclaimed.token());
+		verify(elasticsearch).addStableAliases(
+				TARGET_NAMES.eventIndexName(),
+				false,
+				TARGET_NAMES.mentionIndexName(),
+				true);
+		verify(elasticsearch, never()).cutoverAliases(any());
 	}
 
 	@Test
@@ -514,6 +710,8 @@ class DefaultPartitionRebuildServiceFaultTest {
 				new BackendDataProperties.Cleanup(
 						Duration.ofHours(24),
 						Duration.ofDays(7),
+						Duration.ofMinutes(15),
+						Duration.ofMinutes(15),
 						false));
 	}
 }

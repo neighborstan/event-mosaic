@@ -6,8 +6,8 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Выполняет только exact-name операции Elasticsearch, необходимые для
- * подтверждаемого rebuild одной logical partition.
+ * Выполняет только exact-name операции Elasticsearch для подтверждаемого
+ * rebuild и явной очистки одной logical partition.
  */
 public interface IndexMaintenanceGateway {
 
@@ -16,6 +16,17 @@ public interface IndexMaintenanceGateway {
 
 	/** Возвращает фактическую identity и write-block exact index. */
 	Optional<ObservedIndex> observeExactIndex(String indexName);
+
+	/**
+	 * Возвращает фактическую identity и полный набор aliases exact index. В
+	 * отличие от {@link #readAliases()} результат не ограничен двумя стабильными
+	 * read aliases и позволяет безопасно остановить destructive cleanup при
+	 * любом дополнительном membership.
+	 */
+	Optional<ExactIndexAliasMembership> observeAllAliasesForExactIndex(String indexName);
+
+	/** Возвращает фактический total store size exact UUID без alias или wildcard. */
+	long exactIndexStoreBytes(ExactIndexTarget target);
 
 	/** Создает exact physical index либо подтверждает уже существующий. */
 	void createExactIndex(String indexName);
@@ -46,6 +57,14 @@ public interface IndexMaintenanceGateway {
 	/** Выполняет один exact remove/add aliases request. */
 	void cutoverAliases(AliasCutover cutover);
 
+	/**
+	 * Удаляет один exact physical index после повторной проверки UUID и
+	 * отсутствия любых aliases. Отсутствующий target и несовпавший UUID
+	 * отклоняются, чтобы вызывающий cleanup protocol сначала согласовал
+	 * фактическое состояние.
+	 */
+	void deleteExactIndex(ExactIndexTarget target);
+
 	/** Возвращает минимально доступное место среди Elasticsearch data nodes. */
 	long minimumAvailableDiskBytes();
 
@@ -65,6 +84,22 @@ public interface IndexMaintenanceGateway {
 		public ObservedIndex {
 			requireExact(indexName, "indexName");
 			requireExact(indexUuid, "indexUuid");
+		}
+	}
+
+	/** Фактическая identity exact index и все связанные с ним aliases. */
+	record ExactIndexAliasMembership(
+			String indexName,
+			String indexUuid,
+			Set<String> aliases
+	) {
+
+		/** Проверяет exact identity и сохраняет immutable alias set. */
+		public ExactIndexAliasMembership {
+			requireExact(indexName, "indexName");
+			requireExact(indexUuid, "indexUuid");
+			aliases = Set.copyOf(Objects.requireNonNull(aliases, "aliases must not be null"));
+			aliases.forEach(alias -> requireExact(alias, "alias"));
 		}
 	}
 

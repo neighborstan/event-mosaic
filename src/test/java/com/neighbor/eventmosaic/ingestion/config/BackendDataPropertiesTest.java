@@ -1,5 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.config;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -23,6 +24,52 @@ class BackendDataPropertiesTest {
 		assertThatThrownBy(() -> properties(true, Duration.ofMinutes(15)))
 				.isInstanceOf(IllegalArgumentException.class)
 				.hasMessageContaining("automaticDeletionEnabled");
+	}
+
+	@Test
+	@DisplayName("Сохраняет окна проверки и сроки подтвержденной команды очистки")
+	void keepsCleanupDefaultShape() {
+		BackendDataProperties.Cleanup cleanup = cleanup(false);
+
+		assertThat(cleanup.orphanBuildingAge()).isEqualTo(Duration.ofHours(24));
+		assertThat(cleanup.supersededAge()).isEqualTo(Duration.ofDays(7));
+		assertThat(cleanup.planTtl()).isEqualTo(Duration.ofMinutes(15));
+		assertThat(cleanup.ownershipLease()).isEqualTo(Duration.ofMinutes(15));
+		assertThat(cleanup.automaticDeletionEnabled()).isFalse();
+	}
+
+	@Test
+	@DisplayName("Отклоняет неположительный срок плана очистки")
+	void rejectsNonPositiveCleanupPlanTtl() {
+		assertThatThrownBy(() -> cleanup(Duration.ZERO, Duration.ofMinutes(15), false))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("planTtl");
+	}
+
+	@Test
+	@DisplayName("Отклоняет неположительный срок владения очисткой")
+	void rejectsNonPositiveCleanupOwnershipLease() {
+		assertThatThrownBy(() -> cleanup(
+				Duration.ofMinutes(15),
+				Duration.ofSeconds(-1),
+				false))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("ownershipLease");
+	}
+
+	@Test
+	@DisplayName("Срок владения очисткой должен превышать общий deadline операции")
+	void rejectsCleanupLeaseNotExceedingOperationDeadline() {
+		assertThatThrownBy(() -> new BackendDataProperties(
+				Duration.ofDays(7),
+				retry(Duration.ofMinutes(15)),
+				Duration.ofMinutes(12),
+				500,
+				diskPressure(),
+				rebuild(),
+				cleanup(Duration.ofMinutes(15), Duration.ofMinutes(12), false)))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("cleanup ownershipLease");
 	}
 
 	@Test
@@ -85,9 +132,22 @@ class BackendDataPropertiesTest {
 	}
 
 	private static BackendDataProperties.Cleanup cleanup(boolean automaticDeletionEnabled) {
+		return cleanup(
+				Duration.ofMinutes(15),
+				Duration.ofMinutes(15),
+				automaticDeletionEnabled);
+	}
+
+	private static BackendDataProperties.Cleanup cleanup(
+			Duration planTtl,
+			Duration ownershipLease,
+			boolean automaticDeletionEnabled
+	) {
 		return new BackendDataProperties.Cleanup(
 				Duration.ofHours(24),
 				Duration.ofDays(7),
+				planTtl,
+				ownershipLease,
 				automaticDeletionEnabled);
 	}
 }

@@ -1003,8 +1003,13 @@ class ArchiveProcessingLedgerIntegrationTest {
 				    phase,
 				    expected_partition_state_version,
 				    cleanup_generation_id,
+				    cleanup_generation_state_version,
 				    lease_expires_at,
 				    heartbeat_at,
+				    plan_fingerprint,
+				    plan_expires_at,
+				    actor,
+				    reason_code,
 				    created_at,
 				    updated_at
 				)
@@ -1015,8 +1020,17 @@ class ArchiveProcessingLedgerIntegrationTest {
 				    'PLANNED',
 				    :partitionStateVersion,
 				    :cleanupGenerationId,
+				    (
+				        select state_version
+				        from index_generations
+				        where id = :cleanupGenerationId
+				    ),
 				    :leaseExpiresAt,
 				    :heartbeatAt,
+				    :planFingerprint,
+				    :planExpiresAt,
+				    :actor,
+				    :reasonCode,
 				    :createdAt,
 				    :updatedAt
 				)
@@ -1029,6 +1043,12 @@ class ArchiveProcessingLedgerIntegrationTest {
 						"leaseExpiresAt",
 						Timestamp.from(FixedClockTestConfiguration.NOW.plus(Duration.ofMinutes(10))))
 				.param("heartbeatAt", Timestamp.from(FixedClockTestConfiguration.NOW))
+				.param("planFingerprint", "f".repeat(64))
+				.param(
+						"planExpiresAt",
+						Timestamp.from(FixedClockTestConfiguration.NOW.plus(Duration.ofMinutes(5))))
+				.param("actor", "integration-test")
+				.param("reasonCode", "PROCESSING_BARRIER_TEST")
 				.param("createdAt", Timestamp.from(FixedClockTestConfiguration.NOW))
 				.param("updatedAt", Timestamp.from(FixedClockTestConfiguration.NOW))
 				.update();

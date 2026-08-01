@@ -40,7 +40,7 @@ class BackendDataSchemaIntegrationTest {
 	private JdbcClient jdbcClient;
 
 	@Test
-	@DisplayName("Чистая database получает единую target migration без pending изменений")
+	@DisplayName("Чистая database получает единую target baseline без pending изменений")
 	void cleanDatabaseMigratesToTargetSchema() {
 		// Given / When
 		List<String> tables = applicationTables();
@@ -51,13 +51,39 @@ class BackendDataSchemaIntegrationTest {
 				select count(*)
 				from flyway_schema_history
 				where type = 'SQL' and success
-				""").query(Integer.class).single()).isEqualTo(1);
+				""").query(Integer.class).single()).isOne();
 		assertThat(jdbcClient.sql("""
 				select count(*)
 				from flyway_schema_history
 				where not success
 				""").query(Integer.class).single()).isZero();
 		assertThat(tables).containsExactlyElementsOf(TARGET_TABLES);
+	}
+
+	@Test
+	@DisplayName("Cleanup fencing schema хранит поколения и conservative write evidence")
+	void cleanupFencingSchemaContainsDurableEvidence() {
+		// Given / When
+		List<String> operationColumns = jdbcClient.sql("""
+				select column_name
+				from information_schema.columns
+				where table_schema = current_schema()
+				  and table_name = 'index_maintenance_operations'
+				order by column_name
+				""").query(String.class).list();
+
+		// Then
+		assertThat(operationColumns).contains(
+				"build_write_outcome",
+				"cleanup_generation_state_version",
+				"cleanup_protected_generation_state_version");
+		assertThat(jdbcClient.sql("""
+				select column_default
+				from information_schema.columns
+				where table_schema = current_schema()
+				  and table_name = 'index_maintenance_operations'
+				  and column_name = 'build_write_outcome'
+				""").query(String.class).single()).contains("NONE");
 	}
 
 	@Test

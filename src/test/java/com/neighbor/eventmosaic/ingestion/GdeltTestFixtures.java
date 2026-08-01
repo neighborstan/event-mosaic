@@ -99,6 +99,8 @@ public final class GdeltTestFixtures {
 				new BackendDataProperties.Cleanup(
 						Duration.ofHours(24),
 						Duration.ofDays(7),
+						Duration.ofMinutes(15),
+						Duration.ofMinutes(15),
 						false));
 	}
 }

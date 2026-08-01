@@ -53,6 +53,10 @@ public record BackendDataProperties(
 					"rebuild ownershipLease must exceed operationDeadline");
 		}
 		Objects.requireNonNull(cleanup, "cleanup must not be null");
+		if (cleanup.ownershipLease().compareTo(operationDeadline) <= 0) {
+			throw new IllegalArgumentException(
+					"cleanup ownershipLease must exceed operationDeadline");
+		}
 	}
 
 	/**
@@ -137,11 +141,15 @@ public record BackendDataProperties(
 	 *
 	 * @param orphanBuildingAge возраст BUILDING без heartbeat для inspect
 	 * @param supersededAge возраст SUPERSEDED после cutover для inspect
+	 * @param planTtl срок действия read-only cleanup plan
+	 * @param ownershipLease срок lease неизменного cleanup owner
 	 * @param automaticDeletionEnabled запрещенный automatic delete switch
 	 */
 	public record Cleanup(
 			@DefaultValue("24h") @NotNull Duration orphanBuildingAge,
 			@DefaultValue("7d") @NotNull Duration supersededAge,
+			@DefaultValue("15m") @NotNull Duration planTtl,
+			@DefaultValue("15m") @NotNull Duration ownershipLease,
 			@DefaultValue("false") boolean automaticDeletionEnabled
 	) {
 
@@ -149,6 +157,8 @@ public record BackendDataProperties(
 		public Cleanup {
 			requirePositive(orphanBuildingAge, "orphanBuildingAge");
 			requirePositive(supersededAge, "supersededAge");
+			requirePositive(planTtl, "planTtl");
+			requirePositive(ownershipLease, "ownershipLease");
 			if (automaticDeletionEnabled) {
 				throw new IllegalArgumentException("automaticDeletionEnabled must remain false");
 			}

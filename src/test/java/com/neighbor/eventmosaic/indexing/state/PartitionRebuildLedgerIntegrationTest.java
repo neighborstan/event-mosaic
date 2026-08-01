@@ -9,6 +9,7 @@ import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
 import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
+import com.neighbor.eventmosaic.indexing.api.CleanupBuildWriteOutcome;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
@@ -218,6 +219,82 @@ class PartitionRebuildLedgerIntegrationTest {
 				.containsExactly(IndexGenerationStatus.ACTIVE);
 	}
 
+	@Test
+	@DisplayName("Потерянное текущее поколение перестраивается при наличии прежней резервной копии")
+	void repairsMissingCurrentWithExistingSupersededGeneration() {
+		registerPartition();
+		completeInitialPromotion();
+		IndexMaintenanceOperation firstRebuild = lifecycleLedger.startMaintenance(
+				PARTITION_KEY,
+				IndexMaintenanceType.REBUILD,
+				names(2),
+				LEASE).orElseThrow();
+		firstRebuild = advance(firstRebuild, IndexMaintenancePhase.FREEZE_REQUESTED);
+		firstRebuild = advance(firstRebuild, IndexMaintenancePhase.FROZEN);
+		firstRebuild = advance(firstRebuild, IndexMaintenancePhase.BUILDING);
+		firstRebuild = recordUuids(firstRebuild, "event-uuid-g2", "mention-uuid-g2");
+		firstRebuild = advance(firstRebuild, IndexMaintenancePhase.VERIFIED);
+		firstRebuild = advance(firstRebuild, IndexMaintenancePhase.CUTOVER_REQUESTED);
+		firstRebuild = advance(firstRebuild, IndexMaintenancePhase.CUTOVER_OBSERVED);
+		assertThat(lifecycleLedger.completeObservedCutover(
+				PARTITION_KEY,
+				firstRebuild.token(),
+				firstRebuild.partitionVersion(),
+				firstRebuild.operationVersion()))
+				.isEqualTo(IndexLifecycleTransitionResult.APPLIED);
+
+		ActiveIndexTargets missingCurrent = lifecycleLedger.findActiveTargets(PARTITION_KEY)
+				.orElseThrow();
+		List<ArchiveReceiptBinding> receipts = createIndexedArchivePair(missingCurrent);
+		IndexMaintenanceOperation emergencyRepair = lifecycleLedger.startRebuild(
+				new IndexRebuildClaim(
+						PARTITION_KEY,
+						missingCurrent.partitionStateVersion(),
+						missingCurrent.generationId(),
+						missingCurrent.generationUuid(),
+						IndexRepairCause.MISSING_CURRENT,
+						names(3),
+						"e".repeat(64),
+						FixedClockTestConfiguration.NOW.plus(Duration.ofMinutes(30)),
+						"local.operator",
+						"MISSING_CURRENT"),
+				LEASE).orElseThrow();
+		emergencyRepair = advance(emergencyRepair, IndexMaintenancePhase.FREEZE_REQUESTED);
+		emergencyRepair = advance(emergencyRepair, IndexMaintenancePhase.FROZEN);
+		emergencyRepair = advance(emergencyRepair, IndexMaintenancePhase.BUILDING);
+		emergencyRepair = recordUuids(
+				emergencyRepair,
+				"event-uuid-g3",
+				"mention-uuid-g3");
+		emergencyRepair = advance(emergencyRepair, IndexMaintenancePhase.VERIFIED);
+		emergencyRepair = advance(emergencyRepair, IndexMaintenancePhase.CUTOVER_REQUESTED);
+		emergencyRepair = advance(emergencyRepair, IndexMaintenancePhase.CUTOVER_OBSERVED);
+		assertThat(lifecycleLedger.completeObservedCutover(
+				PARTITION_KEY,
+				emergencyRepair.token(),
+				emergencyRepair.partitionVersion(),
+				emergencyRepair.operationVersion(),
+				BaseGenerationDisposition.FAILED,
+				receipts)).isEqualTo(IndexLifecycleTransitionResult.APPLIED);
+
+		List<IndexGeneration> generations = lifecycleLedger.findGenerations(PARTITION_KEY);
+		assertThat(generations)
+				.extracting(IndexGeneration::generationNumber)
+				.containsExactly(1, 2, 3);
+		assertThat(generations)
+				.extracting(IndexGeneration::status)
+				.containsExactly(
+						IndexGenerationStatus.SUPERSEDED,
+						IndexGenerationStatus.FAILED,
+						IndexGenerationStatus.ACTIVE);
+		assertThat(lifecycleLedger.findPartition(PARTITION_KEY).orElseThrow())
+				.satisfies(partition -> {
+					assertThat(partition.activeGenerationId())
+							.isEqualTo(generations.getLast().id());
+					assertThat(partition.repairCause()).isNull();
+				});
+	}
+
 	private void registerPartition() {
 		lifecycleLedger.registerPartition(new IndexPartitionDefinition(
 				PARTITION_KEY,
@@ -390,6 +467,16 @@ class PartitionRebuildLedgerIntegrationTest {
 			IndexMaintenanceOperation operation,
 			IndexMaintenancePhase next
 	) {
+		if (operation.type() == IndexMaintenanceType.REBUILD
+				&& operation.phase() == IndexMaintenancePhase.BUILDING
+				&& next == IndexMaintenancePhase.VERIFIED) {
+			operation = recordBuildWriteOutcome(
+					operation, CleanupBuildWriteOutcome.UNKNOWN);
+			operation = recordBuildWriteOutcome(
+					operation, CleanupBuildWriteOutcome.PARTIAL);
+			operation = recordBuildWriteOutcome(
+					operation, CleanupBuildWriteOutcome.COMPLETED);
+		}
 		assertThat(lifecycleLedger.advancePhase(
 				PARTITION_KEY,
 				operation.token(),
@@ -397,6 +484,19 @@ class PartitionRebuildLedgerIntegrationTest {
 				operation.operationVersion(),
 				operation.phase(),
 				next)).isEqualTo(IndexLifecycleTransitionResult.APPLIED);
+		return lifecycleLedger.findRecoverableOperation(PARTITION_KEY).orElseThrow();
+	}
+
+	private IndexMaintenanceOperation recordBuildWriteOutcome(
+			IndexMaintenanceOperation operation,
+			CleanupBuildWriteOutcome outcome
+	) {
+		assertThat(lifecycleLedger.recordBuildWriteOutcome(
+				PARTITION_KEY,
+				operation.token(),
+				operation.partitionVersion(),
+				operation.operationVersion(),
+				outcome)).isEqualTo(IndexLifecycleTransitionResult.APPLIED);
 		return lifecycleLedger.findRecoverableOperation(PARTITION_KEY).orElseThrow();
 	}
 

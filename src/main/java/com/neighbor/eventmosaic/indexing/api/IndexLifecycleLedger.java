@@ -81,6 +81,20 @@ public interface IndexLifecycleLedger {
 	);
 
 	/**
+	 * Монотонно повышает durable evidence внешней записи BUILDING generation.
+	 * Повторный вызов после restart безопасен и тоже продвигает operation version.
+	 *
+	 * @return APPLIED либо OWNERSHIP_LOST для stale token/version/lease
+	 */
+	IndexLifecycleTransitionResult recordBuildWriteOutcome(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			CleanupBuildWriteOutcome minimumOutcome
+	);
+
+	/**
 	 * Условно продвигает resumable operation на одну допустимую фазу.
 	 *
 	 * @return APPLIED либо OWNERSHIP_LOST для stale phase/token/version

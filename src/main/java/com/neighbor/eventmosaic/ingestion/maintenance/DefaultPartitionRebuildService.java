@@ -6,6 +6,7 @@ import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
+import com.neighbor.eventmosaic.indexing.api.CleanupBuildWriteOutcome;
 import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
@@ -448,6 +449,7 @@ final class DefaultPartitionRebuildService implements PartitionRebuildService {
 					case BUILDING -> {
 						ActiveIndexTargets targets = rebuildShadow(command.plan(), owner);
 						verifyAllReceipts(command.plan(), targets);
+						owner.recordBuildWriteOutcome(CleanupBuildWriteOutcome.COMPLETED);
 						owner.advance(IndexMaintenancePhase.VERIFIED);
 					}
 					case VERIFIED -> {
@@ -566,6 +568,7 @@ final class DefaultPartitionRebuildService implements PartitionRebuildService {
 				new ExactIndexTarget(target.names().mentionIndexName(), mention.indexUuid()));
 		for (ArchivePlan archive : plan.archives()) {
 			owner.renew();
+			owner.recordBuildWriteOutcome(CleanupBuildWriteOutcome.UNKNOWN);
 			ArchiveProcessingResult result = archiveProcessor.process(
 					new ArchiveProcessingRequest(
 							archive.kind(),
@@ -586,6 +589,7 @@ final class DefaultPartitionRebuildService implements PartitionRebuildService {
 							archive.expectedIdentityDigest())) {
 				throw failure(PartitionRebuildErrorCode.REBUILD_PROCESSING_FAILED);
 			}
+			owner.recordBuildWriteOutcome(CleanupBuildWriteOutcome.PARTIAL);
 		}
 		return targets;
 	}
@@ -1127,6 +1131,23 @@ final class DefaultPartitionRebuildService implements PartitionRebuildService {
 					operation.operationVersion(),
 					eventUuid,
 					mentionUuid);
+			if (result != IndexLifecycleTransitionResult.APPLIED) {
+				throw failure(PartitionRebuildErrorCode.REBUILD_OWNERSHIP_LOST);
+			}
+			operation = copyOperation(
+					operation,
+					operation.phase(),
+					operation.operationVersion() + 1,
+					operation.leaseExpiresAt());
+		}
+
+		private void recordBuildWriteOutcome(CleanupBuildWriteOutcome minimumOutcome) {
+			IndexLifecycleTransitionResult result = lifecycleLedger.recordBuildWriteOutcome(
+					operation.partitionKey(),
+					operation.token(),
+					operation.partitionVersion(),
+					operation.operationVersion(),
+					minimumOutcome);
 			if (result != IndexLifecycleTransitionResult.APPLIED) {
 				throw failure(PartitionRebuildErrorCode.REBUILD_OWNERSHIP_LOST);
 			}

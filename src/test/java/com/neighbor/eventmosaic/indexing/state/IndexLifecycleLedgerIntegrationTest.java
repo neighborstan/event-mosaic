@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.neighbor.eventmosaic.FixedClockTestConfiguration;
 import com.neighbor.eventmosaic.PostgreSqlTestcontainersConfiguration;
+import com.neighbor.eventmosaic.indexing.api.CleanupBuildWriteOutcome;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationStatus;
@@ -196,6 +197,7 @@ class IndexLifecycleLedgerIntegrationTest {
 		rebuild = advance(rebuild, IndexMaintenancePhase.FREEZE_REQUESTED, IndexMaintenancePhase.FROZEN);
 		rebuild = advance(rebuild, IndexMaintenancePhase.FROZEN, IndexMaintenancePhase.BUILDING);
 		rebuild = recordUuids(rebuild, 2);
+		rebuild = recordCompletedWriteOutcome(rebuild);
 		rebuild = advance(rebuild, IndexMaintenancePhase.BUILDING, IndexMaintenancePhase.VERIFIED);
 		rebuild = advance(rebuild, IndexMaintenancePhase.VERIFIED, IndexMaintenancePhase.CUTOVER_REQUESTED);
 
@@ -336,6 +338,17 @@ class IndexLifecycleLedgerIntegrationTest {
 				operation.operationVersion(),
 				"event-uuid-g" + generation,
 				"mention-uuid-g" + generation))
+				.isEqualTo(IndexLifecycleTransitionResult.APPLIED);
+		return recoverOperation();
+	}
+
+	private IndexMaintenanceOperation recordCompletedWriteOutcome(IndexMaintenanceOperation operation) {
+		assertThat(lifecycleLedger.recordBuildWriteOutcome(
+				PARTITION_KEY,
+				operation.token(),
+				operation.partitionVersion(),
+				operation.operationVersion(),
+				CleanupBuildWriteOutcome.COMPLETED))
 				.isEqualTo(IndexLifecycleTransitionResult.APPLIED);
 		return recoverOperation();
 	}

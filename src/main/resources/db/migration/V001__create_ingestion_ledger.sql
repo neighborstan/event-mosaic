@@ -914,6 +914,9 @@ create table index_maintenance_operations (
     base_generation_id bigint,
     target_generation_id bigint,
     cleanup_generation_id bigint,
+    cleanup_generation_state_version bigint,
+    cleanup_protected_generation_state_version bigint,
+    build_write_outcome varchar(16) not null default 'NONE',
     operation_version bigint not null default 0,
     lease_expires_at timestamptz not null,
     heartbeat_at timestamptz not null,
@@ -959,6 +962,8 @@ create table index_maintenance_operations (
                 'FAILED'
             )
         ),
+    constraint ck_index_maintenance_operations_build_write_outcome
+        check (build_write_outcome in ('NONE', 'UNKNOWN', 'PARTIAL', 'COMPLETED')),
     constraint ck_index_maintenance_operations_versions
         check (
             expected_partition_state_version >= 0
@@ -979,6 +984,8 @@ create table index_maintenance_operations (
                 and base_generation_id is null
                 and target_generation_id is not null
                 and cleanup_generation_id is null
+                and cleanup_generation_state_version is null
+                and cleanup_protected_generation_state_version is null
                 and phase in (
                     'PLANNED',
                     'BUILDING',
@@ -995,6 +1002,8 @@ create table index_maintenance_operations (
                 and base_generation_id is not null
                 and target_generation_id is not null
                 and cleanup_generation_id is null
+                and cleanup_generation_state_version is null
+                and cleanup_protected_generation_state_version is null
                 and phase in (
                     'PLANNED',
                     'FREEZE_REQUESTED',
@@ -1011,9 +1020,26 @@ create table index_maintenance_operations (
             or
             (
                 operation_kind = 'CLEANUP'
-                and base_generation_id is null
                 and target_generation_id is null
                 and cleanup_generation_id is not null
+                and cleanup_generation_state_version is not null
+                and cleanup_generation_state_version >= 0
+                and (
+                    (
+                        base_generation_id is null
+                        and cleanup_protected_generation_state_version is null
+                    )
+                    or
+                    (
+                        base_generation_id is not null
+                        and cleanup_protected_generation_state_version is not null
+                        and cleanup_protected_generation_state_version >= 0
+                    )
+                )
+                and (
+                    phase in ('COMPLETED', 'FAILED')
+                    or plan_fingerprint is not null
+                )
                 and phase in (
                     'PLANNED',
                     'CLEANUP_PENDING',
@@ -1148,6 +1174,11 @@ create index ix_ingestion_archive_processing_lease
 create unique index uq_index_maintenance_operations_open_partition
     on index_maintenance_operations (partition_key)
     where phase not in ('COMPLETED', 'FAILED');
+
+create unique index uq_index_maintenance_operations_cleanup_generation
+    on index_maintenance_operations (cleanup_generation_id)
+    where operation_kind = 'CLEANUP'
+      and phase not in ('COMPLETED', 'FAILED');
 
 create index ix_index_maintenance_operations_recovery
     on index_maintenance_operations (phase, lease_expires_at)

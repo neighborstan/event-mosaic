@@ -1,6 +1,7 @@
 package com.neighbor.eventmosaic.indexing.state;
 
 import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
+import com.neighbor.eventmosaic.indexing.api.CleanupBuildWriteOutcome;
 import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
@@ -551,6 +552,53 @@ class JdbcIndexLifecycleRepository {
 		return IndexLifecycleTransitionResult.APPLIED;
 	}
 
+	IndexLifecycleTransitionResult recordBuildWriteOutcome(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			CleanupBuildWriteOutcome minimumOutcome,
+			Instant now
+	) {
+		Optional<LockedOperation> owned = findOwnedOperation(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion,
+				now);
+		if (owned.isEmpty() || owned.orElseThrow().operation().phase() != IndexMaintenancePhase.BUILDING) {
+			return IndexLifecycleTransitionResult.OWNERSHIP_LOST;
+		}
+		IndexMaintenanceOperation operation = owned.orElseThrow().operation();
+		int updated = jdbcClient.sql("""
+				update index_maintenance_operations
+				set build_write_outcome = case
+				        when case build_write_outcome
+				                 when 'NONE' then 0
+				                 when 'UNKNOWN' then 1
+				                 when 'PARTIAL' then 2
+				                 when 'COMPLETED' then 3
+				             end >= :minimumRank
+				            then build_write_outcome
+				        else :minimumOutcome
+				    end,
+				    operation_version = operation_version + 1,
+				    heartbeat_at = :heartbeatAt,
+				    updated_at = :updatedAt
+				where id = :operationId
+				  and operation_version = :expectedOperationVersion
+				  and phase = 'BUILDING'
+				""")
+				.param("minimumRank", buildWriteOutcomeRank(minimumOutcome))
+				.param("minimumOutcome", minimumOutcome.name())
+				.param("heartbeatAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.param("operationId", operation.id())
+				.param("expectedOperationVersion", expectedOperationVersion)
+				.update();
+		return transitionResult(updated);
+	}
+
 	IndexLifecycleTransitionResult advancePhase(
 			String partitionKey,
 			UUID operationToken,
@@ -572,7 +620,11 @@ class JdbcIndexLifecycleRepository {
 		IndexMaintenanceOperation operation = owned.orElseThrow().operation();
 		if (operation.phase() != expectedPhase
 				|| !isAllowedForType(operation.type(), expectedPhase, nextPhase)
-				|| nextPhase == IndexMaintenancePhase.VERIFIED && !hasExactGenerationUuids(operation)) {
+				|| nextPhase == IndexMaintenancePhase.VERIFIED && !hasExactGenerationUuids(operation)
+				|| operation.type() == IndexMaintenanceType.REBUILD
+						&& expectedPhase == IndexMaintenancePhase.BUILDING
+						&& nextPhase == IndexMaintenancePhase.VERIFIED
+						&& !hasCompletedBuildWriteOutcome(operation.id())) {
 			return IndexLifecycleTransitionResult.OWNERSHIP_LOST;
 		}
 		int updated = jdbcClient.sql("""
@@ -591,6 +643,18 @@ class JdbcIndexLifecycleRepository {
 				.param("expectedOperationVersion", expectedOperationVersion)
 				.update();
 		return transitionResult(updated);
+	}
+
+	private boolean hasCompletedBuildWriteOutcome(long operationId) {
+		return jdbcClient.sql("""
+				select build_write_outcome = 'COMPLETED'
+				from index_maintenance_operations
+				where id = :operationId
+				""")
+				.param("operationId", operationId)
+				.query(Boolean.class)
+				.optional()
+				.orElse(false);
 	}
 
 	IndexLifecycleTransitionResult completeInitialActivation(
@@ -1331,6 +1395,15 @@ class JdbcIndexLifecycleRepository {
 							&& next == IndexMaintenancePhase.FREEZE_REQUESTED;
 		}
 		return type != IndexMaintenanceType.CLEANUP;
+	}
+
+	private static int buildWriteOutcomeRank(CleanupBuildWriteOutcome outcome) {
+		return switch (outcome) {
+			case NONE -> 0;
+			case UNKNOWN -> 1;
+			case PARTIAL -> 2;
+			case COMPLETED -> 3;
+		};
 	}
 
 	private static void requireSingleUpdate(int updated, String transition) {

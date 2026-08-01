@@ -39,6 +39,8 @@ event-mosaic:
     cleanup:
       orphan-building-age: 24h
       superseded-age: 7d
+      plan-ttl: 15m
+      ownership-lease: 15m
       automatic-deletion-enabled: false
   search:
     max-sources-per-event: 20

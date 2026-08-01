@@ -1,6 +1,7 @@
 package com.neighbor.eventmosaic.indexing.state;
 
 import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
+import com.neighbor.eventmosaic.indexing.api.CleanupBuildWriteOutcome;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
 import com.neighbor.eventmosaic.indexing.api.IndexLifecycleLedger;
@@ -145,6 +146,26 @@ public class JdbcIndexLifecycleLedger implements IndexLifecycleLedger {
 				expectedOperationVersion,
 				eventIndexUuid,
 				mentionIndexUuid,
+				clock.instant());
+	}
+
+	@Override
+	@Transactional
+	public IndexLifecycleTransitionResult recordBuildWriteOutcome(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			CleanupBuildWriteOutcome minimumOutcome
+	) {
+		requireOwnership(partitionKey, operationToken, expectedPartitionVersion, expectedOperationVersion);
+		Objects.requireNonNull(minimumOutcome, "minimumOutcome must not be null");
+		return repository.recordBuildWriteOutcome(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion,
+				minimumOutcome,
 				clock.instant());
 	}
 

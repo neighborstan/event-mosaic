@@ -2,11 +2,14 @@ package com.neighbor.eventmosaic.indexing;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.ElasticsearchException;
+import co.elastic.clients.elasticsearch._types.CommonStatsFlag;
 import co.elastic.clients.elasticsearch._types.ShardStatistics;
 import co.elastic.clients.elasticsearch.indices.AddBlockResponse;
 import co.elastic.clients.elasticsearch.indices.CreateIndexResponse;
+import co.elastic.clients.elasticsearch.indices.DeleteIndexResponse;
 import co.elastic.clients.elasticsearch.indices.GetAliasResponse;
 import co.elastic.clients.elasticsearch.indices.IndicesBlockOptions;
+import co.elastic.clients.elasticsearch.indices.IndicesStatsResponse;
 import co.elastic.clients.elasticsearch.indices.IndexSettingBlocks;
 import co.elastic.clients.elasticsearch.indices.IndexSettings;
 import co.elastic.clients.elasticsearch.indices.IndexState;
@@ -33,7 +36,7 @@ import java.util.Optional;
 import java.util.Set;
 import org.springframework.stereotype.Component;
 
-/** Official-client adapter для exact lifecycle операций без wildcard и delete. */
+/** Official-client adapter для exact lifecycle операций без wildcard. */
 @Component
 final class ElasticsearchIndexLifecycleGateway
 		implements IndexLifecycleElasticsearchGateway, IndexMaintenanceGateway {
@@ -100,6 +103,75 @@ final class ElasticsearchIndexLifecycleGateway
 					index.indexName(),
 					index.indexUuid(),
 					index.writeBlocked()));
+		}
+		catch (IOException exception) {
+			throw ioFailure(exception);
+		}
+		catch (ElasticsearchException exception) {
+			throw classify(exception);
+		}
+	}
+
+	@Override
+	public Optional<ExactIndexAliasMembership> observeAllAliasesForExactIndex(
+			String indexName
+	) {
+		requireExactName(indexName);
+		Optional<ObservedIndex> before = observeExactIndex(indexName);
+		if (before.isEmpty()) {
+			return Optional.empty();
+		}
+		try {
+			GetAliasResponse response = client.indices().getAlias(request -> request
+					.index(indexName)
+					.allowNoIndices(false)
+					.ignoreUnavailable(false));
+			var aliases = response.aliases().get(indexName);
+			if (aliases == null) {
+				throw protocolFailure();
+			}
+			Optional<ObservedIndex> after = observeExactIndex(indexName);
+			if (after.isEmpty()) {
+				return Optional.empty();
+			}
+			if (!before.orElseThrow().indexUuid().equals(after.orElseThrow().indexUuid())) {
+				throw protocolFailure();
+			}
+			return Optional.of(new ExactIndexAliasMembership(
+					indexName,
+					after.orElseThrow().indexUuid(),
+					aliases.aliases().keySet()));
+		}
+		catch (IOException exception) {
+			throw ioFailure(exception);
+		}
+		catch (ElasticsearchException exception) {
+			if (hasType(exception, INDEX_NOT_FOUND)
+					&& observeExactIndex(indexName).isEmpty()) {
+				return Optional.empty();
+			}
+			throw classify(exception);
+		}
+	}
+
+	@Override
+	public long exactIndexStoreBytes(ExactIndexTarget target) {
+		Objects.requireNonNull(target, "target must not be null");
+		requireObservedIdentity(target);
+		try {
+			IndicesStatsResponse response = client.indices().stats(request -> request
+					.index(target.indexName())
+					.metric(CommonStatsFlag.Store));
+			var stats = response.indices().get(target.indexName());
+			if (response.shards().failed().longValue() > 0
+					|| stats == null
+					|| !target.indexUuid().equals(stats.uuid())
+					|| stats.total() == null
+					|| stats.total().store() == null
+					|| stats.total().store().sizeInBytes() < 0) {
+				throw protocolFailure();
+			}
+			return stats.total().store().sizeInBytes();
 		}
 		catch (IOException exception) {
 			throw ioFailure(exception);
@@ -339,6 +411,41 @@ final class ElasticsearchIndexLifecycleGateway
 				.alias(GdeltIndexKind.MENTION.readAlias())));
 		try {
 			UpdateAliasesResponse response = client.indices().updateAliases(request.build());
+			if (!response.acknowledged()) {
+				throw unavailable();
+			}
+		}
+		catch (IOException exception) {
+			throw ioFailure(exception);
+		}
+		catch (ElasticsearchException exception) {
+			throw classify(exception);
+		}
+	}
+
+	@Override
+	public void deleteExactIndex(ExactIndexTarget target) {
+		Objects.requireNonNull(target, "target must not be null");
+		requireExactName(target.indexName());
+		ExactIndexAliasMembership observed = observeAllAliasesForExactIndex(
+				target.indexName()).orElseThrow(
+					ElasticsearchIndexLifecycleGateway::protocolFailure);
+		if (!target.indexUuid().equals(observed.indexUuid())
+				|| !observed.aliases().isEmpty()) {
+			throw protocolFailure();
+		}
+		ExactIndexAliasMembership confirmed = observeAllAliasesForExactIndex(
+				target.indexName()).orElseThrow(
+					ElasticsearchIndexLifecycleGateway::protocolFailure);
+		if (!target.indexUuid().equals(confirmed.indexUuid())
+				|| !confirmed.aliases().isEmpty()) {
+			throw protocolFailure();
+		}
+		try {
+			DeleteIndexResponse response = client.indices().delete(request -> request
+					.index(target.indexName())
+					.allowNoIndices(false)
+					.ignoreUnavailable(false));
 			if (!response.acknowledged()) {
 				throw unavailable();
 			}
