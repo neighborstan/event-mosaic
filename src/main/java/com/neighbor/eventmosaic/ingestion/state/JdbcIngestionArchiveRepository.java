@@ -248,6 +248,21 @@ class JdbcIngestionArchiveRepository {
 				.optional();
 	}
 
+	List<IngestionArchiveState> findStagedBetween(Instant startAt, Instant endAt) {
+		return jdbcClient.sql("""
+				select *
+				from ingestion_archives
+				where status = 'STAGED'
+				  and source_update_time >= :startAt
+				  and source_update_time < :endAt
+				order by source_update_time, archive_type, idempotency_key
+				""")
+				.param("startAt", Timestamp.from(startAt))
+				.param("endAt", Timestamp.from(endAt))
+				.query(IngestionJdbcMappers.ARCHIVE)
+				.list();
+	}
+
 	private Optional<IngestionArchiveState> findForUpdate(String idempotencyKey) {
 		return jdbcClient.sql("select * from ingestion_archives where idempotency_key = :idempotencyKey for update")
 				.param("idempotencyKey", idempotencyKey)

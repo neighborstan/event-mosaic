@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -99,7 +100,7 @@ class JdbcArchiveProcessingRepository {
 			      )
 			)
 			""";
-	private static final String SELECT_PROCESSING_STATE_BY_ARCHIVE_KEY = """
+	private static final String SELECT_PROCESSING_STATE = """
 			select
 			    archive_idempotency_key,
 			    source_fingerprint,
@@ -143,8 +144,9 @@ class JdbcArchiveProcessingRepository {
 			    last_error_retryable,
 			    first_seen_at
 			from ingestion_archive_processing
-			where archive_idempotency_key = :archiveIdempotencyKey
 			""";
+	private static final String SELECT_PROCESSING_STATE_BY_ARCHIVE_KEY =
+			SELECT_PROCESSING_STATE + "where archive_idempotency_key = :archiveIdempotencyKey\n";
 
 	private final JdbcClient jdbcClient;
 	private final int automaticRetryLimit;
@@ -661,6 +663,15 @@ class JdbcArchiveProcessingRepository {
 				.param(PARAM_ARCHIVE_KEY, archiveIdempotencyKey)
 				.query(ArchiveProcessingJdbcMapper.STATE)
 				.optional();
+	}
+
+	List<ArchiveProcessingState> findByPartition(String partitionKey) {
+		return jdbcClient.sql(SELECT_PROCESSING_STATE
+					+ "where logical_partition_key = :partitionKey "
+					+ "order by archive_idempotency_key")
+				.param(PARAM_PARTITION_KEY, partitionKey)
+				.query(ArchiveProcessingJdbcMapper.STATE)
+				.list();
 	}
 
 	private Optional<ArchiveProcessingState> findForUpdate(String archiveIdempotencyKey) {

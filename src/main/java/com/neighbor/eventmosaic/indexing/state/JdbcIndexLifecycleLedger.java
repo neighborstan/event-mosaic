@@ -72,6 +72,17 @@ public class JdbcIndexLifecycleLedger implements IndexLifecycleLedger {
 
 	@Override
 	@Transactional
+	public Optional<IndexMaintenanceOperation> startRebuild(
+			IndexRebuildClaim claim,
+			Duration leaseDuration
+	) {
+		Objects.requireNonNull(claim, "claim must not be null");
+		requirePositive(leaseDuration);
+		return repository.startRebuild(claim, leaseDuration, clock.instant());
+	}
+
+	@Override
+	@Transactional
 	public Optional<IndexMaintenanceOperation> reclaimExpiredMaintenance(
 			String partitionKey,
 			Duration leaseDuration
@@ -80,6 +91,30 @@ public class JdbcIndexLifecycleLedger implements IndexLifecycleLedger {
 		requirePositive(leaseDuration);
 		return repository.reclaimExpiredMaintenance(
 				partitionKey,
+				leaseDuration,
+				clock.instant());
+	}
+
+	@Override
+	@Transactional
+	public Optional<IndexMaintenanceOperation> renewMaintenanceLease(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			Duration leaseDuration
+	) {
+		requireOwnership(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion);
+		requirePositive(leaseDuration);
+		return repository.renewMaintenanceLease(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion,
 				leaseDuration,
 				clock.instant());
 	}
@@ -170,6 +205,63 @@ public class JdbcIndexLifecycleLedger implements IndexLifecycleLedger {
 				operationToken,
 				expectedPartitionVersion,
 				expectedOperationVersion,
+				clock.instant());
+	}
+
+	@Override
+	@Transactional
+	public IndexLifecycleTransitionResult completeObservedCutover(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			BaseGenerationDisposition baseDisposition,
+			List<ArchiveReceiptBinding> receipts
+	) {
+		requireOwnership(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion);
+		Objects.requireNonNull(baseDisposition, "baseDisposition must not be null");
+		List<ArchiveReceiptBinding> immutableReceipts = List.copyOf(
+				Objects.requireNonNull(receipts, "receipts must not be null"));
+		if (immutableReceipts.isEmpty()) {
+			throw new IllegalArgumentException("receipts must not be empty");
+		}
+		return repository.completeObservedCutover(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion,
+				baseDisposition,
+				immutableReceipts,
+				clock.instant());
+	}
+
+	@Override
+	@Transactional
+	public IndexLifecycleTransitionResult completePreCutoverFailure(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			String errorCode
+	) {
+		requireOwnership(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion);
+		if (errorCode == null || !errorCode.matches("[A-Z][A-Z0-9_]{0,63}")) {
+			throw new IllegalArgumentException("errorCode has invalid format");
+		}
+		return repository.completePreCutoverFailure(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion,
+				errorCode,
 				clock.instant());
 	}
 

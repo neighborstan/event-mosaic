@@ -20,6 +20,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexWriteMode;
 import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -151,6 +152,72 @@ class ElasticsearchEventIdentityGuardTest {
 								candidate))));
 
 		assertConflict(candidate);
+	}
+
+	@Test
+	@DisplayName("Rebuild копирует exact provenance из прежнего читаемого поколения")
+	void rebuildCopiesExactProvenanceFromStableAlias() throws IOException {
+		IndexedEventDocument candidate = event(1, "archive-a", 11);
+		when(client.search(
+				any(SearchRequest.class),
+				eq(EventIdentityProjection.class)))
+				.thenReturn(response(
+						false,
+						0,
+						1,
+						TotalHitsRelation.Eq,
+						List.of(hit(
+								"gdelt-events-v1-p20260727-g0001",
+								candidate))));
+		ExactIndexTarget shadow = new ExactIndexTarget(
+				"gdelt-events-v1-p20260727-g0002",
+				"shadow-event-index-uuid");
+
+		EventIdentityGuardPlan plan = guard.plan(
+				shadow,
+				List.of(candidate),
+				IndexWriteMode.REBUILD);
+
+		assertThat(plan.documentsToCreate()).containsExactly(candidate);
+		assertThat(plan.replayPositions()).isEmpty();
+		ArgumentCaptor<SearchRequest> requestCaptor =
+				ArgumentCaptor.forClass(SearchRequest.class);
+		verify(client).search(
+				requestCaptor.capture(),
+				eq(EventIdentityProjection.class));
+		assertThat(requestCaptor.getValue().index()).containsExactly(
+				"gdelt-events-read",
+				shadow.indexName());
+		assertThat(requestCaptor.getValue().ignoreUnavailable()).isTrue();
+		assertThat(requestCaptor.getValue().size()).isEqualTo(2);
+	}
+
+	@Test
+	@DisplayName("Rebuild recovery считает одинаковую old и shadow provenance replay")
+	void rebuildRecoveryRecognizesExistingShadowDocument() throws IOException {
+		IndexedEventDocument candidate = event(1, "archive-a", 11);
+		ExactIndexTarget shadow = new ExactIndexTarget(
+				"gdelt-events-v1-p20260727-g0002",
+				"shadow-event-index-uuid");
+		when(client.search(
+				any(SearchRequest.class),
+				eq(EventIdentityProjection.class)))
+				.thenReturn(response(
+						false,
+						0,
+						2,
+						TotalHitsRelation.Eq,
+						List.of(
+								hit(TARGET.indexName(), candidate),
+								hit(shadow.indexName(), candidate))));
+
+		EventIdentityGuardPlan plan = guard.plan(
+				shadow,
+				List.of(candidate),
+				IndexWriteMode.REBUILD);
+
+		assertThat(plan.documentsToCreate()).isEmpty();
+		assertThat(plan.replayPositions()).containsExactly(0);
 	}
 
 	@Test

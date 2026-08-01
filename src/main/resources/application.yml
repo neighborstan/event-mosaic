@@ -33,6 +33,9 @@ event-mosaic:
     disk-pressure:
       staging-min-free-bytes: 1073741824
       elasticsearch-min-free-bytes: 2147483648
+    rebuild:
+      plan-ttl: 15m
+      ownership-lease: 15m
     cleanup:
       orphan-building-age: 24h
       superseded-age: 7d

@@ -6,11 +6,15 @@ import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationStatus;
 import com.neighbor.eventmosaic.indexing.api.IndexLifecycleTransitionResult;
+import com.neighbor.eventmosaic.indexing.api.IndexLifecycleLedger.ArchiveReceiptBinding;
+import com.neighbor.eventmosaic.indexing.api.IndexLifecycleLedger.BaseGenerationDisposition;
+import com.neighbor.eventmosaic.indexing.api.IndexLifecycleLedger.IndexRebuildClaim;
 import com.neighbor.eventmosaic.indexing.api.IndexMaintenanceOperation;
 import com.neighbor.eventmosaic.indexing.api.IndexMaintenancePhase;
 import com.neighbor.eventmosaic.indexing.api.IndexMaintenanceType;
 import com.neighbor.eventmosaic.indexing.api.IndexPartition;
 import com.neighbor.eventmosaic.indexing.api.IndexPartitionDefinition;
+import com.neighbor.eventmosaic.indexing.api.IndexRepairCause;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -38,6 +42,8 @@ class JdbcIndexLifecycleRepository {
 			    p.partition_end_at,
 			    p.partition_interval,
 			    p.state_version,
+			    p.repair_cause,
+			    p.repair_requested_at,
 			    active.id as active_generation_id
 			from index_logical_partitions p
 			left join index_generations active
@@ -56,7 +62,12 @@ class JdbcIndexLifecycleRepository {
 			    expected_partition_state_version,
 			    base_generation_id,
 			    target_generation_id,
-			    operation_version
+			    operation_version,
+			    repair_cause,
+			    plan_fingerprint,
+			    plan_expires_at,
+			    actor,
+			    reason_code
 			from index_maintenance_operations
 			where partition_key = :partitionKey
 			  and operation_kind in ('INITIAL_PROMOTION', 'REBUILD')
@@ -204,6 +215,163 @@ class JdbcIndexLifecycleRepository {
 				0));
 	}
 
+	Optional<IndexMaintenanceOperation> startRebuild(
+			IndexRebuildClaim claim,
+			Duration leaseDuration,
+			Instant now
+	) {
+		if (!claim.planExpiresAt().isAfter(now)) {
+			return Optional.empty();
+		}
+		IndexPartition partition = findPartitionForUpdate(claim.partitionKey()).orElseThrow(
+				() -> new IllegalArgumentException("Unknown logical partition"));
+		if (partition.stateVersion() != claim.expectedPartitionVersion()
+				|| partition.activeGenerationId() == null
+				|| partition.activeGenerationId() != claim.expectedBaseGenerationId()
+				|| hasOpenOperation(claim.partitionKey())
+				|| hasBuildingGeneration(claim.partitionKey())
+				|| hasActiveProcessingClaim(claim.partitionKey())
+				|| !matchesActiveGeneration(claim)) {
+			return Optional.empty();
+		}
+
+		int generationNumber = nextGenerationNumber(claim.partitionKey());
+		requireNamesMatchGeneration(
+				claim.targetNames(),
+				claim.partitionKey(),
+				generationNumber);
+		long partitionVersion = partition.stateVersion() + 1;
+		int fenced = jdbcClient.sql("""
+				update index_logical_partitions
+				set state_version = :nextVersion,
+				    repair_cause = :repairCause,
+				    repair_requested_at = :repairRequestedAt,
+				    updated_at = :updatedAt
+				where partition_key = :partitionKey
+				  and state_version = :expectedVersion
+				""")
+				.param("nextVersion", partitionVersion)
+				.param("repairCause", claim.repairCause().name())
+				.param("repairRequestedAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.param("partitionKey", claim.partitionKey())
+				.param("expectedVersion", partition.stateVersion())
+				.update();
+		if (fenced != 1) {
+			return Optional.empty();
+		}
+
+		long targetGenerationId = insertBuildingGeneration(
+				claim.partitionKey(),
+				generationNumber,
+				claim.targetNames(),
+				now);
+		UUID operationToken = UUID.randomUUID();
+		Instant leaseExpiresAt = now.plus(leaseDuration);
+		long operationId = jdbcClient.sql("""
+				insert into index_maintenance_operations (
+				    operation_token,
+				    partition_key,
+				    operation_kind,
+				    phase,
+				    repair_cause,
+				    expected_partition_state_version,
+				    base_generation_id,
+				    target_generation_id,
+				    lease_expires_at,
+				    heartbeat_at,
+				    plan_fingerprint,
+				    plan_expires_at,
+				    actor,
+				    reason_code,
+				    created_at,
+				    updated_at
+				)
+				values (
+				    :operationToken,
+				    :partitionKey,
+				    'REBUILD',
+				    'PLANNED',
+				    :repairCause,
+				    :partitionVersion,
+				    :baseGenerationId,
+				    :targetGenerationId,
+				    :leaseExpiresAt,
+				    :heartbeatAt,
+				    :planFingerprint,
+				    :planExpiresAt,
+				    :actor,
+				    :reasonCode,
+				    :createdAt,
+				    :updatedAt
+				)
+				returning id
+				""")
+				.param("operationToken", operationToken)
+				.param("partitionKey", claim.partitionKey())
+				.param("repairCause", claim.repairCause().name())
+				.param("partitionVersion", partitionVersion)
+				.param("baseGenerationId", claim.expectedBaseGenerationId())
+				.param("targetGenerationId", targetGenerationId)
+				.param("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
+				.param("heartbeatAt", Timestamp.from(now))
+				.param("planFingerprint", claim.planFingerprint())
+				.param("planExpiresAt", Timestamp.from(claim.planExpiresAt()))
+				.param("actor", claim.actor())
+				.param("reasonCode", claim.reasonCode())
+				.param("createdAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.query(Long.class)
+				.single();
+		return Optional.of(new IndexMaintenanceOperation(
+				operationId,
+				claim.partitionKey(),
+				IndexMaintenanceType.REBUILD,
+				IndexMaintenancePhase.PLANNED,
+				operationToken,
+				leaseExpiresAt,
+				partitionVersion,
+				claim.expectedBaseGenerationId(),
+				targetGenerationId,
+				0,
+				claim.repairCause(),
+				claim.planFingerprint(),
+				claim.planExpiresAt(),
+				claim.actor(),
+				claim.reasonCode()));
+	}
+
+	private boolean matchesActiveGeneration(IndexRebuildClaim claim) {
+		return jdbcClient.sql("""
+				select count(*)
+				from index_generations
+				where id = :generationId
+				  and partition_key = :partitionKey
+				  and generation_uuid = :generationUuid
+				  and state = 'ACTIVE'
+				""")
+				.param("generationId", claim.expectedBaseGenerationId())
+				.param("partitionKey", claim.partitionKey())
+				.param("generationUuid", claim.expectedBaseGenerationUuid())
+				.query(Integer.class)
+				.single() == 1;
+	}
+
+	private boolean hasActiveProcessingClaim(String partitionKey) {
+		return jdbcClient.sql("""
+				select exists (
+				    select 1
+				    from ingestion_archive_processing
+				    where logical_partition_key = :partitionKey
+				      and status = 'PROCESSING'
+				      and attempt_token is not null
+				)
+				""")
+				.param("partitionKey", partitionKey)
+				.query(Boolean.class)
+				.single();
+	}
+
 	Optional<IndexMaintenanceOperation> reclaimExpiredMaintenance(
 			String partitionKey,
 			Duration leaseDuration,
@@ -255,7 +423,68 @@ class JdbcIndexLifecycleRepository {
 				operation.partitionVersion(),
 				operation.baseGenerationId(),
 				operation.buildingGenerationId(),
-				operation.operationVersion() + 1));
+				operation.operationVersion() + 1,
+				operation.repairCause(),
+				operation.planFingerprint(),
+				operation.planExpiresAt(),
+				operation.actor(),
+				operation.reasonCode()));
+	}
+
+	Optional<IndexMaintenanceOperation> renewMaintenanceLease(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			Duration leaseDuration,
+			Instant now
+	) {
+		Optional<LockedOperation> owned = findOwnedOperation(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion,
+				now);
+		if (owned.isEmpty()) {
+			return Optional.empty();
+		}
+		IndexMaintenanceOperation operation = owned.orElseThrow().operation();
+		Instant nextLeaseExpiresAt = now.plus(leaseDuration);
+		int updated = jdbcClient.sql("""
+				update index_maintenance_operations
+				set lease_expires_at = :leaseExpiresAt,
+				    operation_version = operation_version + 1,
+				    heartbeat_at = :heartbeatAt,
+				    updated_at = :updatedAt
+				where id = :operationId
+				  and operation_version = :expectedOperationVersion
+				  and phase not in ('COMPLETED', 'FAILED')
+				""")
+				.param("leaseExpiresAt", Timestamp.from(nextLeaseExpiresAt))
+				.param("heartbeatAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.param("operationId", operation.id())
+				.param("expectedOperationVersion", expectedOperationVersion)
+				.update();
+		if (updated != 1) {
+			return Optional.empty();
+		}
+		return Optional.of(new IndexMaintenanceOperation(
+				operation.id(),
+				operation.partitionKey(),
+				operation.type(),
+				operation.phase(),
+				operation.token(),
+				nextLeaseExpiresAt,
+				operation.partitionVersion(),
+				operation.baseGenerationId(),
+				operation.buildingGenerationId(),
+				operation.operationVersion() + 1,
+				operation.repairCause(),
+				operation.planFingerprint(),
+				operation.planExpiresAt(),
+				operation.actor(),
+				operation.reasonCode()));
 	}
 
 	IndexLifecycleTransitionResult recordGenerationUuids(
@@ -425,6 +654,106 @@ class JdbcIndexLifecycleRepository {
 		return IndexLifecycleTransitionResult.APPLIED;
 	}
 
+	IndexLifecycleTransitionResult completeObservedCutover(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			BaseGenerationDisposition baseDisposition,
+			List<ArchiveReceiptBinding> receipts,
+			Instant now
+	) {
+		Optional<LockedOperation> owned = findOwnedOperation(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion,
+				now);
+		if (owned.isEmpty()) {
+			return IndexLifecycleTransitionResult.OWNERSHIP_LOST;
+		}
+		IndexMaintenanceOperation operation = owned.orElseThrow().operation();
+		if (operation.type() != IndexMaintenanceType.REBUILD
+				|| operation.phase() != IndexMaintenancePhase.CUTOVER_OBSERVED
+				|| operation.baseGenerationId() == null
+				|| !operation.baseGenerationId().equals(owned.orElseThrow().activeGenerationId())
+				|| operation.planFingerprint() == null
+				|| operation.repairCause() == null
+				|| !hasExactGenerationUuids(operation)) {
+			return IndexLifecycleTransitionResult.OWNERSHIP_LOST;
+		}
+		if (receipts.stream().map(ArchiveReceiptBinding::archiveKey).distinct().count()
+				!= receipts.size()) {
+			throw new IllegalArgumentException("receipt archive keys must be unique");
+		}
+		IndexGeneration target = findGeneration(
+				partitionKey,
+				operation.buildingGenerationId()).orElseThrow();
+		if (baseDisposition == BaseGenerationDisposition.SUPERSEDED) {
+			supersedeGeneration(operation.baseGenerationId(), partitionKey, now);
+		}
+		else {
+			failActiveGeneration(operation.baseGenerationId(), partitionKey, now);
+		}
+		activateGeneration(operation.buildingGenerationId(), partitionKey, now);
+		for (ArchiveReceiptBinding receipt : receipts) {
+			rebindReceipt(
+					partitionKey,
+					expectedPartitionVersion + 1,
+					operation.baseGenerationId(),
+					target,
+					receipt,
+					now);
+		}
+		completeOperation(operation.id(), expectedOperationVersion, now);
+		bumpPartitionAfterCompletion(
+				partitionKey,
+				expectedPartitionVersion,
+				now,
+				true);
+		return IndexLifecycleTransitionResult.APPLIED;
+	}
+
+	IndexLifecycleTransitionResult completePreCutoverFailure(
+			String partitionKey,
+			UUID operationToken,
+			long expectedPartitionVersion,
+			long expectedOperationVersion,
+			String errorCode,
+			Instant now
+	) {
+		Optional<LockedOperation> owned = findOwnedOperation(
+				partitionKey,
+				operationToken,
+				expectedPartitionVersion,
+				expectedOperationVersion,
+				now);
+		if (owned.isEmpty()) {
+			return IndexLifecycleTransitionResult.OWNERSHIP_LOST;
+		}
+		IndexMaintenanceOperation operation = owned.orElseThrow().operation();
+		if (operation.type() != IndexMaintenanceType.REBUILD
+				|| operation.phase() != IndexMaintenancePhase.UNFREEZE_REQUESTED) {
+			return IndexLifecycleTransitionResult.OWNERSHIP_LOST;
+		}
+		failBuildingGeneration(
+				operation.buildingGenerationId(),
+				partitionKey,
+				errorCode,
+				now);
+		failOperation(
+				operation.id(),
+				expectedOperationVersion,
+				errorCode,
+				now);
+		bumpPartitionAfterCompletion(
+				partitionKey,
+				expectedPartitionVersion,
+				now,
+				false);
+		return IndexLifecycleTransitionResult.APPLIED;
+	}
+
 	Optional<IndexMaintenanceOperation> findRecoverableOperation(String partitionKey) {
 		return findOpenOperation(partitionKey);
 	}
@@ -488,6 +817,32 @@ class JdbcIndexLifecycleRepository {
 				.param("partitionKey", partitionKey)
 				.query(JdbcIndexLifecycleRepository::mapGeneration)
 				.list();
+	}
+
+	private Optional<IndexGeneration> findGeneration(
+			String partitionKey,
+			long generationId
+	) {
+		return jdbcClient.sql("""
+				select
+				    id,
+				    generation_uuid,
+				    partition_key,
+				    generation_number,
+				    state,
+				    event_index_name,
+				    event_index_uuid,
+				    mention_index_name,
+				    mention_index_uuid,
+				    state_version
+				from index_generations
+				where partition_key = :partitionKey
+				  and id = :generationId
+				""")
+				.param("partitionKey", partitionKey)
+				.param("generationId", generationId)
+				.query(JdbcIndexLifecycleRepository::mapGeneration)
+				.optional();
 	}
 
 	private Optional<IndexPartition> findPartitionForUpdate(String partitionKey) {
@@ -555,6 +910,11 @@ class JdbcIndexLifecycleRepository {
 				    o.base_generation_id,
 				    o.target_generation_id,
 				    o.operation_version,
+				    o.repair_cause,
+				    o.plan_fingerprint,
+				    o.plan_expires_at,
+				    o.actor,
+				    o.reason_code,
 				    p.state_version as current_partition_version,
 				    active.id as active_generation_id
 				from index_maintenance_operations o
@@ -717,6 +1077,133 @@ class JdbcIndexLifecycleRepository {
 		requireSingleUpdate(updated, "Generation supersede");
 	}
 
+	private void failActiveGeneration(long generationId, String partitionKey, Instant now) {
+		int updated = jdbcClient.sql("""
+				update index_generations
+				set state = 'FAILED',
+				    state_version = state_version + 1,
+				    failure_origin = 'REBUILD_BASE_INVALID',
+				    failed_at = :failedAt,
+				    updated_at = :updatedAt
+				where id = :generationId
+				  and partition_key = :partitionKey
+				  and state = 'ACTIVE'
+				""")
+				.param("failedAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.param("generationId", generationId)
+				.param("partitionKey", partitionKey)
+				.update();
+		requireSingleUpdate(updated, "Generation failure");
+	}
+
+	private void failBuildingGeneration(
+			long generationId,
+			String partitionKey,
+			String errorCode,
+			Instant now
+	) {
+		int updated = jdbcClient.sql("""
+				update index_generations
+				set state = 'FAILED',
+				    state_version = state_version + 1,
+				    failure_origin = :failureOrigin,
+				    failed_at = :failedAt,
+				    updated_at = :updatedAt
+				where id = :generationId
+				  and partition_key = :partitionKey
+				  and state = 'BUILDING'
+				""")
+				.param("failureOrigin", errorCode)
+				.param("failedAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.param("generationId", generationId)
+				.param("partitionKey", partitionKey)
+				.update();
+		requireSingleUpdate(updated, "Building generation failure");
+	}
+
+	private void rebindReceipt(
+			String partitionKey,
+			long nextPartitionVersion,
+			long baseGenerationId,
+			IndexGeneration target,
+			ArchiveReceiptBinding receipt,
+			Instant now
+	) {
+		String indexName = receipt.kind() == com.neighbor.eventmosaic.indexing.api.GdeltIndexKind.EVENT
+				? target.names().eventIndexName()
+				: target.names().mentionIndexName();
+		String indexUuid = receipt.kind() == com.neighbor.eventmosaic.indexing.api.GdeltIndexKind.EVENT
+				? target.eventIndexUuid()
+				: target.mentionIndexUuid();
+		int updated = jdbcClient.sql("""
+				update ingestion_archive_processing processing
+				set status = 'INDEXED',
+				    attempt_token = null,
+				    lease_expires_at = null,
+				    bound_partition_state_version = :partitionVersion,
+				    bound_generation_id = :generationId,
+				    bound_generation_uuid = :generationUuid,
+				    bound_index_kind = :indexKind,
+				    bound_index_name = :indexName,
+				    bound_index_uuid = :indexUuid,
+				    automatic_retries_used = 0,
+				    consecutive_retryable_failures = 0,
+				    retry_not_before = null,
+				    verified_generation_id = :generationId,
+				    verified_index_uuid = :indexUuid,
+				    actual_document_count = expected_document_count,
+				    actual_identity_digest = expected_identity_digest,
+				    receipt_verified_at = :verifiedAt,
+				    failed_at = null,
+				    completed_at = :completedAt,
+				    last_error_code = null,
+				    last_error_retryable = null,
+				    state_version = state_version + 1,
+				    updated_at = :updatedAt
+				where processing.archive_idempotency_key = :archiveKey
+				  and processing.logical_partition_key = :partitionKey
+				  and processing.processing_fingerprint = :processingFingerprint
+				  and processing.state_version = :expectedStateVersion
+				  and processing.total_attempt_count = :expectedAttemptCount
+				  and processing.status in ('INDEXED', 'FAILED')
+				  and processing.attempt_token is null
+				  and processing.expected_document_count = :expectedDocumentCount
+				  and processing.expected_identity_digest = :expectedIdentityDigest
+				  and processing.receipt_digest_algorithm = 'sha256-length-prefix-v1'
+				  and processing.verified_generation_id = :baseGenerationId
+				  and exists (
+				      select 1
+				      from ingestion_archives archive
+				      where archive.idempotency_key = processing.archive_idempotency_key
+				        and archive.archive_type = :archiveType
+				  )
+				""")
+				.param("partitionVersion", nextPartitionVersion)
+				.param("generationId", target.id())
+				.param("generationUuid", target.generationUuid())
+				.param("indexKind", receipt.kind().name())
+				.param("indexName", indexName)
+				.param("indexUuid", indexUuid)
+				.param("verifiedAt", Timestamp.from(now))
+				.param("completedAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.param("archiveKey", receipt.archiveKey())
+				.param("partitionKey", partitionKey)
+				.param("processingFingerprint", receipt.processingFingerprint())
+				.param("expectedStateVersion", receipt.expectedStateVersion())
+				.param("expectedAttemptCount", receipt.expectedAttemptCount())
+				.param("expectedDocumentCount", receipt.expectedDocumentCount())
+				.param("expectedIdentityDigest", receipt.expectedIdentityDigest().value())
+				.param("baseGenerationId", baseGenerationId)
+				.param("archiveType", receipt.kind() == com.neighbor.eventmosaic.indexing.api.GdeltIndexKind.EVENT
+						? "TRANSLATION_EVENTS"
+						: "TRANSLATION_MENTIONS")
+				.update();
+		requireSingleUpdate(updated, "Archive receipt rebind");
+	}
+
 	private void completeOperation(long operationId, long expectedOperationVersion, Instant now) {
 		int updated = jdbcClient.sql("""
 				update index_maintenance_operations
@@ -740,18 +1227,65 @@ class JdbcIndexLifecycleRepository {
 		requireSingleUpdate(updated, "Operation completion");
 	}
 
+	private void failOperation(
+			long operationId,
+			long expectedOperationVersion,
+			String errorCode,
+			Instant now
+	) {
+		int updated = jdbcClient.sql("""
+				update index_maintenance_operations
+				set phase = 'FAILED',
+				    operation_version = operation_version + 1,
+				    last_error_code = :errorCode,
+				    failed_at = :failedAt,
+				    heartbeat_at = :heartbeatAt,
+				    updated_at = :updatedAt
+				where id = :operationId
+				  and phase = 'UNFREEZE_REQUESTED'
+				  and operation_version = :expectedOperationVersion
+				""")
+				.param("errorCode", errorCode)
+				.param("failedAt", Timestamp.from(now))
+				.param("heartbeatAt", Timestamp.from(now))
+				.param("updatedAt", Timestamp.from(now))
+				.param("operationId", operationId)
+				.param("expectedOperationVersion", expectedOperationVersion)
+				.update();
+		requireSingleUpdate(updated, "Operation failure");
+	}
+
 	private void bumpPartitionAfterCompletion(
 			String partitionKey,
 			long expectedPartitionVersion,
 			Instant now
 	) {
+		bumpPartitionAfterCompletion(
+				partitionKey,
+				expectedPartitionVersion,
+				now,
+				false);
+	}
+
+	private void bumpPartitionAfterCompletion(
+			String partitionKey,
+			long expectedPartitionVersion,
+			Instant now,
+			boolean clearRepairCause
+	) {
 		int updated = jdbcClient.sql("""
 				update index_logical_partitions
 				set state_version = state_version + 1,
+				    repair_cause = case when :clearRepairCause then null else repair_cause end,
+				    repair_requested_at = case
+				        when :clearRepairCause then null
+				        else repair_requested_at
+				    end,
 				    updated_at = :updatedAt
 				where partition_key = :partitionKey
 				  and state_version = :expectedPartitionVersion
 				""")
+				.param("clearRepairCause", clearRepairCause)
 				.param("updatedAt", Timestamp.from(now))
 				.param("partitionKey", partitionKey)
 				.param("expectedPartitionVersion", expectedPartitionVersion)
@@ -823,7 +1357,13 @@ class JdbcIndexLifecycleRepository {
 		return new IndexPartition(
 				definition,
 				resultSet.getLong("state_version"),
-				resultSet.getObject("active_generation_id", Long.class));
+				resultSet.getObject("active_generation_id", Long.class),
+				resultSet.getString("repair_cause") == null
+						? null
+						: IndexRepairCause.valueOf(resultSet.getString("repair_cause")),
+				resultSet.getTimestamp("repair_requested_at") == null
+						? null
+						: resultSet.getTimestamp("repair_requested_at").toInstant());
 	}
 
 	private static IndexGeneration mapGeneration(ResultSet resultSet, int rowNumber) throws SQLException {
@@ -853,7 +1393,16 @@ class JdbcIndexLifecycleRepository {
 				resultSet.getLong("expected_partition_state_version"),
 				resultSet.getObject("base_generation_id", Long.class),
 				resultSet.getLong("target_generation_id"),
-				resultSet.getLong("operation_version"));
+				resultSet.getLong("operation_version"),
+				resultSet.getString("repair_cause") == null
+						? null
+						: IndexRepairCause.valueOf(resultSet.getString("repair_cause")),
+				resultSet.getString("plan_fingerprint"),
+				resultSet.getTimestamp("plan_expires_at") == null
+						? null
+						: resultSet.getTimestamp("plan_expires_at").toInstant(),
+				resultSet.getString("actor"),
+				resultSet.getString("reason_code"));
 	}
 
 	private record LockedOperation(

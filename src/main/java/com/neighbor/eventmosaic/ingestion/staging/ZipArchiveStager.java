@@ -3,7 +3,10 @@ package com.neighbor.eventmosaic.ingestion.staging;
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveName;
 import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveAttempt;
+import com.neighbor.eventmosaic.ingestion.api.DiscoveredArchive;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
+import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveState;
+import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.error.ArchiveContentViolationException;
@@ -122,13 +125,21 @@ public class ZipArchiveStager {
 		try {
 			Files.deleteIfExists(paths.csvPartPath());
 			if (Files.exists(paths.csvPath(), LinkOption.NOFOLLOW_LINKS)) {
-				verifyExistingCsv(attempt, downloadedArchive.path(), paths.csvPath(), budget);
+				verifyExistingCsv(
+						attempt.archive(),
+						downloadedArchive.path(),
+						paths.csvPath(),
+						budget);
 				return staged(downloadedArchive, paths.csvPath());
 			}
 			extractExpectedCsv(attempt, downloadedArchive.path(), paths, budget);
 			IngestionInterruption.throwIfRequested();
 			if (!publishAtomically(paths.csvPartPath(), paths.csvPath())) {
-				verifyExistingCsv(attempt, downloadedArchive.path(), paths.csvPath(), budget);
+				verifyExistingCsv(
+						attempt.archive(),
+						downloadedArchive.path(),
+						paths.csvPath(),
+						budget);
 			}
 			return staged(downloadedArchive, paths.csvPath());
 		} catch (ZipException exception) {
@@ -143,6 +154,55 @@ public class ZipArchiveStager {
 		}
 	}
 
+	/**
+	 * Повторно проверяет неизменность verified ZIP и производного final CSV без
+	 * записи во staging.
+	 *
+	 * @param state durable STAGED archive
+	 * @param budget monotonic budget проверки
+	 */
+	public void verifyReplaySource(
+			IngestionArchiveState state,
+			OperationBudget budget
+	) {
+		Objects.requireNonNull(state, "state must not be null");
+		Objects.requireNonNull(budget, "budget must not be null");
+		if (state.status() != IngestionArchiveStatus.STAGED
+				|| state.stagedArchive() == null) {
+			throw new IllegalArgumentException("Replay source must be STAGED");
+		}
+		DiscoveredArchive archive = state.archive();
+		StagedArchive staged = state.stagedArchive();
+		try {
+			throwIfExpired(budget);
+			if (!Files.isRegularFile(staged.archivePath(), LinkOption.NOFOLLOW_LINKS)
+					|| !Files.isRegularFile(staged.csvPath(), LinkOption.NOFOLLOW_LINKS)) {
+				throw new StagingStorageException(
+						IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
+			}
+			long actualSize = Files.size(staged.archivePath());
+			String actualMd5 = Md5Checksum.calculate(staged.archivePath(), budget);
+			if (actualSize != archive.expectedSizeBytes()
+					|| actualSize != staged.actualSizeBytes()
+					|| !actualMd5.equals(archive.expectedMd5())
+					|| !actualMd5.equals(staged.actualMd5())) {
+				throw new StagingStorageException(
+						IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
+			}
+			verifyExistingCsv(
+					archive,
+					staged.archivePath(),
+					staged.csvPath(),
+					budget);
+		}
+		catch (IOException exception) {
+			IngestionInterruption.throwIfRequested(exception);
+			throw new StagingStorageException(
+					IngestionErrorCode.FILESYSTEM_IO_FAILURE,
+					exception);
+		}
+	}
+
 	private void extractExpectedCsv(
 			ArchiveAttempt attempt,
 			Path archivePath,
@@ -150,18 +210,23 @@ public class ZipArchiveStager {
 			OperationBudget budget
 	) throws IOException {
 		try (OutputStream output = Files.newOutputStream(paths.csvPartPath(), StandardOpenOption.CREATE_NEW)) {
-			inspectExpectedCsv(attempt, archivePath, paths.csvPath().getParent(), output, budget);
+			inspectExpectedCsv(
+					attempt.archive(),
+					archivePath,
+					paths.csvPath().getParent(),
+					output,
+					budget);
 		}
 	}
 
 	private EntryFingerprint inspectExpectedCsv(
-			ArchiveAttempt attempt,
+			DiscoveredArchive archive,
 			Path archivePath,
 			Path dataRoot,
 			OutputStream output,
 			OperationBudget budget
 	) throws IOException {
-		String expectedName = expectedCsvName(attempt);
+		String expectedName = expectedCsvName(archive);
 		int entryCount = 0;
 		long totalBytes = 0;
 		MessageDigest digest = Md5Checksum.newDigest();
@@ -246,7 +311,7 @@ public class ZipArchiveStager {
 	}
 
 	private void verifyExistingCsv(
-			ArchiveAttempt attempt,
+			DiscoveredArchive archive,
 			Path archivePath,
 			Path csvPath,
 			OperationBudget budget
@@ -261,7 +326,7 @@ public class ZipArchiveStager {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
 			EntryFingerprint expected = inspectExpectedCsv(
-					attempt,
+					archive,
 					archivePath,
 					csvPath.getParent(),
 					OutputStream.nullOutputStream(),
@@ -280,8 +345,8 @@ public class ZipArchiveStager {
 		}
 	}
 
-	private static String expectedCsvName(ArchiveAttempt attempt) {
-		return GdeltArchiveName.requireSupported(attempt.archive().archiveName()).csvName();
+	private static String expectedCsvName(DiscoveredArchive archive) {
+		return GdeltArchiveName.requireSupported(archive.archiveName()).csvName();
 	}
 
 	private static StagedArchive staged(DownloadedArchive archive, Path csvPath) {

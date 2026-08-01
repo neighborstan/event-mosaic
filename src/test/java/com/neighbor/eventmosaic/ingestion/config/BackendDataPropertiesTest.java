@@ -42,6 +42,7 @@ class BackendDataPropertiesTest {
 				Duration.ofMinutes(12),
 				500,
 				diskPressure(),
+				rebuild(),
 				cleanup(false)))
 				.isInstanceOf(IllegalArgumentException.class)
 				.hasMessageContaining("P7D");
@@ -57,6 +58,7 @@ class BackendDataPropertiesTest {
 				Duration.ofMinutes(12),
 				500,
 				diskPressure(),
+				rebuild(),
 				cleanup(automaticDeletionEnabled)
 		);
 	}
@@ -74,6 +76,12 @@ class BackendDataPropertiesTest {
 		return new BackendDataProperties.DiskPressure(
 				1024L * 1024 * 1024,
 				2L * 1024 * 1024 * 1024);
+	}
+
+	private static BackendDataProperties.Rebuild rebuild() {
+		return new BackendDataProperties.Rebuild(
+				Duration.ofMinutes(15),
+				Duration.ofMinutes(15));
 	}
 
 	private static BackendDataProperties.Cleanup cleanup(boolean automaticDeletionEnabled) {

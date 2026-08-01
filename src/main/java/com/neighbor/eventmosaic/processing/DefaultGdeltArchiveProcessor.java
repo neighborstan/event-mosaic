@@ -31,6 +31,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingFailureContract;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
+import com.neighbor.eventmosaic.indexing.api.IndexWriteMode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingDiagnosticListener;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingFailure;
@@ -153,6 +154,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				indexTarget,
 				request.sourceArchiveKey(),
 				request.processingFingerprint(),
+				request.writeMode(),
 				bulkSize,
 				maxBulkBytes,
 				request.receiptPageSize(),
@@ -369,6 +371,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		private final ExactIndexTarget indexTarget;
 		private final String sourceArchiveKey;
 		private final String processingFingerprint;
+		private final IndexWriteMode writeMode;
 		private final int bulkSize;
 		private final long maxBulkBytes;
 		private final int receiptPageSize;
@@ -397,6 +400,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				ExactIndexTarget indexTarget,
 				String sourceArchiveKey,
 				String processingFingerprint,
+				IndexWriteMode writeMode,
 				int bulkSize,
 				long maxBulkBytes,
 				int receiptPageSize,
@@ -410,6 +414,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			this.indexTarget = indexTarget;
 			this.sourceArchiveKey = sourceArchiveKey;
 			this.processingFingerprint = processingFingerprint;
+			this.writeMode = writeMode;
 			this.bulkSize = bulkSize;
 			this.maxBulkBytes = maxBulkBytes;
 			this.receiptPageSize = receiptPageSize;
@@ -495,6 +500,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 				result = indexWriter.write(new BulkIndexCommand<>(
 						indexKind,
 						indexTarget,
+						writeMode,
 						documents));
 			}
 			catch (IndexTargetUnavailableException

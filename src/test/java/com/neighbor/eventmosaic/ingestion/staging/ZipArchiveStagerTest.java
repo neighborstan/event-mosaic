@@ -2,13 +2,19 @@ package com.neighbor.eventmosaic.ingestion.staging;
 
 import static com.neighbor.eventmosaic.ingestion.GdeltTestFixtures.archive;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveAttempt;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveAttemptState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
+import com.neighbor.eventmosaic.ingestion.api.AutomaticRetryState;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredArchive;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
+import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveState;
+import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
+import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.error.ArchiveContentViolationException;
 import com.neighbor.eventmosaic.ingestion.error.IngestionFailureContract;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
@@ -132,6 +138,64 @@ class ZipArchiveStagerTest {
 	}
 
 	@Test
+	@DisplayName("Rebuild повторно проверяет неизменные ZIP и CSV без записи")
+	void verifiesUnchangedReplayArtifacts() throws IOException {
+		Fixture fixture = fixture(tempDir.resolve("replay-valid"));
+		writeZip(fixture.paths().archivePath(), List.of(
+				new Entry(fixture.expectedCsvName(), "row\n")));
+		ZipArchiveStager stager = stager(4, 1024, 1024);
+		StagedArchive staged = stager.stage(
+				fixture.attempt(),
+				downloaded(fixture.paths().archivePath()),
+				fixture.paths());
+		IngestionArchiveState state = stagedState(fixture, staged);
+
+		assertThatCode(() -> stager.verifyReplaySource(
+				state,
+				OperationBudget.start(Duration.ofSeconds(5))))
+				.doesNotThrowAnyException();
+	}
+
+	@Test
+	@DisplayName("Rebuild отклоняет измененный verified ZIP или производный CSV")
+	void rejectsChangedReplayArtifacts() throws IOException {
+		Fixture zipFixture = fixture(tempDir.resolve("replay-zip-corrupt"));
+		writeZip(zipFixture.paths().archivePath(), List.of(
+				new Entry(zipFixture.expectedCsvName(), "row\n")));
+		ZipArchiveStager stager = stager(4, 1024, 1024);
+		StagedArchive zipStaged = stager.stage(
+				zipFixture.attempt(),
+				downloaded(zipFixture.paths().archivePath()),
+				zipFixture.paths());
+		IngestionArchiveState zipState = stagedState(zipFixture, zipStaged);
+		Files.writeString(zipStaged.archivePath(), "corrupted ZIP");
+
+		assertThatExceptionOfType(StagingStorageException.class)
+				.isThrownBy(() -> stager.verifyReplaySource(
+						zipState,
+						OperationBudget.start(Duration.ofSeconds(5))))
+				.satisfies(exception -> assertThat(exception.errorCode())
+						.isEqualTo(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT));
+
+		Fixture csvFixture = fixture(tempDir.resolve("replay-csv-corrupt"));
+		writeZip(csvFixture.paths().archivePath(), List.of(
+				new Entry(csvFixture.expectedCsvName(), "row\n")));
+		StagedArchive csvStaged = stager.stage(
+				csvFixture.attempt(),
+				downloaded(csvFixture.paths().archivePath()),
+				csvFixture.paths());
+		IngestionArchiveState csvState = stagedState(csvFixture, csvStaged);
+		Files.writeString(csvStaged.csvPath(), "corrupted CSV");
+
+		assertThatExceptionOfType(StagingStorageException.class)
+				.isThrownBy(() -> stager.verifyReplaySource(
+						csvState,
+						OperationBudget.start(Duration.ofSeconds(5))))
+				.satisfies(exception -> assertThat(exception.errorCode())
+						.isEqualTo(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT));
+	}
+
+	@Test
 	@DisplayName("Zip Slip отклоняется без записи за пределами staging")
 	void rejectsZipSlipWithoutWritingOutsideStaging() throws IOException {
 		Fixture fixture = fixture(tempDir.resolve("slip"));
@@ -200,6 +264,32 @@ class ZipArchiveStagerTest {
 
 	private static DownloadedArchive downloaded(Path path) throws IOException {
 		return new DownloadedArchive(path, Files.size(path), Md5Checksum.calculate(path), false);
+	}
+
+	private static IngestionArchiveState stagedState(
+			Fixture fixture,
+			StagedArchive staged
+	) {
+		DiscoveredArchive verifiedArchive = archive(
+				fixture.attempt().archive().sourceUpdateTime(),
+				fixture.attempt().archive().archiveType(),
+				staged.actualMd5(),
+				staged.actualSizeBytes());
+		Instant completedAt = fixture.attempt().leaseExpiresAt().minusSeconds(1);
+		return new IngestionArchiveState(
+				1,
+				verifiedArchive,
+				IngestionArchiveStatus.STAGED,
+				new ArchiveAttemptState(
+						1,
+						null,
+						completedAt,
+						null,
+						AutomaticRetryState.initial(3)),
+				staged,
+				null,
+				completedAt,
+				completedAt);
 	}
 
 	private static <T extends ApplicationException & IngestionFailureContract> void assertFailure(

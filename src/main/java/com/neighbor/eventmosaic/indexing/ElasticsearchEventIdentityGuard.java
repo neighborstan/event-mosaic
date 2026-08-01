@@ -17,6 +17,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.indexing.api.IndexWriteMode;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -29,7 +30,7 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Строит fail-closed Event write plan по stable read alias без перезаписи.
+ * Строит fail-closed Event write plan без перезаписи существующей identity.
  */
 final class ElasticsearchEventIdentityGuard {
 
@@ -47,15 +48,18 @@ final class ElasticsearchEventIdentityGuard {
 	/**
 	 * Находит exact replay и документы, которые разрешено создать в current target.
 	 *
-	 * @param target exact Event target current ACTIVE generation
+	 * @param target exact Event target current либо shadow generation
 	 * @param documents bounded непустая Event bulk-порция
+	 * @param writeMode обычная запись либо восстанавливаемое заполнение shadow
 	 * @return immutable write plan в порядке исходной порции
 	 */
 	EventIdentityGuardPlan plan(
 			ExactIndexTarget target,
-			List<IndexedEventDocument> documents
+			List<IndexedEventDocument> documents,
+			IndexWriteMode writeMode
 	) {
 		Objects.requireNonNull(target, "target must not be null");
+		Objects.requireNonNull(writeMode, "writeMode must not be null");
 		if (!GdeltIndexKind.EVENT.accepts(target)) {
 			throw new IllegalArgumentException("target must be an Event physical index");
 		}
@@ -67,8 +71,11 @@ final class ElasticsearchEventIdentityGuard {
 		checkInterrupted();
 
 		BatchCandidates candidates = collectCandidates(boundedDocuments);
-		SearchResponse<EventIdentityProjection> response = search(candidates.ids());
-		Set<String> existingIds = validateResponse(target, candidates, response);
+		SearchResponse<EventIdentityProjection> response = search(
+				target,
+				candidates.ids(),
+				writeMode);
+		Set<String> existingIds = validateResponse(target, candidates, response, writeMode);
 
 		List<IndexedEventDocument> documentsToCreate = boundedDocuments.stream()
 				.filter(document -> !existingIds.contains(document.documentId()))
@@ -83,13 +90,31 @@ final class ElasticsearchEventIdentityGuard {
 		return new EventIdentityGuardPlan(documentsToCreate, replayPositions);
 	}
 
-	private SearchResponse<EventIdentityProjection> search(List<String> ids) {
+	/** Строит обычный ACTIVE write plan. */
+	EventIdentityGuardPlan plan(
+			ExactIndexTarget target,
+			List<IndexedEventDocument> documents
+	) {
+		return plan(target, documents, IndexWriteMode.ACTIVE);
+	}
+
+	private SearchResponse<EventIdentityProjection> search(
+			ExactIndexTarget target,
+			List<String> ids,
+			IndexWriteMode writeMode
+	) {
+		List<String> indices = writeMode == IndexWriteMode.REBUILD
+				? List.of(GdeltIndexKind.EVENT.readAlias(), target.indexName())
+				: List.of(GdeltIndexKind.EVENT.readAlias());
+		int searchSize = writeMode == IndexWriteMode.REBUILD
+				? Math.multiplyExact(ids.size(), 2)
+				: ids.size();
 		SearchRequest request = SearchRequest.of(builder -> builder
-				.index(GdeltIndexKind.EVENT.readAlias())
+				.index(indices)
 				.allowNoIndices(false)
-				.ignoreUnavailable(false)
+				.ignoreUnavailable(writeMode == IndexWriteMode.REBUILD)
 				.allowPartialSearchResults(false)
-				.size(ids.size())
+				.size(searchSize)
 				.trackTotalHits(track -> track.enabled(true))
 				.source(source -> source.filter(filter -> filter
 						.includes(PROVENANCE_SOURCE_FIELDS)))
@@ -134,7 +159,8 @@ final class ElasticsearchEventIdentityGuard {
 	private static Set<String> validateResponse(
 			ExactIndexTarget target,
 			BatchCandidates candidates,
-			SearchResponse<EventIdentityProjection> response
+			SearchResponse<EventIdentityProjection> response,
+			IndexWriteMode writeMode
 	) {
 		if (response == null) {
 			throw invalidResponse();
@@ -146,27 +172,44 @@ final class ElasticsearchEventIdentityGuard {
 				|| total.relation() != TotalHitsRelation.Eq) {
 			throw invalidResponse();
 		}
-		if (total.value() > candidates.byId().size()) {
+		long maximumHits = writeMode == IndexWriteMode.REBUILD
+				? Math.multiplyExact(candidates.byId().size(), 2)
+				: candidates.byId().size();
+		if (total.value() > maximumHits) {
 			throw conflict(candidates);
 		}
 		if (total.value() != hits.size()) {
 			throw invalidResponse();
 		}
 
+		Set<String> targetIds = new LinkedHashSet<>();
+		Map<String, String> sourceIndices = new LinkedHashMap<>();
 		Set<String> existingIds = new LinkedHashSet<>();
 		for (Hit<EventIdentityProjection> hit : hits) {
 			Candidate candidate = candidates.byId().get(hit.id());
 			if (candidate == null) {
 				throw invalidResponse();
 			}
-			if (!existingIds.add(hit.id())) {
+			EventIdentityProjection projection = hit.source();
+			if (hit.index() == null
+					|| hit.index().isBlank()
+					|| !validProjection(projection)
+					|| !sameProvenance(candidate.document(), projection)) {
 				throw new EventIdentityConflictException(
 						candidate.document().sourceLineNumber());
 			}
-			EventIdentityProjection projection = hit.source();
-			if (!target.indexName().equals(hit.index())
-					|| !validProjection(projection)
-					|| !sameProvenance(candidate.document(), projection)) {
+			if (target.indexName().equals(hit.index())) {
+				if (!targetIds.add(hit.id())) {
+					throw new EventIdentityConflictException(
+							candidate.document().sourceLineNumber());
+				}
+				existingIds.add(hit.id());
+			}
+			else if (writeMode == IndexWriteMode.ACTIVE) {
+				throw new EventIdentityConflictException(
+						candidate.document().sourceLineNumber());
+			}
+			else if (sourceIndices.putIfAbsent(hit.id(), hit.index()) != null) {
 				throw new EventIdentityConflictException(
 						candidate.document().sourceLineNumber());
 			}

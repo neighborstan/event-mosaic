@@ -13,6 +13,7 @@ import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Pattern;
@@ -260,6 +261,16 @@ public class JdbcArchiveProcessingLedger implements ArchiveProcessingLedger {
 	) {
 		requireArchiveKey(archiveIdempotencyKey);
 		return repository.findByArchiveIdempotencyKey(archiveIdempotencyKey);
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public List<ArchiveProcessingState> findByPartition(String partitionKey) {
+		Objects.requireNonNull(partitionKey, "partitionKey must not be null");
+		if (partitionKey.isBlank()) {
+			throw new IllegalArgumentException("partitionKey must not be blank");
+		}
+		return repository.findByPartition(partitionKey);
 	}
 
 	private static void requireArchiveKey(String archiveIdempotencyKey) {

@@ -77,6 +77,9 @@ public interface IngestionArchiveLedger {
 	 */
 	Optional<IngestionArchiveState> findByIdempotencyKey(String idempotencyKey);
 
+	/** Возвращает полный STAGED archive set half-open UTC interval. */
+	List<IngestionArchiveState> findStagedBetween(Instant startAt, Instant endAt);
+
 	/**
 	 * Находит производное состояние run по времени source update.
 	 *

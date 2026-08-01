@@ -93,6 +93,9 @@ public final class GdeltTestFixtures {
 				Duration.ofMinutes(12),
 				500,
 				new BackendDataProperties.DiskPressure(1, 1),
+				new BackendDataProperties.Rebuild(
+						Duration.ofMinutes(15),
+						Duration.ofMinutes(15)),
 				new BackendDataProperties.Cleanup(
 						Duration.ofHours(24),
 						Duration.ofDays(7),

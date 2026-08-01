@@ -2,6 +2,7 @@ package com.neighbor.eventmosaic.ingestion.api;
 
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -132,4 +133,7 @@ public interface ArchiveProcessingLedger {
 	 * @return state либо empty до регистрации
 	 */
 	Optional<ArchiveProcessingState> findByArchiveIdempotencyKey(String archiveIdempotencyKey);
+
+	/** Возвращает durable processing states logical partition в стабильном порядке. */
+	List<ArchiveProcessingState> findByPartition(String partitionKey);
 }

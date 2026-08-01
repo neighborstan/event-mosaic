@@ -20,6 +20,7 @@ import org.springframework.validation.annotation.Validated;
  * @param operationDeadline общая monotonic deadline одного one-shot cycle
  * @param receiptPageSize максимальный размер страницы receipt verification
  * @param diskPressure минимальные резервы свободного места
+ * @param rebuild сроки подтвержденного плана и maintenance ownership
  * @param cleanup окна формирования maintenance candidates
  */
 @Validated
@@ -30,6 +31,7 @@ public record BackendDataProperties(
 		@DefaultValue("12m") @NotNull Duration operationDeadline,
 		@DefaultValue("500") @Positive @Max(10_000) int receiptPageSize,
 		@DefaultValue @Valid @NotNull DiskPressure diskPressure,
+		@DefaultValue @Valid @NotNull Rebuild rebuild,
 		@DefaultValue @Valid @NotNull Cleanup cleanup
 ) {
 
@@ -45,6 +47,11 @@ public record BackendDataProperties(
 			throw new IllegalArgumentException("receiptPageSize must be between 1 and 10000");
 		}
 		Objects.requireNonNull(diskPressure, "diskPressure must not be null");
+		Objects.requireNonNull(rebuild, "rebuild must not be null");
+		if (rebuild.ownershipLease().compareTo(operationDeadline) <= 0) {
+			throw new IllegalArgumentException(
+					"rebuild ownershipLease must exceed operationDeadline");
+		}
 		Objects.requireNonNull(cleanup, "cleanup must not be null");
 	}
 
@@ -104,6 +111,24 @@ public record BackendDataProperties(
 			if (elasticsearchMinFreeBytes <= 0) {
 				throw new IllegalArgumentException("elasticsearchMinFreeBytes must be positive");
 			}
+		}
+	}
+
+	/**
+	 * Bounded сроки ручного rebuild protocol.
+	 *
+	 * @param planTtl срок действия read-only inspect plan
+	 * @param ownershipLease срок lease, продлеваемый между архивами
+	 */
+	public record Rebuild(
+			@DefaultValue("15m") @NotNull Duration planTtl,
+			@DefaultValue("15m") @NotNull Duration ownershipLease
+	) {
+
+		/** Проверяет положительные сроки независимо от Spring binding. */
+		public Rebuild {
+			requirePositive(planTtl, "planTtl");
+			requirePositive(ownershipLease, "ownershipLease");
 		}
 	}
 

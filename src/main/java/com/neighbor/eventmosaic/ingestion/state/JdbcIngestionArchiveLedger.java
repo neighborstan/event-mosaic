@@ -138,6 +138,20 @@ public class JdbcIngestionArchiveLedger implements IngestionArchiveLedger {
 	}
 
 	@Override
+	@Transactional(readOnly = true)
+	public List<IngestionArchiveState> findStagedBetween(
+			Instant startAt,
+			Instant endAt
+	) {
+		Objects.requireNonNull(startAt, "startAt must not be null");
+		Objects.requireNonNull(endAt, "endAt must not be null");
+		if (!startAt.isBefore(endAt)) {
+			throw new IllegalArgumentException("startAt must be before endAt");
+		}
+		return archiveRepository.findStagedBetween(startAt, endAt);
+	}
+
+	@Override
 	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
 	public Optional<IngestionRunState> findRunByUpdateTime(Instant sourceUpdateTime) {
 		return runRepository.findByUpdateTime(sourceUpdateTime).map(this::loadRun);

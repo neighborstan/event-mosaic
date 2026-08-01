@@ -32,6 +32,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingProperties;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
+import com.neighbor.eventmosaic.indexing.api.IndexWriteMode;
 import jakarta.json.JsonException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -202,7 +203,10 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		List<IndexedEventDocument> events = command.documents().stream()
 				.map(IndexedEventDocument.class::cast)
 				.toList();
-		EventIdentityGuardPlan plan = guardEvents(command.target(), events);
+		EventIdentityGuardPlan plan = guardEvents(
+				command.target(),
+				events,
+				command.writeMode());
 		if (plan.documentsToCreate().isEmpty()) {
 			return successfulEventResult(command.documents().size());
 		}
@@ -220,11 +224,12 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	private EventIdentityGuardPlan guardEvents(
 			ExactIndexTarget target,
-			List<IndexedEventDocument> events
+			List<IndexedEventDocument> events,
+			IndexWriteMode writeMode
 	) {
 		long startedAt = System.nanoTime();
 		try {
-			EventIdentityGuardPlan plan = eventIdentityGuard.plan(target, events);
+			EventIdentityGuardPlan plan = eventIdentityGuard.plan(target, events, writeMode);
 			metrics.eventIdentityGuard(
 					System.nanoTime() - startedAt,
 					plan.replayCount() == 0

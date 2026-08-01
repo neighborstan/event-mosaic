@@ -8,12 +8,14 @@ import java.util.Objects;
  *
  * @param kind вид документов
  * @param target exact physical target подтвержденной generation
+ * @param writeMode обычная запись либо заполнение теневой rebuild generation
  * @param documents документы порции
  * @param <T> конкретный тип индексируемого документа
  */
 public record BulkIndexCommand<T extends GdeltIndexedDocument>(
 		GdeltIndexKind kind,
 		ExactIndexTarget target,
+		IndexWriteMode writeMode,
 		List<T> documents
 ) {
 
@@ -23,6 +25,7 @@ public record BulkIndexCommand<T extends GdeltIndexedDocument>(
 	public BulkIndexCommand {
 		Objects.requireNonNull(kind, "kind must not be null");
 		Objects.requireNonNull(target, "target must not be null");
+		Objects.requireNonNull(writeMode, "writeMode must not be null");
 		if (!kind.accepts(target)) {
 			throw new IllegalArgumentException("target must match command kind");
 		}
@@ -35,6 +38,15 @@ public record BulkIndexCommand<T extends GdeltIndexedDocument>(
 				throw new IllegalArgumentException("all documents must match command kind");
 			}
 		}
+	}
+
+	/** Создает обычную порцию для текущей ACTIVE generation. */
+	public BulkIndexCommand(
+			GdeltIndexKind kind,
+			ExactIndexTarget target,
+			List<T> documents
+	) {
+		this(kind, target, IndexWriteMode.ACTIVE, documents);
 	}
 
 }

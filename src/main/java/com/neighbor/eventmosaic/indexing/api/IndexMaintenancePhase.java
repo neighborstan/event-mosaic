@@ -24,7 +24,7 @@ public enum IndexMaintenancePhase {
 	public boolean canAdvanceTo(IndexMaintenancePhase next) {
 		return switch (this) {
 			case PLANNED -> next == FREEZE_REQUESTED || next == BUILDING;
-			case FREEZE_REQUESTED -> next == FROZEN;
+			case FREEZE_REQUESTED -> next == FROZEN || next == UNFREEZE_REQUESTED;
 			case FROZEN -> next == BUILDING || next == UNFREEZE_REQUESTED;
 			case BUILDING -> next == VERIFIED || next == UNFREEZE_REQUESTED;
 			case VERIFIED -> next == CUTOVER_REQUESTED || next == UNFREEZE_REQUESTED;

@@ -29,6 +29,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexedLocationRole;
 import com.neighbor.eventmosaic.indexing.api.IndexedMentionDocument;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
+import com.neighbor.eventmosaic.indexing.api.IndexWriteMode;
 import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -291,6 +292,37 @@ class ElasticsearchGdeltIndexWriterIntegrationTest {
 		assertThat(storedEvent.source()).isEqualTo(event);
 		assertThat(storedMention.found()).isTrue();
 		assertThat(storedMention.source()).isEqualTo(mention);
+	}
+
+	@Test
+	@DisplayName("Повторный rebuild Event считает уже созданный shadow document replay")
+	void resumesEventRebuildWithoutCreateConflict() throws IOException {
+		createPhysicalIndices();
+		client.indices().create(request -> request.index(MISSING_EVENT_GENERATION));
+		ExactIndexTarget oldTarget = target(EVENT_GENERATION);
+		ExactIndexTarget shadowTarget = target(MISSING_EVENT_GENERATION);
+		IndexedEventDocument document = event(1_050, 7, "Rebuild actor");
+
+		assertThat(writer.write(new BulkIndexCommand<>(
+				EVENT,
+				oldTarget,
+				List.of(document))).successful()).isTrue();
+		writer.refresh(EVENT, oldTarget);
+		assertThat(writer.write(new BulkIndexCommand<>(
+				EVENT,
+				shadowTarget,
+				IndexWriteMode.REBUILD,
+				List.of(document))).successful()).isTrue();
+		writer.refresh(EVENT, shadowTarget);
+
+		assertThat(writer.write(new BulkIndexCommand<>(
+				EVENT,
+				shadowTarget,
+				IndexWriteMode.REBUILD,
+				List.of(document))).successful()).isTrue();
+		assertThat(client.get(
+				request -> request.index(MISSING_EVENT_GENERATION).id(document.documentId()),
+				IndexedEventDocument.class).found()).isTrue();
 	}
 
 	@Test
