@@ -1,16 +1,19 @@
 package com.neighbor.eventmosaic.indexing;
 
+import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexOutcome;
 import com.neighbor.eventmosaic.indexing.api.BulkIndexResult;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import org.springframework.stereotype.Component;
 
 /**
- * Публикует indexing counters только с enum-backed low-cardinality tags.
+ * Собирает счетчики и длительность операций Elasticsearch с небольшим
+ * фиксированным набором значений меток метрик.
  */
 @Component
 final class IndexingMetrics {
@@ -19,6 +22,12 @@ final class IndexingMetrics {
 	private static final String DOCUMENTS_METER = "event_mosaic.indexing.bulk.documents";
 	private static final String EVENT_IDENTITY_GUARD_METER =
 			"event_mosaic.indexing.event_identity_guard";
+	private static final String BULK_DURATION_METER =
+			"event_mosaic.indexing.bulk.duration";
+	private static final String RECEIPT_DURATION_METER =
+			"event_mosaic.indexing.receipt.duration";
+	private static final String RECEIPT_INCIDENTS_METER =
+			"event_mosaic.indexing.receipt.incidents";
 	private static final String KIND_TAG = "kind";
 	private static final String OUTCOME_TAG = "outcome";
 
@@ -64,9 +73,7 @@ final class IndexingMetrics {
 			throw new IllegalArgumentException("submitted must be positive");
 		}
 		String kindTag = tag(kind);
-		IndexingRequestMetricOutcome outcome = retryable
-				? IndexingRequestMetricOutcome.RETRYABLE_FAILURE
-				: IndexingRequestMetricOutcome.NON_RETRYABLE_FAILURE;
+		IndexingRequestMetricOutcome outcome = failureOutcome(retryable);
 		meterRegistry.counter(
 				REQUESTS_METER,
 				KIND_TAG, kindTag,
@@ -87,6 +94,55 @@ final class IndexingMetrics {
 		).record(elapsedNanos, TimeUnit.NANOSECONDS);
 	}
 
+	/** Начинает измерение одной пакетной записи. */
+	Timer.Sample startBulkTimer() {
+		return Timer.start(meterRegistry);
+	}
+
+	/** Завершает измерение пакетной записи с итогом, определенным writer. */
+	void bulkDuration(
+			Timer.Sample sample,
+			GdeltIndexKind kind,
+			IndexingRequestMetricOutcome outcome
+	) {
+		stop(
+				sample,
+				BULK_DURATION_METER,
+				kind,
+				Objects.requireNonNull(outcome, "outcome must not be null"));
+	}
+
+	/** Начинает измерение одной приемочной проверки архива. */
+	Timer.Sample startReceiptTimer() {
+		return Timer.start(meterRegistry);
+	}
+
+	/**
+	 * Завершает приемочную проверку и отмечает обнаруженное расхождение.
+	 *
+	 * @param sample начатое измерение текущей проверки
+	 * @param kind вид проверяемых документов
+	 * @param outcome безопасный итог проверки или отказа
+	 */
+	void receiptDuration(
+			Timer.Sample sample,
+			GdeltIndexKind kind,
+			IndexingReceiptMetricOutcome outcome
+	) {
+		stop(
+				sample,
+				RECEIPT_DURATION_METER,
+				kind,
+				Objects.requireNonNull(outcome, "outcome must not be null"));
+		switch (outcome) {
+			case SHORTAGE, IDENTITY_MISMATCH -> receiptIncident(kind, "mismatch");
+			case SURPLUS -> receiptIncident(kind, "surplus");
+			case MATCHED, RETRYABLE_FAILURE, NON_RETRYABLE_FAILURE -> {
+				// Эти результаты не являются подтвержденным расхождением receipt.
+			}
+		}
+	}
+
 	private void incrementDocuments(
 			String kind,
 			IndexingDocumentMetricOutcome outcome,
@@ -101,7 +157,7 @@ final class IndexingMetrics {
 		}
 	}
 
-	private static IndexingRequestMetricOutcome requestOutcome(BulkIndexOutcome outcome) {
+	static IndexingRequestMetricOutcome requestOutcome(BulkIndexOutcome outcome) {
 		return switch (outcome) {
 			case SUCCEEDED -> IndexingRequestMetricOutcome.SUCCEEDED;
 			case RETRYABLE_PARTIAL_FAILURE ->
@@ -111,8 +167,46 @@ final class IndexingMetrics {
 		};
 	}
 
+	static IndexingRequestMetricOutcome failureOutcome(boolean retryable) {
+		return retryable
+				? IndexingRequestMetricOutcome.RETRYABLE_FAILURE
+				: IndexingRequestMetricOutcome.NON_RETRYABLE_FAILURE;
+	}
+
+	static IndexingReceiptMetricOutcome receiptOutcome(ArchiveReceiptStatus status) {
+		return switch (Objects.requireNonNull(status, "status must not be null")) {
+			case MATCHED -> IndexingReceiptMetricOutcome.MATCHED;
+			case SHORTAGE -> IndexingReceiptMetricOutcome.SHORTAGE;
+			case SURPLUS -> IndexingReceiptMetricOutcome.SURPLUS;
+			case IDENTITY_MISMATCH -> IndexingReceiptMetricOutcome.IDENTITY_MISMATCH;
+		};
+	}
+
+	private void stop(
+			Timer.Sample sample,
+			String meter,
+			GdeltIndexKind kind,
+			Enum<?> outcome
+	) {
+		Objects.requireNonNull(sample, "sample must not be null").stop(
+				meterRegistry.timer(
+						meter,
+						KIND_TAG, tag(kind),
+						OUTCOME_TAG, tag(outcome)));
+	}
+
+	private void receiptIncident(GdeltIndexKind kind, String outcome) {
+		meterRegistry.counter(
+				RECEIPT_INCIDENTS_METER,
+				KIND_TAG, tag(kind),
+				OUTCOME_TAG, outcome
+		).increment();
+	}
+
 	private static String tag(Enum<?> value) {
-		return value.name().toLowerCase(Locale.ROOT);
+		return Objects.requireNonNull(value, "metric tag value must not be null")
+				.name()
+				.toLowerCase(Locale.ROOT);
 	}
 
 }

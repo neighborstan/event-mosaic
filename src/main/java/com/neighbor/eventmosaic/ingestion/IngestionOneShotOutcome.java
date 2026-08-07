@@ -10,5 +10,8 @@ public enum IngestionOneShotOutcome {
 	RETRY_DEFERRED,
 
 	/** Общий monotonic cycle budget исчерпан. */
-	OPERATION_DEADLINE_EXCEEDED
+	OPERATION_DEADLINE_EXCEEDED,
+
+	/** Новая растущая operation отложена из-за storage pressure. */
+	STORAGE_PRESSURE
 }

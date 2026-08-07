@@ -17,6 +17,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexedLocationRole;
 import com.neighbor.eventmosaic.indexing.api.IndexedMentionDocument;
 import com.neighbor.eventmosaic.search.api.EventDetails;
 import com.neighbor.eventmosaic.search.api.SearchAccessException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -77,7 +78,10 @@ class ElasticsearchEventDetailsQueryIntegrationTest {
 		mentionTarget = createTarget(MENTION_PHYSICAL);
 		addStableAliases(EVENT_PHYSICAL, MENTION_PHYSICAL);
 		eventDetailsQuery =
-				new ElasticsearchEventDetailsQuery(client, new EventSearchProperties(2));
+				new ElasticsearchEventDetailsQuery(
+						client,
+						new EventSearchProperties(2),
+						new SearchMetrics(new SimpleMeterRegistry()));
 	}
 
 	@AfterEach

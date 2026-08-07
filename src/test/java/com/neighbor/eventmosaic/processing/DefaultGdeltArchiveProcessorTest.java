@@ -41,6 +41,8 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgressListener
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -59,8 +61,63 @@ import org.junit.jupiter.api.Test;
 @DisplayName("Пакетная обработка архивов GDELT")
 class DefaultGdeltArchiveProcessorTest {
 
+	private static final String ARCHIVE_DURATION_METER =
+			"event_mosaic.processing.archive.duration";
 	private static final Instant EVENT_TIME = Instant.parse("2026-07-21T14:30:00Z");
 	private static final Instant MENTION_TIME = Instant.parse("2026-07-21T14:44:00Z");
+
+	@Test
+	@DisplayName("Успешная обработка архива один раз завершает измерение с видом и итогом")
+	void recordsCompletedArchiveDurationOnce() {
+		SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+		DefaultGdeltArchiveProcessor processor = processor(
+				new FakeIndexWriter(2),
+				validMentions(1),
+				null,
+				meterRegistry);
+
+		ArchiveProcessingResult result = processor.process(
+				ProcessingTestFixtures.mentionRequest(),
+				ArchiveProcessingProgressListener.continuing());
+
+		assertThat(result.outcome()).isEqualTo(ArchiveProcessingOutcome.COMPLETED);
+		Timer timer = meterRegistry.find(ARCHIVE_DURATION_METER)
+				.tag("kind", "translation_mentions")
+				.tag("outcome", "completed")
+				.timer();
+		assertThat(timer).isNotNull();
+		assertThat(timer.count()).isEqualTo(1);
+		assertThat(timer.getId().getTags())
+				.extracting(Tag::getKey)
+				.containsExactlyInAnyOrder("kind", "outcome");
+	}
+
+	@Test
+	@DisplayName("Неожиданный отказ один раз завершает измерение как неуспешную обработку")
+	void recordsUnexpectedArchiveFailureOnce() {
+		SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+		IllegalStateException defect = new IllegalStateException("unexpected defect");
+		GdeltMentionCsvReader reader = (path, consumer) -> {
+			throw defect;
+		};
+		DefaultGdeltArchiveProcessor processor = processor(
+				new FakeIndexWriter(2),
+				reader,
+				meterRegistry);
+
+		assertThatThrownBy(() -> processor.process(
+				ProcessingTestFixtures.mentionRequest(),
+				ArchiveProcessingProgressListener.continuing()))
+				.isSameAs(defect);
+
+		Timer timer = meterRegistry.find(ARCHIVE_DURATION_METER)
+				.tag("kind", "translation_mentions")
+				.tag("outcome", "failed")
+				.timer();
+		assertThat(timer).isNotNull();
+		assertThat(timer.count()).isEqualTo(1);
+		assertThat(meterRegistry.find(ARCHIVE_DURATION_METER).timers()).hasSize(1);
+	}
 
 	@Test
 	@DisplayName("Исчерпанная deadline не открывает CSV и не отправляет bulk")
@@ -696,6 +753,19 @@ class DefaultGdeltArchiveProcessorTest {
 			List<GdeltMention> mentions,
 			AtomicInteger delivered
 	) {
+		return processor(
+				writer,
+				mentions,
+				delivered,
+				new SimpleMeterRegistry());
+	}
+
+	private static DefaultGdeltArchiveProcessor processor(
+			FakeIndexWriter writer,
+			List<GdeltMention> mentions,
+			AtomicInteger delivered,
+			SimpleMeterRegistry meterRegistry
+	) {
 		GdeltMentionCsvReader mentionReader = (path, consumer) -> {
 			long lineNumber = 0;
 			for (GdeltMention mention : mentions) {
@@ -715,12 +785,20 @@ class DefaultGdeltArchiveProcessorTest {
 					Map.of(),
 					Map.of());
 		};
-		return processor(writer, mentionReader);
+		return processor(writer, mentionReader, meterRegistry);
 	}
 
 	private static DefaultGdeltArchiveProcessor processor(
 			FakeIndexWriter writer,
 			GdeltMentionCsvReader mentionReader
+	) {
+		return processor(writer, mentionReader, new SimpleMeterRegistry());
+	}
+
+	private static DefaultGdeltArchiveProcessor processor(
+			FakeIndexWriter writer,
+			GdeltMentionCsvReader mentionReader,
+			SimpleMeterRegistry meterRegistry
 	) {
 		GdeltEventCsvReader unusedEventReader = (path, consumer) -> {
 			throw new AssertionError("Event reader must not be called");
@@ -731,7 +809,7 @@ class DefaultGdeltArchiveProcessorTest {
 				new GdeltEventDocumentMapper(),
 				new GdeltMentionDocumentMapper(),
 				writer,
-				new ProcessingMetrics(new SimpleMeterRegistry()));
+				new ProcessingMetrics(meterRegistry));
 	}
 
 	private static ArchiveProcessingResult processReaderFailure(RuntimeException failure) {

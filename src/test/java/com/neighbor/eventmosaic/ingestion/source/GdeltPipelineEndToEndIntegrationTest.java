@@ -20,6 +20,7 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionRunState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
+import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
 import com.neighbor.eventmosaic.ingestion.staging.HttpArchiveDownloader;
 import com.neighbor.eventmosaic.ingestion.staging.StagingLayout;
 import com.neighbor.eventmosaic.ingestion.staging.ZipArchiveStager;
@@ -94,6 +95,9 @@ class GdeltPipelineEndToEndIntegrationTest {
 
 	@Autowired
 	private MeterRegistry meterRegistry;
+
+	@Autowired
+	private BackendDataStorageMonitor storageMonitor;
 
 	private HttpServer server;
 	private HttpClient httpClient;
@@ -273,7 +277,8 @@ class GdeltPipelineEndToEndIntegrationTest {
 				new HttpArchiveDownloader(httpClient, properties, metrics, resolver),
 				new ZipArchiveStager(properties, metrics),
 				properties,
-				metrics);
+				metrics,
+				storageMonitor);
 		return new GdeltPipelineService(
 				acquisition,
 				processingLedger,
@@ -282,7 +287,9 @@ class GdeltPipelineEndToEndIntegrationTest {
 				indexWriter,
 				indexTargetResolver,
 				properties,
-				GdeltTestFixtures.backendDataProperties());
+				GdeltTestFixtures.backendDataProperties(),
+				metrics,
+				storageMonitor);
 	}
 
 	private void registerSource(

@@ -64,6 +64,9 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.staging.ZipArchiveStager;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -109,6 +112,8 @@ class DefaultGenerationCleanupServiceFaultTest {
 	private final IngestionArchiveLedger archiveLedger = mock(IngestionArchiveLedger.class);
 	private final ArchiveProcessingLedger processingLedger = mock(ArchiveProcessingLedger.class);
 	private final ZipArchiveStager archiveStager = mock(ZipArchiveStager.class);
+	private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+	private final MaintenanceMetrics metrics = new MaintenanceMetrics(meterRegistry);
 	private final Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
 	private final DefaultGenerationCleanupService service = new DefaultGenerationCleanupService(
 			cleanupLedger,
@@ -117,6 +122,7 @@ class DefaultGenerationCleanupServiceFaultTest {
 			archiveLedger,
 			processingLedger,
 			archiveStager,
+			metrics,
 			properties(),
 			clock);
 
@@ -214,6 +220,7 @@ class DefaultGenerationCleanupServiceFaultTest {
 		assertThat(result.outcome()).isEqualTo(GenerationCleanupOutcome.COMPLETED);
 		assertThat(result.phase()).isEqualTo(IndexMaintenancePhase.COMPLETED);
 		assertThat(result.operationToken()).isEqualTo(OPERATION_TOKEN);
+		assertCleanupCounter(1, "completed", "none");
 		ArgumentCaptor<CleanupClaim> claim = ArgumentCaptor.forClass(CleanupClaim.class);
 		verify(cleanupLedger).claim(claim.capture(), any(Duration.class));
 		assertThat(claim.getValue().candidate().status())
@@ -277,6 +284,7 @@ class DefaultGenerationCleanupServiceFaultTest {
 		verify(cleanupLedger, times(1)).findRecoverable(PARTITION_KEY);
 		verify(cleanupLedger, never()).claim(any(), any());
 		verify(elasticsearch, never()).deleteExactIndex(any());
+		assertCleanupCounter(2, "failed", "stale_cleanup_plan");
 	}
 
 	@Test
@@ -1134,6 +1142,21 @@ class DefaultGenerationCleanupServiceFaultTest {
 				plan.currentReceipts(),
 				expiresAt,
 				fingerprint);
+	}
+
+	private void assertCleanupCounter(
+			long expectedCount,
+			String outcome,
+			String code
+	) {
+		Counter counter = meterRegistry.get(MaintenanceMetrics.CLEANUP_EXECUTIONS_METER)
+				.tags("outcome", outcome, "code", code)
+				.counter();
+		assertThat(counter.count()).isEqualTo(expectedCount);
+		assertThat(counter.getId().getTags())
+				.containsExactlyInAnyOrderElementsOf(Tags.of(
+						"outcome", outcome,
+						"code", code).stream().toList());
 	}
 
 	private static BackendDataProperties properties() {

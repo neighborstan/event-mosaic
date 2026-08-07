@@ -16,8 +16,10 @@ import com.neighbor.eventmosaic.indexing.api.IndexedEventLocation;
 import com.neighbor.eventmosaic.search.api.EventDetails;
 import com.neighbor.eventmosaic.search.api.EventDetailsQuery;
 import com.neighbor.eventmosaic.search.api.SearchAccessException;
+import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import org.springframework.stereotype.Component;
 
@@ -38,19 +40,25 @@ public class ElasticsearchEventDetailsQuery implements EventDetailsQuery {
 
 	private final ElasticsearchClient elasticsearchClient;
 	private final EventSearchProperties properties;
+	private final SearchMetrics metrics;
 
 	/**
 	 * Создает поисковый adapter поверх официального Elasticsearch Java Client.
 	 *
 	 * @param elasticsearchClient Elasticsearch client
 	 * @param properties проверенные ограничения details query
+	 * @param metrics безопасные метрики поисковых операций
 	 */
 	public ElasticsearchEventDetailsQuery(
 			ElasticsearchClient elasticsearchClient,
-			EventSearchProperties properties
+			EventSearchProperties properties,
+			SearchMetrics metrics
 	) {
-		this.elasticsearchClient = elasticsearchClient;
-		this.properties = properties;
+		this.elasticsearchClient = Objects.requireNonNull(
+				elasticsearchClient,
+				"elasticsearchClient must not be null");
+		this.properties = Objects.requireNonNull(properties, "properties must not be null");
+		this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
 	}
 
 	@Override
@@ -58,19 +66,27 @@ public class ElasticsearchEventDetailsQuery implements EventDetailsQuery {
 		if (eventId <= 0) {
 			throw new IllegalArgumentException("eventId must be positive");
 		}
+		Timer.Sample timer = metrics.startDetailsTimer();
+		SearchDetailsMetricOutcome metricOutcome = SearchDetailsMetricOutcome.UNAVAILABLE;
 		try {
 			Optional<IndexedEventDocument> event = findEvent(eventId);
 			if (event.isEmpty()) {
+				metricOutcome = SearchDetailsMetricOutcome.NOT_FOUND;
 				return Optional.empty();
 			}
-			return Optional.of(toDetails(event.orElseThrow(), findSources(eventId)));
+			EventDetails details = toDetails(event.orElseThrow(), findSources(eventId));
+			metricOutcome = SearchDetailsMetricOutcome.FOUND;
+			return Optional.of(details);
 		} catch (ElasticsearchException exception) {
 			if (isIndexNotFound(exception)) {
+				metricOutcome = SearchDetailsMetricOutcome.NOT_FOUND;
 				return Optional.empty();
 			}
 			throw new SearchAccessException(exception);
 		} catch (IOException | JsonpMappingException exception) {
 			throw new SearchAccessException(exception);
+		} finally {
+			metrics.detailsDuration(timer, metricOutcome);
 		}
 	}
 

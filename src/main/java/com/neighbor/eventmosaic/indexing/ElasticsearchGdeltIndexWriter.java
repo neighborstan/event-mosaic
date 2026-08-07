@@ -33,6 +33,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import com.neighbor.eventmosaic.indexing.api.IndexWriteMode;
+import io.micrometer.core.instrument.Timer;
 import jakarta.json.JsonException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -151,6 +152,26 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			BulkIndexCommand<? extends GdeltIndexedDocument> command
 	) {
 		Objects.requireNonNull(command, "command must not be null");
+		Timer.Sample timer = metrics.startBulkTimer();
+		IndexingRequestMetricOutcome metricOutcome =
+				IndexingRequestMetricOutcome.NON_RETRYABLE_FAILURE;
+		try {
+			BulkIndexResult result = writeOnce(command);
+			metricOutcome = IndexingMetrics.requestOutcome(result.outcome());
+			return result;
+		}
+		catch (IndexingAccessException | IndexingInterruptedException exception) {
+			metricOutcome = IndexingRequestMetricOutcome.RETRYABLE_FAILURE;
+			throw exception;
+		}
+		finally {
+			metrics.bulkDuration(timer, command.kind(), metricOutcome);
+		}
+	}
+
+	private BulkIndexResult writeOnce(
+			BulkIndexCommand<? extends GdeltIndexedDocument> command
+	) {
 		checkInterrupted();
 		if (command.documents().size() > properties.bulkSize()) {
 			throw new IllegalArgumentException("bulk command exceeds configured bulkSize");
@@ -441,6 +462,24 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 	@Override
 	public ArchiveReceiptVerification verifyReceipt(ArchiveReceiptQuery query) {
 		Objects.requireNonNull(query, "query must not be null");
+		Timer.Sample timer = metrics.startReceiptTimer();
+		IndexingReceiptMetricOutcome metricOutcome =
+				IndexingReceiptMetricOutcome.NON_RETRYABLE_FAILURE;
+		try {
+			ArchiveReceiptVerification result = verifyReceiptOnce(query);
+			metricOutcome = IndexingMetrics.receiptOutcome(result.status());
+			return result;
+		}
+		catch (IndexingAccessException | IndexingInterruptedException exception) {
+			metricOutcome = IndexingReceiptMetricOutcome.RETRYABLE_FAILURE;
+			throw exception;
+		}
+		finally {
+			metrics.receiptDuration(timer, query.kind(), metricOutcome);
+		}
+	}
+
+	private ArchiveReceiptVerification verifyReceiptOnce(ArchiveReceiptQuery query) {
 		checkInterrupted();
 		try {
 			verifyExactTarget(query.kind(), query.target());

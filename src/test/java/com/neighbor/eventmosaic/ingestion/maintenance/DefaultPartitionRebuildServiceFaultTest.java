@@ -54,6 +54,9 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingFailure;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -87,6 +90,8 @@ class DefaultPartitionRebuildServiceFaultTest {
 	private final ArchiveProcessingLedger processingLedger = mock(ArchiveProcessingLedger.class);
 	private final ZipArchiveStager archiveStager = mock(ZipArchiveStager.class);
 	private final GdeltArchiveProcessor archiveProcessor = mock(GdeltArchiveProcessor.class);
+	private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+	private final MaintenanceMetrics metrics = new MaintenanceMetrics(meterRegistry);
 	private final Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
 	private final DefaultPartitionRebuildService service = new DefaultPartitionRebuildService(
 			lifecycleLedger,
@@ -96,6 +101,7 @@ class DefaultPartitionRebuildServiceFaultTest {
 			processingLedger,
 			archiveStager,
 			archiveProcessor,
+			metrics,
 			properties(),
 			clock);
 
@@ -130,6 +136,17 @@ class DefaultPartitionRebuildServiceFaultTest {
 	}
 
 	@Test
+	@DisplayName("Неуспешный inspect один раз записывает bounded rebuild timer")
+	void failedInspectRecordsOneBoundedTimer() {
+		assertThatExceptionOfType(PartitionRebuildException.class)
+				.isThrownBy(() -> service.inspect(PARTITION_KEY))
+				.satisfies(exception -> assertThat(exception.errorCode())
+						.isEqualTo(PartitionRebuildErrorCode.UNKNOWN_PARTITION));
+
+		assertRebuildTimer(1, "inspect", "failed", "unknown_partition");
+	}
+
+	@Test
 	@DisplayName("Измененный fingerprint и истекший plan отклоняются до durable claim")
 	void rejectsTamperedAndExpiredPlansBeforeClaim() {
 		PartitionRebuildPlan tampered = withFingerprint(plan, "f".repeat(64));
@@ -152,6 +169,7 @@ class DefaultPartitionRebuildServiceFaultTest {
 				.satisfies(exception -> assertThat(exception.errorCode())
 						.isEqualTo(PartitionRebuildErrorCode.STALE_REBUILD_PLAN));
 		verify(lifecycleLedger, never()).startRebuild(any(), any(Duration.class));
+		assertRebuildTimer(2, "execute", "failed", "stale_rebuild_plan");
 	}
 
 	@Test
@@ -329,6 +347,7 @@ class DefaultPartitionRebuildServiceFaultTest {
 
 		assertThat(result.outcome()).isEqualTo(PartitionRebuildOutcome.COMPLETED);
 		assertThat(result.operationToken()).isEqualTo(reclaimed.token());
+		assertRebuildTimer(1, "execute", "completed", "none");
 		verify(elasticsearch).addStableAliases(
 				TARGET_NAMES.eventIndexName(),
 				false,
@@ -690,6 +709,26 @@ class DefaultPartitionRebuildServiceFaultTest {
 				digest,
 				digest,
 				ArchiveReceiptStatus.MATCHED);
+	}
+
+	private void assertRebuildTimer(
+			long expectedCount,
+			String operation,
+			String outcome,
+			String code
+	) {
+		Timer timer = meterRegistry.get(MaintenanceMetrics.REBUILD_DURATION_METER)
+				.tags(
+						"operation", operation,
+						"outcome", outcome,
+						"code", code)
+				.timer();
+		assertThat(timer.count()).isEqualTo(expectedCount);
+		assertThat(timer.getId().getTags())
+				.containsExactlyInAnyOrderElementsOf(Tags.of(
+						"operation", operation,
+						"outcome", outcome,
+						"code", code).stream().toList());
 	}
 
 	private static BackendDataProperties properties() {

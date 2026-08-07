@@ -21,6 +21,9 @@ import co.elastic.clients.json.JsonpMappingException;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
 import com.neighbor.eventmosaic.search.api.SearchAccessException;
+import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.json.stream.JsonLocation;
 import java.io.IOException;
 import java.time.Instant;
@@ -33,9 +36,16 @@ import org.mockito.ArgumentCaptor;
 @DisplayName("Поиск деталей Event в Elasticsearch")
 class ElasticsearchEventDetailsQueryTest {
 
+	private static final String DETAILS_DURATION_METER =
+			"event_mosaic.search.details.duration";
+
 	private final ElasticsearchClient client = mock(ElasticsearchClient.class);
+	private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 	private final ElasticsearchEventDetailsQuery query =
-			new ElasticsearchEventDetailsQuery(client, new EventSearchProperties(20));
+			new ElasticsearchEventDetailsQuery(
+					client,
+					new EventSearchProperties(20),
+					new SearchMetrics(meterRegistry));
 
 	@Test
 	@DisplayName("Отклоняет неположительный Event ID до обращения к Elasticsearch")
@@ -45,6 +55,7 @@ class ElasticsearchEventDetailsQueryTest {
 				.hasMessage("eventId must be positive");
 
 		verifyNoInteractions(client);
+		assertThat(meterRegistry.find(DETAILS_DURATION_METER).timers()).isEmpty();
 	}
 
 	@Test
@@ -58,6 +69,21 @@ class ElasticsearchEventDetailsQueryTest {
 				.hasMessage("Сервис поиска временно недоступен")
 				.hasMessageNotContaining("secret")
 				.hasCauseInstanceOf(IOException.class);
+		assertDetailsTimer("unavailable");
+	}
+
+	@Test
+	@DisplayName("Отсутствующее событие один раз завершает запрос с результатом not found")
+	void recordsNotFoundDetailsOnce() throws IOException {
+		when(client.search(any(SearchRequest.class), eq(IndexedEventDocument.class)))
+				.thenReturn(eventSearchResponse(List.of()));
+
+		assertThat(query.findById(42)).isEmpty();
+
+		assertDetailsTimer("not_found");
+		verify(client, never()).search(
+				any(SearchRequest.class),
+				eq(MentionSourceProjection.class));
 	}
 
 	@Test
@@ -168,6 +194,7 @@ class ElasticsearchEventDetailsQueryTest {
 					.isEqualTo(Instant.parse("2026-07-30T10:05:00Z"));
 			assertThat(source.tone()).isEqualTo(1.5);
 		});
+		assertDetailsTimer("found");
 	}
 
 	@Test
@@ -245,6 +272,18 @@ class ElasticsearchEventDetailsQueryTest {
 				.thenReturn(eventSearchResponse(List.of(eventHit(
 						"gdelt-events-v1-p20260720-g0001",
 						event()))));
+	}
+
+	private void assertDetailsTimer(String outcome) {
+		Timer timer = meterRegistry.find(DETAILS_DURATION_METER)
+				.tag("outcome", outcome)
+				.timer();
+		assertThat(timer).isNotNull();
+		assertThat(timer.count()).isEqualTo(1);
+		assertThat(timer.getId().getTags())
+				.extracting(Tag::getKey)
+				.containsExactly("outcome");
+		assertThat(meterRegistry.find(DETAILS_DURATION_METER).timers()).hasSize(1);
 	}
 
 	private static SearchResponse<IndexedEventDocument> eventSearchResponse(

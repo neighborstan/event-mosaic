@@ -26,7 +26,9 @@ import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.IndexMaintenanceGateway;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
+import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -46,15 +48,18 @@ final class ElasticsearchIndexLifecycleGateway
 
 	private final ElasticsearchClient client;
 	private final ElasticsearchIndexTemplateInstaller templateInstaller;
+	private final IndexingMetrics metrics;
 	private final ElasticsearchArchiveReceiptVerifier receiptVerifier;
 
 	ElasticsearchIndexLifecycleGateway(
 			ElasticsearchClient client,
-			ElasticsearchIndexTemplateInstaller templateInstaller
+			ElasticsearchIndexTemplateInstaller templateInstaller,
+			IndexingMetrics metrics
 	) {
 		this.client = Objects.requireNonNull(client, "client must not be null");
 		this.templateInstaller = Objects.requireNonNull(
 				templateInstaller, "templateInstaller must not be null");
+		this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
 		this.receiptVerifier = new ElasticsearchArchiveReceiptVerifier(client);
 	}
 
@@ -512,6 +517,24 @@ final class ElasticsearchIndexLifecycleGateway
 	@Override
 	public ArchiveReceiptVerification verifyReceipt(ArchiveReceiptQuery query) {
 		Objects.requireNonNull(query, "query must not be null");
+		Timer.Sample timer = metrics.startReceiptTimer();
+		IndexingReceiptMetricOutcome metricOutcome =
+				IndexingReceiptMetricOutcome.NON_RETRYABLE_FAILURE;
+		try {
+			ArchiveReceiptVerification result = verifyReceiptOnce(query);
+			metricOutcome = IndexingMetrics.receiptOutcome(result.status());
+			return result;
+		}
+		catch (IndexingAccessException | IndexingInterruptedException exception) {
+			metricOutcome = IndexingReceiptMetricOutcome.RETRYABLE_FAILURE;
+			throw exception;
+		}
+		finally {
+			metrics.receiptDuration(timer, query.kind(), metricOutcome);
+		}
+	}
+
+	private ArchiveReceiptVerification verifyReceiptOnce(ArchiveReceiptQuery query) {
 		requireObservedIdentity(query.target());
 		try {
 			return receiptVerifier.verify(query);

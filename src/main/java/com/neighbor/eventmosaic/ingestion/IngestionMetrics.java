@@ -7,6 +7,7 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import org.springframework.stereotype.Component;
 
 /**
@@ -128,6 +129,44 @@ public class IngestionMetrics {
 				"event_mosaic.ingestion.events",
 				"code", code.name().toLowerCase(Locale.ROOT)
 		).increment();
+	}
+
+	/** Записывает duration полного one-shot cycle ровно с одним bounded outcome. */
+	public void cycleDuration(
+			long elapsedNanos,
+			IngestionOperationMetricOutcome outcome
+	) {
+		recordDuration(
+				"event_mosaic.ingestion.cycle.duration",
+				elapsedNanos,
+				outcome);
+	}
+
+	/** Записывает duration acquisition pass ровно с одним bounded outcome. */
+	public void acquisitionDuration(
+			long elapsedNanos,
+			IngestionOperationMetricOutcome outcome
+	) {
+		recordDuration(
+				"event_mosaic.ingestion.acquisition.duration",
+				elapsedNanos,
+				outcome);
+	}
+
+	private void recordDuration(
+			String meterName,
+			long elapsedNanos,
+			IngestionOperationMetricOutcome outcome
+	) {
+		if (elapsedNanos < 0) {
+			throw new IllegalArgumentException("elapsedNanos must not be negative");
+		}
+		Objects.requireNonNull(outcome, "outcome must not be null");
+		meterRegistry.timer(
+				meterName,
+				OUTCOME_TAG,
+				tag(outcome))
+				.record(elapsedNanos, TimeUnit.NANOSECONDS);
 	}
 
 	private static String tag(Enum<?> value) {

@@ -35,6 +35,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
+import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.time.Instant;
@@ -46,6 +47,10 @@ import org.junit.jupiter.api.Test;
 
 @DisplayName("Граница official Elasticsearch client")
 class ElasticsearchGdeltIndexWriterTest {
+	private static final String BULK_DURATION_METER =
+			"event_mosaic.indexing.bulk.duration";
+	private static final String RECEIPT_DURATION_METER =
+			"event_mosaic.indexing.receipt.duration";
 	private static final ExactIndexTarget TARGET = new ExactIndexTarget(
 			"gdelt-events-v1-p20260727-g0001",
 			"event-index-uuid");
@@ -113,6 +118,7 @@ class ElasticsearchGdeltIndexWriterTest {
 	@Test
 	@DisplayName("Failed shard не может подтвердить receipt даже при совпавшем count")
 	void rejectsPartialReceiptCount() throws IOException {
+		SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 		when(client.indices()).thenReturn(indices);
 		when(indices.get(any(GetIndexRequest.class)))
 				.thenReturn(targetState(TARGET.indexUuid(), false));
@@ -123,7 +129,11 @@ class ElasticsearchGdeltIndexWriterTest {
 								.total(2)
 								.successful(1)
 								.failed(1))));
-		ElasticsearchGdeltIndexWriter indexWriter = writer();
+		ElasticsearchGdeltIndexWriter indexWriter = writer(
+				new IndexingProperties(
+						100,
+						IndexingProperties.DEFAULT_MAX_BULK_BYTES),
+				meterRegistry);
 		ArchiveReceiptQuery query = new ArchiveReceiptQuery(
 				EVENT,
 				TARGET,
@@ -140,6 +150,48 @@ class ElasticsearchGdeltIndexWriterTest {
 							.isEqualTo(IndexingErrorCode.INDEXING_UNAVAILABLE);
 					assertThat(exception.retryable()).isTrue();
 				});
+		Timer timer = meterRegistry.find(RECEIPT_DURATION_METER)
+				.tag("kind", "event")
+				.tag("outcome", "retryable_failure")
+				.timer();
+		assertThat(timer).isNotNull();
+		assertThat(timer.count()).isEqualTo(1);
+		assertThat(meterRegistry.find(RECEIPT_DURATION_METER).timers()).hasSize(1);
+	}
+
+	@Test
+	@DisplayName("Отсутствующий exact target один раз завершает receipt до чтения документов")
+	void measuresReceiptPreCheckFailureOnce() throws IOException {
+		SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+		when(client.indices()).thenReturn(indices);
+		when(indices.get(any(GetIndexRequest.class)))
+				.thenReturn(GetIndexResponse.of(response -> response.indices(Map.of())));
+		ElasticsearchGdeltIndexWriter indexWriter = writer(
+				new IndexingProperties(
+						100,
+						IndexingProperties.DEFAULT_MAX_BULK_BYTES),
+				meterRegistry);
+		ArchiveReceiptQuery query = new ArchiveReceiptQuery(
+				EVENT,
+				TARGET,
+				"event-archive",
+				PROCESSING_FINGERPRINT,
+				0,
+				EMPTY_DIGEST,
+				500);
+
+		assertThatExceptionOfType(IndexTargetUnavailableException.class)
+				.isThrownBy(() -> indexWriter.verifyReceipt(query))
+				.satisfies(exception -> assertThat(exception.reason())
+						.isEqualTo(IndexTargetUnavailableReason.MISSING));
+
+		Timer timer = meterRegistry.find(RECEIPT_DURATION_METER)
+				.tag("kind", "event")
+				.tag("outcome", "non_retryable_failure")
+				.timer();
+		assertThat(timer).isNotNull();
+		assertThat(timer.count()).isEqualTo(1);
+		assertThat(meterRegistry.find(RECEIPT_DURATION_METER).timers()).hasSize(1);
 	}
 
 	@Test
@@ -188,8 +240,11 @@ class ElasticsearchGdeltIndexWriterTest {
 	@Test
 	@DisplayName("Defense-in-depth отклоняет oversized command до Elasticsearch call")
 	void rejectsOversizedCommandBeforeSending() throws IOException {
+		SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 		when(client._jsonpMapper()).thenReturn(jsonpMapper());
-		ElasticsearchGdeltIndexWriter indexWriter = writer(new IndexingProperties(100, 1));
+		ElasticsearchGdeltIndexWriter indexWriter = writer(
+				new IndexingProperties(100, 1),
+				meterRegistry);
 		BulkIndexCommand<IndexedEventDocument> command = new BulkIndexCommand<>(
 				EVENT,
 				TARGET,
@@ -203,6 +258,13 @@ class ElasticsearchGdeltIndexWriterTest {
 					assertThat(exception.retryable()).isFalse();
 				});
 		verify(client, never()).bulk(any(BulkRequest.class));
+		Timer timer = meterRegistry.find(BULK_DURATION_METER)
+				.tag("kind", "event")
+				.tag("outcome", "non_retryable_failure")
+				.timer();
+		assertThat(timer).isNotNull();
+		assertThat(timer.count()).isEqualTo(1);
+		assertThat(meterRegistry.find(BULK_DURATION_METER).timers()).hasSize(1);
 	}
 
 	@Test
@@ -289,11 +351,18 @@ class ElasticsearchGdeltIndexWriterTest {
 	}
 
 	private ElasticsearchGdeltIndexWriter writer(IndexingProperties properties) {
+		return writer(properties, new SimpleMeterRegistry());
+	}
+
+	private ElasticsearchGdeltIndexWriter writer(
+			IndexingProperties properties,
+			SimpleMeterRegistry meterRegistry
+	) {
 		return new ElasticsearchGdeltIndexWriter(
 				client,
 				new ElasticsearchIndexTemplateInstaller(client),
 				properties,
-				new IndexingMetrics(new SimpleMeterRegistry()));
+				new IndexingMetrics(meterRegistry));
 	}
 
 	private static Jackson3JsonpMapper jsonpMapper() {

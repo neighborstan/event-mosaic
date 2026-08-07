@@ -42,6 +42,7 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import io.micrometer.core.instrument.Timer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -89,45 +90,56 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		Objects.requireNonNull(request, "request must not be null");
 		Objects.requireNonNull(progressListener, "progressListener must not be null");
 		Objects.requireNonNull(diagnosticListener, "diagnosticListener must not be null");
-		GdeltIndexKind indexKind = toIndexKind(request.kind());
-		ExactIndexTarget indexTarget = request.indexTargets().target(indexKind);
+		Timer.Sample timer = metrics.startArchiveTimer();
+		ArchiveProcessingOutcome metricOutcome = ArchiveProcessingOutcome.FAILED;
+		try {
+			GdeltIndexKind indexKind = toIndexKind(request.kind());
+			ExactIndexTarget indexTarget = request.indexTargets().target(indexKind);
 
-		int bulkSize = indexWriter.bulkSize();
-		if (bulkSize <= 0) {
-			throw new IllegalStateException("index writer bulkSize must be positive");
+			int bulkSize = indexWriter.bulkSize();
+			if (bulkSize <= 0) {
+				throw new IllegalStateException("index writer bulkSize must be positive");
+			}
+			long maxBulkBytes = indexWriter.maxBulkBytes();
+			if (maxBulkBytes <= 0) {
+				throw new IllegalStateException("index writer maxBulkBytes must be positive");
+			}
+			ArchiveProcessingResult result = switch (request.kind()) {
+				case TRANSLATION_EVENTS ->
+						this.<GdeltEvent, IndexedEventDocument>processTyped(
+								request,
+								progressListener,
+								diagnosticListener,
+								indexKind,
+								indexTarget,
+								(consumer, sourceProgressListener) -> eventReader.read(
+										request.csvPath(),
+										consumer,
+										sourceProgressListener),
+								sourceRecord -> eventMapper.map(sourceRecord, request),
+								bulkSize,
+								maxBulkBytes);
+				case TRANSLATION_MENTIONS ->
+						this.<GdeltMention, IndexedMentionDocument>processTyped(
+								request,
+								progressListener,
+								diagnosticListener,
+								indexKind,
+								indexTarget,
+								(consumer, sourceProgressListener) -> mentionReader.read(
+										request.csvPath(),
+										consumer,
+										sourceProgressListener),
+								sourceRecord -> mentionMapper.map(sourceRecord, request),
+								bulkSize,
+								maxBulkBytes);
+			};
+			metricOutcome = result.outcome();
+			return result;
 		}
-		long maxBulkBytes = indexWriter.maxBulkBytes();
-		if (maxBulkBytes <= 0) {
-			throw new IllegalStateException("index writer maxBulkBytes must be positive");
+		finally {
+			metrics.archiveDuration(timer, request.kind(), metricOutcome);
 		}
-		return switch (request.kind()) {
-			case TRANSLATION_EVENTS -> this.<GdeltEvent, IndexedEventDocument>processTyped(
-					request,
-					progressListener,
-					diagnosticListener,
-					indexKind,
-					indexTarget,
-					(consumer, sourceProgressListener) -> eventReader.read(
-							request.csvPath(),
-							consumer,
-							sourceProgressListener),
-					sourceRecord -> eventMapper.map(sourceRecord, request),
-					bulkSize,
-					maxBulkBytes);
-			case TRANSLATION_MENTIONS -> this.<GdeltMention, IndexedMentionDocument>processTyped(
-					request,
-					progressListener,
-					diagnosticListener,
-					indexKind,
-					indexTarget,
-					(consumer, sourceProgressListener) -> mentionReader.read(
-							request.csvPath(),
-							consumer,
-							sourceProgressListener),
-					sourceRecord -> mentionMapper.map(sourceRecord, request),
-					bulkSize,
-					maxBulkBytes);
-		};
 	}
 
 	private static GdeltIndexKind toIndexKind(GdeltArchiveKind kind) {

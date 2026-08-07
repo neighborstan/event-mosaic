@@ -4,6 +4,7 @@ import static com.neighbor.eventmosaic.ingestion.GdeltTestFixtures.archive;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -31,6 +32,10 @@ import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
 import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.ingestion.error.TransferredArtifactIntegrityException;
+import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
+import com.neighbor.eventmosaic.ingestion.error.StoragePressureException;
+import com.neighbor.eventmosaic.ingestion.observability.StoragePressureState;
+import com.neighbor.eventmosaic.ingestion.observability.StorageResource;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestClient;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestParser;
 import com.neighbor.eventmosaic.ingestion.staging.DownloadedArchive;
@@ -63,6 +68,7 @@ class IngestionRunServiceTest {
 	private HttpArchiveDownloader downloader;
 	private ZipArchiveStager stager;
 	private IngestionMetrics metrics;
+	private BackendDataStorageMonitor storageMonitor;
 	private IngestionRunService service;
 
 	@BeforeEach
@@ -75,6 +81,7 @@ class IngestionRunServiceTest {
 		downloader = mock(HttpArchiveDownloader.class);
 		stager = mock(ZipArchiveStager.class);
 		metrics = mock(IngestionMetrics.class);
+		storageMonitor = mock(BackendDataStorageMonitor.class);
 		service = new IngestionRunService(
 				manifestClient,
 				manifestParser,
@@ -84,7 +91,8 @@ class IngestionRunServiceTest {
 				downloader,
 				stager,
 				properties(),
-				metrics
+				metrics,
+				storageMonitor
 		);
 	}
 
@@ -101,6 +109,28 @@ class IngestionRunServiceTest {
 		verify(metrics).runStarted();
 		verify(metrics).error(IngestionErrorCode.MANIFEST_HTTP_ERROR);
 		verifyNoInteractions(manifestParser, ledger, downloader, stager);
+	}
+
+	@Test
+	@DisplayName("Storage pressure останавливает загрузку до claim и source I/O")
+	void storagePressureStopsBeforeClaimAndSourceIo() {
+		DiscoveredUpdate update = update();
+		StoragePressureException pressure = new StoragePressureException(
+				StorageResource.STAGING,
+				StoragePressureState.PRESSURE);
+		when(manifestClient.fetchLatestManifest()).thenReturn("manifest");
+		when(manifestParser.parse("manifest")).thenReturn(update);
+		when(ledger.registerDiscoveredUpdate(update, FirstRunPolicy.LATEST, null))
+				.thenReturn(0);
+		doThrow(pressure)
+				.when(storageMonitor)
+				.requireCapacity(StorageResource.STAGING);
+
+		assertThatThrownBy(service::runLatestUpdate).isSameAs(pressure);
+
+		verify(ledger, never()).claimArchive(any(), any());
+		verifyNoInteractions(downloader, stager);
+		verify(metrics, never()).error(IngestionErrorCode.STORAGE_PRESSURE);
 	}
 
 	@Test

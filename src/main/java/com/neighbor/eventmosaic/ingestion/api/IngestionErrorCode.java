@@ -30,6 +30,7 @@ public enum IngestionErrorCode implements ApplicationErrorCode {
 	STAGING_PATH_REJECTED("Staging path contains an unsafe filesystem indirection"),
 	STAGING_ATOMIC_PUBLICATION_UNSUPPORTED("Filesystem does not support required atomic publication"),
 	FILESYSTEM_IO_FAILURE("Local ingestion filesystem operation failed"),
+	STORAGE_PRESSURE("Available storage is below the configured safe reserve"),
 	OPERATION_DEADLINE_EXCEEDED("Ingestion operation exceeded the shared deadline"),
 	OPERATION_INTERRUPTED("Ingestion operation was interrupted"),
 	INTERNAL_ERROR("Unexpected internal ingestion error");

@@ -18,6 +18,16 @@ management:
     health:
       probes:
         enabled: true
+      status:
+        order: down,out-of-service,degraded,unknown,up
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db,elasticsearch,staging
+        pipeline:
+          include: backendDataPipeline
+          show-details: always
 
 event-mosaic:
   backend-data:

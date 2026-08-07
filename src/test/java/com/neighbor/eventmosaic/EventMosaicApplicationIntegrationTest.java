@@ -19,9 +19,15 @@ class EventMosaicApplicationIntegrationTest {
 	private HealthEndpoint healthEndpoint;
 
 	@Test
-	@DisplayName("Контекст запускается, а PostgreSQL и Elasticsearch доступны")
+	@DisplayName("Liveness, readiness и pipeline health доступны отдельно")
 	void contextLoadsAndInfrastructureIsHealthy() {
 		assertThat(healthEndpoint.health().getStatus()).isEqualTo(Status.UP);
+		assertThat(healthEndpoint.healthForPath("liveness").getStatus())
+				.isEqualTo(Status.UP);
+		assertThat(healthEndpoint.healthForPath("readiness").getStatus())
+				.isEqualTo(Status.UP);
+		assertThat(healthEndpoint.healthForPath("pipeline").getStatus())
+				.isEqualTo(Status.UP);
 	}
 
 }

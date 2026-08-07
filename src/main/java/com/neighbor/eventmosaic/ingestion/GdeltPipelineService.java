@@ -34,12 +34,16 @@ import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
 import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
+import com.neighbor.eventmosaic.ingestion.error.StoragePressureException;
+import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
+import com.neighbor.eventmosaic.ingestion.observability.StorageResource;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgress;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
+import com.neighbor.eventmosaic.shared.error.ApplicationException;
 import com.neighbor.eventmosaic.shared.error.SafeExceptionProjection;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.util.concurrent.atomic.AtomicReference;
@@ -74,6 +78,8 @@ public class GdeltPipelineService {
 	private final IndexTargetResolver indexTargetResolver;
 	private final GdeltIngestionProperties properties;
 	private final BackendDataProperties backendDataProperties;
+	private final IngestionMetrics metrics;
+	private final BackendDataStorageMonitor storageMonitor;
 
 	/**
 	 * Создает сквозной orchestration service поверх module API boundaries.
@@ -86,6 +92,8 @@ public class GdeltPipelineService {
 	 * @param indexTargetResolver lifecycle exact ACTIVE generation
 	 * @param properties runtime lease policy
 	 * @param backendDataProperties bounded backend-data verification policy
+	 * @param metrics bounded cycle metrics
+	 * @param storageMonitor единая проверка storage pressure перед index growth
 	 */
 	public GdeltPipelineService(
 			IngestionRunService ingestionRunService,
@@ -95,7 +103,9 @@ public class GdeltPipelineService {
 			GdeltIndexWriter indexWriter,
 			IndexTargetResolver indexTargetResolver,
 			GdeltIngestionProperties properties,
-			BackendDataProperties backendDataProperties
+			BackendDataProperties backendDataProperties,
+			IngestionMetrics metrics,
+			BackendDataStorageMonitor storageMonitor
 	) {
 		this.ingestionRunService = ingestionRunService;
 		this.processingLedger = processingLedger;
@@ -105,6 +115,8 @@ public class GdeltPipelineService {
 		this.indexTargetResolver = indexTargetResolver;
 		this.properties = properties;
 		this.backendDataProperties = backendDataProperties;
+		this.metrics = metrics;
+		this.storageMonitor = storageMonitor;
 	}
 
 	/**
@@ -131,18 +143,46 @@ public class GdeltPipelineService {
 	}
 
 	IngestionOneShotOutcome runOneShot(OperationBudget budget) {
+		long startedAt = System.nanoTime();
+		IngestionOperationMetricOutcome metricOutcome =
+				IngestionOperationMetricOutcome.INTERNAL_FAILURE;
 		try {
 			AcquisitionCycleResult acquisition = ingestionRunService.runOneShot(budget);
 			if (acquisition.runState().isPresent()
 					&& processRunState(acquisition.runState().orElseThrow(), budget)) {
+				metricOutcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
 				return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
 			}
-			return acquisition.sourcePollDeferred()
+			IngestionOneShotOutcome outcome = acquisition.sourcePollDeferred()
 					? IngestionOneShotOutcome.RETRY_DEFERRED
 					: IngestionOneShotOutcome.COMPLETED;
+			metricOutcome = outcome == IngestionOneShotOutcome.RETRY_DEFERRED
+					? IngestionOperationMetricOutcome.RETRY_DEFERRED
+					: IngestionOperationMetricOutcome.COMPLETED;
+			return outcome;
 		}
 		catch (OperationDeadlineExceededException _) {
+			metricOutcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
 			return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
+		}
+		catch (StoragePressureException _) {
+			metricOutcome = IngestionOperationMetricOutcome.STORAGE_PRESSURE;
+			return IngestionOneShotOutcome.STORAGE_PRESSURE;
+		}
+		catch (IngestionInterruptedException | IndexingInterruptedException exception) {
+			metricOutcome = IngestionOperationMetricOutcome.INTERRUPTED;
+			throw exception;
+		}
+		catch (ApplicationException exception) {
+			metricOutcome = IngestionOperationMetricOutcome.EXPECTED_FAILURE;
+			throw exception;
+		}
+		catch (RuntimeException exception) {
+			metricOutcome = IngestionOperationMetricOutcome.INTERNAL_FAILURE;
+			throw exception;
+		}
+		finally {
+			metrics.cycleDuration(System.nanoTime() - startedAt, metricOutcome);
 		}
 	}
 
@@ -163,6 +203,8 @@ public class GdeltPipelineService {
 				} catch (OperationDeadlineExceededException _) {
 					return true;
 				} catch (IngestionInterruptedException exception) {
+					throw exception;
+				} catch (StoragePressureException exception) {
 					throw exception;
 				} catch (IndexingInterruptedException exception) {
 					logExpectedArchiveFailure(archiveState, exception, exception);
@@ -200,6 +242,8 @@ public class GdeltPipelineService {
 		requireRemaining(budget);
 		GdeltArchiveKind kind = toGdeltKind(archiveState.archive().archiveType());
 		GdeltIndexKind indexKind = toIndexKind(kind);
+		storageMonitor.requireCapacity(StorageResource.ELASTICSEARCH);
+		requireRemaining(budget);
 		IndexTargetResolution targetResolution = indexTargetResolver.resolve(
 				archiveState.archive().sourceUpdateTime());
 		if (targetResolution.status() != IndexTargetResolutionStatus.READY) {
@@ -245,6 +289,7 @@ public class GdeltPipelineService {
 			}
 		}
 
+		storageMonitor.requireCapacity(StorageResource.ELASTICSEARCH);
 		requireRemaining(budget);
 		ArchiveProcessingClaimResult claimResult = processingLedger.claim(
 				archiveKey,

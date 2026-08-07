@@ -4,18 +4,22 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingOutcome;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.util.Locale;
 import java.util.Objects;
 import org.springframework.stereotype.Component;
 
 /**
- * Публикует processing counters только с bounded enum-backed tags.
+ * Собирает счетчики и длительность обработки архивов с небольшим фиксированным
+ * набором значений меток метрик.
  */
 @Component
 final class ProcessingMetrics {
 
 	private static final String KIND_TAG = "kind";
 	private static final String OUTCOME_TAG = "outcome";
+	private static final String ARCHIVE_DURATION_METER =
+			"event_mosaic.processing.archive.duration";
 
 	private final MeterRegistry meterRegistry;
 
@@ -55,6 +59,30 @@ final class ProcessingMetrics {
 				KIND_TAG, tag(kind),
 				OUTCOME_TAG, tag(outcome)
 		).increment();
+	}
+
+	/** Начинает измерение одной попытки обработки архива. */
+	Timer.Sample startArchiveTimer() {
+		return Timer.start(meterRegistry);
+	}
+
+	/**
+	 * Завершает измерение попытки с итогом, определенным обработчиком архива.
+	 *
+	 * @param sample начатое измерение текущей попытки
+	 * @param kind вид обрабатываемого архива
+	 * @param outcome итог обработки или безопасный итог неожиданного отказа
+	 */
+	void archiveDuration(
+			Timer.Sample sample,
+			GdeltArchiveKind kind,
+			ArchiveProcessingOutcome outcome
+	) {
+		Objects.requireNonNull(sample, "sample must not be null").stop(
+				meterRegistry.timer(
+						ARCHIVE_DURATION_METER,
+						KIND_TAG, tag(kind),
+						OUTCOME_TAG, tag(outcome)));
 	}
 
 	void failure(GdeltArchiveKind kind, ArchiveProcessingErrorCode code) {

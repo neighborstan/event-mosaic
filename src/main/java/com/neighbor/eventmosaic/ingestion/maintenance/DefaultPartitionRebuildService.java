@@ -82,6 +82,7 @@ final class DefaultPartitionRebuildService implements PartitionRebuildService {
 	private final ArchiveProcessingLedger processingLedger;
 	private final ZipArchiveStager archiveStager;
 	private final GdeltArchiveProcessor archiveProcessor;
+	private final MaintenanceMetrics metrics;
 	private final BackendDataProperties properties;
 	private final Clock clock;
 
@@ -93,6 +94,7 @@ final class DefaultPartitionRebuildService implements PartitionRebuildService {
 			ArchiveProcessingLedger processingLedger,
 			ZipArchiveStager archiveStager,
 			GdeltArchiveProcessor archiveProcessor,
+			MaintenanceMetrics metrics,
 			BackendDataProperties properties,
 			Clock clock
 	) {
@@ -110,27 +112,37 @@ final class DefaultPartitionRebuildService implements PartitionRebuildService {
 				archiveStager, "archiveStager must not be null");
 		this.archiveProcessor = Objects.requireNonNull(
 				archiveProcessor, "archiveProcessor must not be null");
+		this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
 		this.properties = Objects.requireNonNull(properties, "properties must not be null");
 		this.clock = Objects.requireNonNull(clock, "clock must not be null");
 	}
 
 	@Override
 	public PartitionRebuildPlan inspect(String partitionKey) {
+		long startedAt = System.nanoTime();
+		PartitionRebuildPlan plan;
 		try {
 			Instant expiresAt = clock.instant().plus(properties.rebuild().planTtl());
-			return inspectAt(partitionKey, expiresAt, true);
+			plan = inspectAt(partitionKey, expiresAt, true);
 		}
 		catch (PartitionRebuildException exception) {
+			metrics.rebuildInspectFailed(System.nanoTime() - startedAt, exception.errorCode());
 			throw exception;
 		}
 		catch (RuntimeException exception) {
-			throw unavailable(exception);
+			PartitionRebuildException translated = unavailable(exception);
+			metrics.rebuildInspectFailed(System.nanoTime() - startedAt, translated.errorCode());
+			throw translated;
 		}
+		metrics.rebuildInspectCompleted(System.nanoTime() - startedAt);
+		return plan;
 	}
 
 	@Override
 	public PartitionRebuildResult execute(PartitionRebuildCommand command) {
 		Objects.requireNonNull(command, "command must not be null");
+		long startedAt = System.nanoTime();
+		PartitionRebuildResult result;
 		try {
 			PartitionRebuildPlan plan = command.plan();
 			validatePlanFingerprint(plan);
@@ -142,23 +154,30 @@ final class DefaultPartitionRebuildService implements PartitionRebuildService {
 			}
 			else {
 				operation = reclaim(command, existing.orElseThrow());
-				if (operation == null) {
-					IndexMaintenanceOperation open = existing.orElseThrow();
-					return new PartitionRebuildResult(
-							PartitionRebuildOutcome.MAINTENANCE_DEFERRED,
-							plan.partitionKey(),
-							open.phase(),
-							open.token());
-				}
 			}
-			return runOwned(command, operation);
+			if (operation == null) {
+				IndexMaintenanceOperation open = existing.orElseThrow();
+				result = new PartitionRebuildResult(
+						PartitionRebuildOutcome.MAINTENANCE_DEFERRED,
+						plan.partitionKey(),
+						open.phase(),
+						open.token());
+			}
+			else {
+				result = runOwned(command, operation);
+			}
 		}
 		catch (PartitionRebuildException exception) {
+			metrics.rebuildExecuteFailed(System.nanoTime() - startedAt, exception.errorCode());
 			throw exception;
 		}
 		catch (RuntimeException exception) {
-			throw unavailable(exception);
+			PartitionRebuildException translated = unavailable(exception);
+			metrics.rebuildExecuteFailed(System.nanoTime() - startedAt, translated.errorCode());
+			throw translated;
 		}
+		metrics.rebuildExecuted(System.nanoTime() - startedAt, result.outcome());
+		return result;
 	}
 
 	private PartitionRebuildPlan inspectAt(

@@ -80,6 +80,7 @@ final class DefaultGenerationCleanupService implements GenerationCleanupService 
 	private final IngestionArchiveLedger archiveLedger;
 	private final ArchiveProcessingLedger processingLedger;
 	private final ZipArchiveStager archiveStager;
+	private final MaintenanceMetrics metrics;
 	private final BackendDataProperties properties;
 	private final Clock clock;
 
@@ -91,6 +92,7 @@ final class DefaultGenerationCleanupService implements GenerationCleanupService 
 			IngestionArchiveLedger archiveLedger,
 			ArchiveProcessingLedger processingLedger,
 			ZipArchiveStager archiveStager,
+			MaintenanceMetrics metrics,
 			BackendDataProperties properties,
 			Clock clock
 	) {
@@ -106,6 +108,7 @@ final class DefaultGenerationCleanupService implements GenerationCleanupService 
 				processingLedger, "processingLedger must not be null");
 		this.archiveStager = Objects.requireNonNull(
 				archiveStager, "archiveStager must not be null");
+		this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
 		this.properties = Objects.requireNonNull(properties, "properties must not be null");
 		this.clock = Objects.requireNonNull(clock, "clock must not be null");
 	}
@@ -128,27 +131,46 @@ final class DefaultGenerationCleanupService implements GenerationCleanupService 
 	@Override
 	public GenerationCleanupResult execute(GenerationCleanupCommand command) {
 		Objects.requireNonNull(command, "command must not be null");
+		GenerationCleanupResult result;
+		try {
+			result = executeOwned(command);
+		}
+		catch (GenerationCleanupRejectedException
+				| GenerationCleanupUnavailableException exception) {
+			metrics.cleanupExecuteFailed(exception.errorCode());
+			throw exception;
+		}
+		catch (ApplicationException | DataAccessException exception) {
+			GenerationCleanupUnavailableException translated = unavailable(exception);
+			metrics.cleanupExecuteFailed(translated.errorCode());
+			throw translated;
+		}
+		catch (RuntimeException exception) {
+			metrics.cleanupExecuteUnexpectedFailure();
+			throw exception;
+		}
+		metrics.cleanupExecuted(result.outcome());
+		return result;
+	}
+
+	private GenerationCleanupResult executeOwned(GenerationCleanupCommand command) {
 		try {
 			GenerationCleanupPlan plan = command.plan();
 			validateFingerprint(plan);
 			Optional<CleanupOperation> existing = cleanupLedger.findRecoverable(
 					plan.partitionKey());
-			CleanupOperation operation;
-			if (existing.isEmpty()) {
-				operation = claim(command);
+			CleanupOperation operation = existing.isEmpty()
+					? claim(command)
+					: resume(command, existing.orElseThrow());
+			if (operation != null) {
+				return runOwned(plan, operation);
 			}
-			else {
-				operation = resume(command, existing.orElseThrow());
-				if (operation == null) {
-					CleanupOperation open = existing.orElseThrow();
-					return result(
-							GenerationCleanupOutcome.MAINTENANCE_DEFERRED,
-							plan,
-							open.phase(),
-							open.operationToken());
-				}
-			}
-			return runOwned(plan, operation);
+			CleanupOperation open = existing.orElseThrow();
+			return result(
+					GenerationCleanupOutcome.MAINTENANCE_DEFERRED,
+					plan,
+					open.phase(),
+					open.operationToken());
 		}
 		catch (CleanupOwnershipLostException exception) {
 			GenerationCleanupPlan plan = command.plan();
@@ -157,13 +179,6 @@ final class DefaultGenerationCleanupService implements GenerationCleanupService 
 					plan,
 					exception.phase,
 					exception.operationToken);
-		}
-		catch (GenerationCleanupRejectedException
-				| GenerationCleanupUnavailableException exception) {
-			throw exception;
-		}
-		catch (ApplicationException | DataAccessException exception) {
-			throw unavailable(exception);
 		}
 	}
 

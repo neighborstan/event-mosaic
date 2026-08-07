@@ -6,6 +6,8 @@ import com.neighbor.eventmosaic.ingestion.api.DiscoveredArchive;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredUpdate;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveryDiagnostic;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveLedger;
+import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveState;
+import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveStatus;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorContext;
 import com.neighbor.eventmosaic.ingestion.api.IngestionFailure;
@@ -22,7 +24,10 @@ import com.neighbor.eventmosaic.ingestion.error.RemoteResponseRejectedException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.ingestion.error.SourceDataViolationException;
 import com.neighbor.eventmosaic.ingestion.error.StagingStorageException;
+import com.neighbor.eventmosaic.ingestion.error.StoragePressureException;
 import com.neighbor.eventmosaic.ingestion.error.TransferredArtifactIntegrityException;
+import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
+import com.neighbor.eventmosaic.ingestion.observability.StorageResource;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestClient;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestParser;
 import com.neighbor.eventmosaic.ingestion.staging.DownloadedArchive;
@@ -36,6 +41,7 @@ import com.neighbor.eventmosaic.shared.error.SafeExceptionProjection;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,6 +71,7 @@ public class IngestionRunService {
 	private final ZipArchiveStager archiveStager;
 	private final GdeltIngestionProperties properties;
 	private final IngestionMetrics metrics;
+	private final BackendDataStorageMonitor storageMonitor;
 
 	/**
 	 * Собирает orchestration boundary из source, ledger и staging collaborators.
@@ -78,6 +85,7 @@ public class IngestionRunService {
 	 * @param archiveStager безопасный ZIP stager
 	 * @param properties runtime policy ingestion
 	 * @param metrics publisher метрик с заранее ограниченными наборами значений тегов
+	 * @param storageMonitor единая проверка storage pressure перед download
 	 */
 	public IngestionRunService(
 			GdeltManifestClient manifestClient,
@@ -88,7 +96,8 @@ public class IngestionRunService {
 			HttpArchiveDownloader archiveDownloader,
 			ZipArchiveStager archiveStager,
 			GdeltIngestionProperties properties,
-			IngestionMetrics metrics
+			IngestionMetrics metrics,
+			BackendDataStorageMonitor storageMonitor
 	) {
 		this.manifestClient = manifestClient;
 		this.manifestParser = manifestParser;
@@ -99,6 +108,7 @@ public class IngestionRunService {
 		this.archiveStager = archiveStager;
 		this.properties = properties;
 		this.metrics = metrics;
+		this.storageMonitor = storageMonitor;
 	}
 
 	/**
@@ -109,19 +119,60 @@ public class IngestionRunService {
 	 */
 	public IngestionRunState runLatestUpdate() {
 		OperationBudget budget = OperationBudget.start(Duration.ofDays(1));
-		return observeCycle(() -> executeLatestUpdate(budget, false));
+		return observeAcquisition(
+				() -> executeLatestUpdate(budget, false),
+				_ -> IngestionOperationMetricOutcome.COMPLETED);
 	}
 
 	/** Выполняет acquisition pass в пределах budget owning orchestration. */
 	public IngestionRunState runLatestUpdate(OperationBudget budget) {
-		return observeCycle(() -> executeLatestUpdate(budget, true));
+		return observeAcquisition(
+				() -> executeLatestUpdate(budget, true),
+				_ -> IngestionOperationMetricOutcome.COMPLETED);
 	}
 
 	/**
 	 * Выполняет source poll либо использует newest known run при deferred retry.
 	 */
 	AcquisitionCycleResult runOneShot(OperationBudget budget) {
-		return observeCycle(() -> executeOneShot(budget));
+		return observeAcquisition(
+				() -> executeOneShot(budget),
+				result -> result.sourcePollDeferred()
+						? IngestionOperationMetricOutcome.RETRY_DEFERRED
+						: IngestionOperationMetricOutcome.COMPLETED);
+	}
+
+	private <T> T observeAcquisition(
+			Supplier<T> operation,
+			Function<T, IngestionOperationMetricOutcome> successOutcome
+	) {
+		long startedAt = System.nanoTime();
+		IngestionOperationMetricOutcome outcome =
+				IngestionOperationMetricOutcome.INTERNAL_FAILURE;
+		try {
+			T result = observeCycle(operation);
+			outcome = successOutcome.apply(result);
+			return result;
+		}
+		catch (StoragePressureException exception) {
+			outcome = IngestionOperationMetricOutcome.STORAGE_PRESSURE;
+			throw exception;
+		}
+		catch (OperationDeadlineExceededException exception) {
+			outcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
+			throw exception;
+		}
+		catch (IngestionInterruptedException exception) {
+			outcome = IngestionOperationMetricOutcome.INTERRUPTED;
+			throw exception;
+		}
+		catch (ApplicationException exception) {
+			outcome = IngestionOperationMetricOutcome.EXPECTED_FAILURE;
+			throw exception;
+		}
+		finally {
+			metrics.acquisitionDuration(System.nanoTime() - startedAt, outcome);
+		}
 	}
 
 	private <T> T observeCycle(Supplier<T> operation) {
@@ -132,6 +183,8 @@ public class IngestionRunService {
 			metrics.error(IngestionErrorCode.INTERNAL_ERROR);
 			logUnexpectedArchiveFailure(failure);
 			throw failure.original();
+		} catch (StoragePressureException exception) {
+			throw exception;
 		} catch (RemoteSourceAccessException
 				| TransferredArtifactIntegrityException
 				| RemoteResponseRejectedException
@@ -276,6 +329,15 @@ public class IngestionRunService {
 			OperationBudget budget,
 			boolean boundedAdapters
 	) {
+		requireRemaining(budget);
+		Optional<IngestionArchiveState> existing = archiveLedger.findByIdempotencyKey(
+				archive.idempotencyKey());
+		if (existing.isPresent()
+				&& existing.orElseThrow().status() == IngestionArchiveStatus.STAGED) {
+			metrics.archiveOutcome(archive.archiveType(), ArchiveOutcome.SKIPPED);
+			return;
+		}
+		storageMonitor.requireCapacity(StorageResource.STAGING);
 		requireRemaining(budget);
 		Optional<ArchiveAttempt> claimed = archiveLedger.claimArchive(
 				archive.idempotencyKey(),

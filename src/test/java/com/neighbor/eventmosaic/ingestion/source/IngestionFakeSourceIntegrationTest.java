@@ -1,6 +1,7 @@
 package com.neighbor.eventmosaic.ingestion.source;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 import static com.neighbor.eventmosaic.ingestion.GdeltTestFixtures.UPDATE_TIME;
 import static com.neighbor.eventmosaic.ingestion.GdeltTestFixtures.archiveName;
 
@@ -14,6 +15,7 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
+import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
 import com.neighbor.eventmosaic.ingestion.staging.HttpArchiveDownloader;
 import com.neighbor.eventmosaic.ingestion.staging.StagingLayout;
 import com.neighbor.eventmosaic.ingestion.staging.ZipArchiveStager;
@@ -127,7 +129,8 @@ class IngestionFakeSourceIntegrationTest {
 				new HttpArchiveDownloader(httpClient, properties, metrics, downloadUriResolver),
 				new ZipArchiveStager(properties, metrics),
 				properties,
-				metrics
+				metrics,
+				mock(BackendDataStorageMonitor.class)
 		);
 
 		var first = service.runLatestUpdate();

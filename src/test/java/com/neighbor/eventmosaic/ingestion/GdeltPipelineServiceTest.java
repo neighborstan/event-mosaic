@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -51,6 +52,10 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionRunState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
+import com.neighbor.eventmosaic.ingestion.error.StoragePressureException;
+import com.neighbor.eventmosaic.ingestion.observability.StoragePressureState;
+import com.neighbor.eventmosaic.ingestion.observability.StorageResource;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingErrorCode;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingDiagnosticListener;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingFailure;
@@ -111,6 +116,9 @@ class GdeltPipelineServiceTest {
 			mock(ProcessingFingerprintFactory.class);
 	private final GdeltIndexWriter indexWriter = mock(GdeltIndexWriter.class);
 	private final IndexTargetResolver indexTargetResolver = mock(IndexTargetResolver.class);
+	private final IngestionMetrics metrics = mock(IngestionMetrics.class);
+	private final BackendDataStorageMonitor storageMonitor =
+			mock(BackendDataStorageMonitor.class);
 
 	private GdeltPipelineService service;
 
@@ -124,7 +132,9 @@ class GdeltPipelineServiceTest {
 				indexWriter,
 				indexTargetResolver,
 				GdeltTestFixtures.properties(tempDir, 1024 * 1024),
-				GdeltTestFixtures.backendDataProperties());
+				GdeltTestFixtures.backendDataProperties(),
+				metrics,
+				storageMonitor);
 		when(indexTargetResolver.resolve(any())).thenReturn(
 				IndexTargetResolution.ready(ACTIVE_TARGETS));
 		when(fingerprintFactory.create(
@@ -153,6 +163,26 @@ class GdeltPipelineServiceTest {
 		assertThat(service.runOneShot()).isEqualTo(IngestionOneShotOutcome.RETRY_DEFERRED);
 
 		verifyNoInteractions(processingLedger, archiveProcessor, indexWriter);
+	}
+
+	@Test
+	@DisplayName("Elasticsearch pressure завершает one-shot до resolver, claim и bulk")
+	void elasticsearchPressureStopsBeforeResolverClaimAndBulk() {
+		IngestionRunState runState = runState(false);
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		doThrow(new StoragePressureException(
+				StorageResource.ELASTICSEARCH,
+				StoragePressureState.PRESSURE))
+				.when(storageMonitor)
+				.requireCapacity(StorageResource.ELASTICSEARCH);
+
+		assertThat(service.runOneShot()).isEqualTo(IngestionOneShotOutcome.STORAGE_PRESSURE);
+
+		verifyNoInteractions(processingLedger, archiveProcessor, indexWriter, indexTargetResolver);
+		verify(metrics).cycleDuration(
+				anyLong(),
+				eq(IngestionOperationMetricOutcome.STORAGE_PRESSURE));
 	}
 
 	@Test

@@ -29,6 +29,8 @@ class IngestionMetricsTest {
 		metrics.retry(ArchiveType.TRANSLATION_MENTIONS, true);
 		metrics.error(IngestionErrorCode.DOWNLOAD_MD5_MISMATCH);
 		metrics.event(IngestionEventCode.MANIFEST_UNSUPPORTED_ARCHIVE);
+		metrics.cycleDuration(10, IngestionOperationMetricOutcome.STORAGE_PRESSURE);
+		metrics.acquisitionDuration(20, IngestionOperationMetricOutcome.RETRY_DEFERRED);
 
 		assertCounter(registry, "event_mosaic.ingestion.runs", 1, "outcome", "started");
 		assertCounter(registry, "event_mosaic.ingestion.runs", 1, "outcome", "partial");
@@ -45,6 +47,10 @@ class IngestionMetricsTest {
 				"code", "download_md5_mismatch");
 		assertCounter(registry, "event_mosaic.ingestion.events", 1,
 				"code", "manifest_unsupported_archive");
+		assertThat(registry.get("event_mosaic.ingestion.cycle.duration")
+				.tag("outcome", "storage_pressure").timer().count()).isEqualTo(1);
+		assertThat(registry.get("event_mosaic.ingestion.acquisition.duration")
+				.tag("outcome", "retry_deferred").timer().count()).isEqualTo(1);
 	}
 
 	private static void assertCounter(
