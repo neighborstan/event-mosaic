@@ -1,0 +1,20 @@
+{
+  "name": "@event-mosaic/map-geometry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Изолированная утилита подготовки проверяемой геометрии карты Event Mosaic",
+  "type": "module",
+  "engines": {
+    "node": ">=24.19.0 <25"
+  },
+  "packageManager": "npm@11.17.0",
+  "scripts": {
+    "test": "node --test --test-reporter=spec",
+    "geometry:prepare": "node src/prepare.mjs",
+    "geometry:verify": "node src/verify.mjs",
+    "geometry:publish": "node src/publish.mjs"
+  },
+  "dependencies": {
+    "mapshaper": "0.7.51"
+  }
+}

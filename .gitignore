@@ -5,6 +5,8 @@ build/
 out/
 target/
 dist/
+node_modules/
+coverage/
 
 # Local runtime data
 .local/

@@ -1,0 +1,3248 @@
+{
+  "crosswalkSchemaVersion": 1,
+  "crosswalkVersion": "country-crosswalk-v1",
+  "naturalEarthSourceId": "natural-earth-10m-admin-0-countries",
+  "gdeltCountryLookupSourceId": "gdelt-country-lookup",
+  "naturalEarthFeatureKey": "NE_ID",
+  "naturalEarthFeatureCoverage": "ALL",
+  "regions": [
+    {
+      "regionId": "country:abw",
+      "displayName": "Aruba",
+      "naturalEarthFeatureIds": [
+        "1159321097"
+      ],
+      "gdeltCountryCodes": [
+        "AA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:afg",
+      "displayName": "Afghanistan",
+      "naturalEarthFeatureIds": [
+        "1159320319"
+      ],
+      "gdeltCountryCodes": [
+        "AF"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ago",
+      "displayName": "Angola",
+      "naturalEarthFeatureIds": [
+        "1159320323"
+      ],
+      "gdeltCountryCodes": [
+        "AO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:aia",
+      "displayName": "Anguilla",
+      "naturalEarthFeatureIds": [
+        "1159320703"
+      ],
+      "gdeltCountryCodes": [
+        "AV"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:alb",
+      "displayName": "Albania",
+      "naturalEarthFeatureIds": [
+        "1159320325"
+      ],
+      "gdeltCountryCodes": [
+        "AL"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ald",
+      "displayName": "Åland Islands",
+      "naturalEarthFeatureIds": [
+        "1159320621"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:and",
+      "displayName": "Andorra",
+      "naturalEarthFeatureIds": [
+        "1159320327"
+      ],
+      "gdeltCountryCodes": [
+        "AN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:are",
+      "displayName": "United Arab Emirates",
+      "naturalEarthFeatureIds": [
+        "1159320329"
+      ],
+      "gdeltCountryCodes": [
+        "AE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:arg",
+      "displayName": "Argentina",
+      "naturalEarthFeatureIds": [
+        "1159320331"
+      ],
+      "gdeltCountryCodes": [
+        "AR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:arm",
+      "displayName": "Armenia",
+      "naturalEarthFeatureIds": [
+        "1159320333"
+      ],
+      "gdeltCountryCodes": [
+        "AM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:asm",
+      "displayName": "American Samoa",
+      "naturalEarthFeatureIds": [
+        "1159321357"
+      ],
+      "gdeltCountryCodes": [
+        "AQ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ata",
+      "displayName": "Antarctica",
+      "naturalEarthFeatureIds": [
+        "1159320335"
+      ],
+      "gdeltCountryCodes": [
+        "AY"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:atc",
+      "displayName": "Ashmore and Cartier Islands",
+      "naturalEarthFeatureIds": [
+        "1159320353"
+      ],
+      "gdeltCountryCodes": [
+        "AT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:atf",
+      "displayName": "French Southern and Antarctic Lands",
+      "naturalEarthFeatureIds": [
+        "1159320631"
+      ],
+      "gdeltCountryCodes": [
+        "FS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:atg",
+      "displayName": "Antigua and Barbuda",
+      "naturalEarthFeatureIds": [
+        "1159320345"
+      ],
+      "gdeltCountryCodes": [
+        "AC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:aus",
+      "displayName": "Australia",
+      "naturalEarthFeatureIds": [
+        "1159320355"
+      ],
+      "gdeltCountryCodes": [
+        "AS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:aut",
+      "displayName": "Austria",
+      "naturalEarthFeatureIds": [
+        "1159320379"
+      ],
+      "gdeltCountryCodes": [
+        "AU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:aze",
+      "displayName": "Azerbaijan",
+      "naturalEarthFeatureIds": [
+        "1159320381"
+      ],
+      "gdeltCountryCodes": [
+        "AJ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bdi",
+      "displayName": "Burundi",
+      "naturalEarthFeatureIds": [
+        "1159320387"
+      ],
+      "gdeltCountryCodes": [
+        "BY"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bel",
+      "displayName": "Belgium",
+      "naturalEarthFeatureIds": [
+        "1159320389"
+      ],
+      "gdeltCountryCodes": [
+        "BE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ben",
+      "displayName": "Benin",
+      "naturalEarthFeatureIds": [
+        "1159320399"
+      ],
+      "gdeltCountryCodes": [
+        "BN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bfa",
+      "displayName": "Burkina Faso",
+      "naturalEarthFeatureIds": [
+        "1159320405"
+      ],
+      "gdeltCountryCodes": [
+        "UV"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bgd",
+      "displayName": "Bangladesh",
+      "naturalEarthFeatureIds": [
+        "1159320407"
+      ],
+      "gdeltCountryCodes": [
+        "BG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bgr",
+      "displayName": "Bulgaria",
+      "naturalEarthFeatureIds": [
+        "1159320409"
+      ],
+      "gdeltCountryCodes": [
+        "BU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bhr",
+      "displayName": "Bahrain",
+      "naturalEarthFeatureIds": [
+        "1159320413"
+      ],
+      "gdeltCountryCodes": [
+        "BA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bhs",
+      "displayName": "Bahamas",
+      "naturalEarthFeatureIds": [
+        "1159320415"
+      ],
+      "gdeltCountryCodes": [
+        "BF"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bih",
+      "displayName": "Bosnia and Herzegovina",
+      "naturalEarthFeatureIds": [
+        "1159320417"
+      ],
+      "gdeltCountryCodes": [
+        "BK"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bjn",
+      "displayName": "Bajo Nuevo Bank (Petrel Islands)",
+      "naturalEarthFeatureIds": [
+        "1159320425"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:blm",
+      "displayName": "Saint-Barthélemy",
+      "naturalEarthFeatureIds": [
+        "1159320633"
+      ],
+      "gdeltCountryCodes": [
+        "TB"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:blr",
+      "displayName": "Belarus",
+      "naturalEarthFeatureIds": [
+        "1159320427"
+      ],
+      "gdeltCountryCodes": [
+        "BO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:blz",
+      "displayName": "Belize",
+      "naturalEarthFeatureIds": [
+        "1159320431"
+      ],
+      "gdeltCountryCodes": [
+        "BH"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bmu",
+      "displayName": "Bermuda",
+      "naturalEarthFeatureIds": [
+        "1159320705"
+      ],
+      "gdeltCountryCodes": [
+        "BD"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bol",
+      "displayName": "Bolivia",
+      "naturalEarthFeatureIds": [
+        "1159320439"
+      ],
+      "gdeltCountryCodes": [
+        "BL"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bra",
+      "displayName": "Brazil",
+      "naturalEarthFeatureIds": [
+        "1159320441"
+      ],
+      "gdeltCountryCodes": [
+        "BR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:brb",
+      "displayName": "Barbados",
+      "naturalEarthFeatureIds": [
+        "1159320449"
+      ],
+      "gdeltCountryCodes": [
+        "BB"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bri",
+      "displayName": "Brazilian Island",
+      "naturalEarthFeatureIds": [
+        "1729632181"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:brn",
+      "displayName": "Brunei Darussalam",
+      "naturalEarthFeatureIds": [
+        "1159320451"
+      ],
+      "gdeltCountryCodes": [
+        "BX"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:brt",
+      "displayName": "Bir Tawil",
+      "naturalEarthFeatureIds": [
+        "1729635091"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:btn",
+      "displayName": "Bhutan",
+      "naturalEarthFeatureIds": [
+        "1159320453"
+      ],
+      "gdeltCountryCodes": [
+        "BT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:bwa",
+      "displayName": "Botswana",
+      "naturalEarthFeatureIds": [
+        "1159320461"
+      ],
+      "gdeltCountryCodes": [
+        "BC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:caf",
+      "displayName": "Central African Republic",
+      "naturalEarthFeatureIds": [
+        "1159320463"
+      ],
+      "gdeltCountryCodes": [
+        "CT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:can",
+      "displayName": "Canada",
+      "naturalEarthFeatureIds": [
+        "1159320467"
+      ],
+      "gdeltCountryCodes": [
+        "CA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:che",
+      "displayName": "Switzerland",
+      "naturalEarthFeatureIds": [
+        "1159320491"
+      ],
+      "gdeltCountryCodes": [
+        "SZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:chl",
+      "displayName": "Chile",
+      "naturalEarthFeatureIds": [
+        "1159320493"
+      ],
+      "gdeltCountryCodes": [
+        "CI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:chn",
+      "displayName": "China",
+      "naturalEarthFeatureIds": [
+        "1159320471"
+      ],
+      "gdeltCountryCodes": [
+        "CH"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:civ",
+      "displayName": "Côte d'Ivoire",
+      "naturalEarthFeatureIds": [
+        "1159320507"
+      ],
+      "gdeltCountryCodes": [
+        "IV"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:clp",
+      "displayName": "Clipperton Island",
+      "naturalEarthFeatureIds": [
+        "1159320635"
+      ],
+      "gdeltCountryCodes": [
+        "IP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cmr",
+      "displayName": "Cameroon",
+      "naturalEarthFeatureIds": [
+        "1159320509"
+      ],
+      "gdeltCountryCodes": [
+        "CM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cnm",
+      "displayName": "Cyprus U.N. Buffer Zone",
+      "naturalEarthFeatureIds": [
+        "1159320511"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:cod",
+      "displayName": "Democratic Republic of the Congo",
+      "naturalEarthFeatureIds": [
+        "1159320513"
+      ],
+      "gdeltCountryCodes": [
+        "CG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cog",
+      "displayName": "Republic of the Congo",
+      "naturalEarthFeatureIds": [
+        "1159320515"
+      ],
+      "gdeltCountryCodes": [
+        "CF"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cok",
+      "displayName": "Cook Islands",
+      "naturalEarthFeatureIds": [
+        "1159321129"
+      ],
+      "gdeltCountryCodes": [
+        "CW"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:col",
+      "displayName": "Colombia",
+      "naturalEarthFeatureIds": [
+        "1159320517"
+      ],
+      "gdeltCountryCodes": [
+        "CO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:com",
+      "displayName": "Comoros",
+      "naturalEarthFeatureIds": [
+        "1159320521"
+      ],
+      "gdeltCountryCodes": [
+        "CN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cpv",
+      "displayName": "Republic of Cabo Verde",
+      "naturalEarthFeatureIds": [
+        "1159320523"
+      ],
+      "gdeltCountryCodes": [
+        "CV"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cri",
+      "displayName": "Costa Rica",
+      "naturalEarthFeatureIds": [
+        "1159320525"
+      ],
+      "gdeltCountryCodes": [
+        "CS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:csi",
+      "displayName": "Coral Sea Islands",
+      "naturalEarthFeatureIds": [
+        "1159320359"
+      ],
+      "gdeltCountryCodes": [
+        "CR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cub",
+      "displayName": "Cuba",
+      "naturalEarthFeatureIds": [
+        "1159320527"
+      ],
+      "gdeltCountryCodes": [
+        "CU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cuw",
+      "displayName": "Curaçao",
+      "naturalEarthFeatureIds": [
+        "1159321099"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cym",
+      "displayName": "Cayman Islands",
+      "naturalEarthFeatureIds": [
+        "1159320707"
+      ],
+      "gdeltCountryCodes": [
+        "CJ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cyn",
+      "displayName": "Northern Cyprus",
+      "naturalEarthFeatureIds": [
+        "1159320531"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:cyp",
+      "displayName": "Cyprus",
+      "naturalEarthFeatureIds": [
+        "1159320533"
+      ],
+      "gdeltCountryCodes": [
+        "CY"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:cze",
+      "displayName": "Czech Republic",
+      "naturalEarthFeatureIds": [
+        "1159320535"
+      ],
+      "gdeltCountryCodes": [
+        "EZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:deu",
+      "displayName": "Germany",
+      "naturalEarthFeatureIds": [
+        "1159320539"
+      ],
+      "gdeltCountryCodes": [
+        "GM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:dji",
+      "displayName": "Djibouti",
+      "naturalEarthFeatureIds": [
+        "1159320541"
+      ],
+      "gdeltCountryCodes": [
+        "DJ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:dma",
+      "displayName": "Dominica",
+      "naturalEarthFeatureIds": [
+        "1159320543"
+      ],
+      "gdeltCountryCodes": [
+        "DO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:dnk",
+      "displayName": "Denmark",
+      "naturalEarthFeatureIds": [
+        "1159320547"
+      ],
+      "gdeltCountryCodes": [
+        "DA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:dom",
+      "displayName": "Dominican Republic",
+      "naturalEarthFeatureIds": [
+        "1159320563"
+      ],
+      "gdeltCountryCodes": [
+        "DR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:dza",
+      "displayName": "Algeria",
+      "naturalEarthFeatureIds": [
+        "1159320565"
+      ],
+      "gdeltCountryCodes": [
+        "AG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ecu",
+      "displayName": "Ecuador",
+      "naturalEarthFeatureIds": [
+        "1159320567"
+      ],
+      "gdeltCountryCodes": [
+        "EC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:egy",
+      "displayName": "Egypt",
+      "naturalEarthFeatureIds": [
+        "1159320575"
+      ],
+      "gdeltCountryCodes": [
+        "EG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:eri",
+      "displayName": "Eritrea",
+      "naturalEarthFeatureIds": [
+        "1159320581"
+      ],
+      "gdeltCountryCodes": [
+        "ER"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:esb",
+      "displayName": "Dhekelia",
+      "naturalEarthFeatureIds": [
+        "1159320709"
+      ],
+      "gdeltCountryCodes": [
+        "DX"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:esp",
+      "displayName": "Spain",
+      "naturalEarthFeatureIds": [
+        "1159320587"
+      ],
+      "gdeltCountryCodes": [
+        "SP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:est",
+      "displayName": "Estonia",
+      "naturalEarthFeatureIds": [
+        "1159320615"
+      ],
+      "gdeltCountryCodes": [
+        "EN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:eth",
+      "displayName": "Ethiopia",
+      "naturalEarthFeatureIds": [
+        "1159320617"
+      ],
+      "gdeltCountryCodes": [
+        "ET"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:fin",
+      "displayName": "Finland",
+      "naturalEarthFeatureIds": [
+        "1159320623"
+      ],
+      "gdeltCountryCodes": [
+        "FI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:fji",
+      "displayName": "Fiji",
+      "naturalEarthFeatureIds": [
+        "1159320625"
+      ],
+      "gdeltCountryCodes": [
+        "FJ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:flk",
+      "displayName": "Falkland Islands / Malvinas",
+      "naturalEarthFeatureIds": [
+        "1159320711"
+      ],
+      "gdeltCountryCodes": [
+        "FK"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:fra",
+      "displayName": "France",
+      "naturalEarthFeatureIds": [
+        "1159320637"
+      ],
+      "gdeltCountryCodes": [
+        "FR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:fro",
+      "displayName": "Faeroe Islands",
+      "naturalEarthFeatureIds": [
+        "1159320549"
+      ],
+      "gdeltCountryCodes": [
+        "FO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:fsm",
+      "displayName": "Federated States of Micronesia",
+      "naturalEarthFeatureIds": [
+        "1159320691"
+      ],
+      "gdeltCountryCodes": [
+        "FM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gab",
+      "displayName": "Gabon",
+      "naturalEarthFeatureIds": [
+        "1159320693"
+      ],
+      "gdeltCountryCodes": [
+        "GB"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gbr",
+      "displayName": "United Kingdom",
+      "naturalEarthFeatureIds": [
+        "1159320713"
+      ],
+      "gdeltCountryCodes": [
+        "UK"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:geo",
+      "displayName": "Georgia",
+      "naturalEarthFeatureIds": [
+        "1159320779"
+      ],
+      "gdeltCountryCodes": [
+        "GG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ggy",
+      "displayName": "Guernsey",
+      "naturalEarthFeatureIds": [
+        "1159320715"
+      ],
+      "gdeltCountryCodes": [
+        "GK"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gha",
+      "displayName": "Ghana",
+      "naturalEarthFeatureIds": [
+        "1159320793"
+      ],
+      "gdeltCountryCodes": [
+        "GH"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gib",
+      "displayName": "Gibraltar",
+      "naturalEarthFeatureIds": [
+        "1159320719"
+      ],
+      "gdeltCountryCodes": [
+        "GI"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:gin",
+      "displayName": "Guinea",
+      "naturalEarthFeatureIds": [
+        "1159320795"
+      ],
+      "gdeltCountryCodes": [
+        "GV"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gmb",
+      "displayName": "The Gambia",
+      "naturalEarthFeatureIds": [
+        "1159320797"
+      ],
+      "gdeltCountryCodes": [
+        "GA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gnb",
+      "displayName": "Guinea-Bissau",
+      "naturalEarthFeatureIds": [
+        "1159320799"
+      ],
+      "gdeltCountryCodes": [
+        "PU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gnq",
+      "displayName": "Equatorial Guinea",
+      "naturalEarthFeatureIds": [
+        "1159320801"
+      ],
+      "gdeltCountryCodes": [
+        "EK"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:grc",
+      "displayName": "Greece",
+      "naturalEarthFeatureIds": [
+        "1159320811"
+      ],
+      "gdeltCountryCodes": [
+        "GR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:grd",
+      "displayName": "Grenada",
+      "naturalEarthFeatureIds": [
+        "1159320813"
+      ],
+      "gdeltCountryCodes": [
+        "GJ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:grl",
+      "displayName": "Greenland",
+      "naturalEarthFeatureIds": [
+        "1159320551"
+      ],
+      "gdeltCountryCodes": [
+        "GL"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gtm",
+      "displayName": "Guatemala",
+      "naturalEarthFeatureIds": [
+        "1159320815"
+      ],
+      "gdeltCountryCodes": [
+        "GT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:gum",
+      "displayName": "Guam",
+      "naturalEarthFeatureIds": [
+        "1159321359"
+      ],
+      "gdeltCountryCodes": [
+        "GQ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:guy",
+      "displayName": "Guyana",
+      "naturalEarthFeatureIds": [
+        "1159320817"
+      ],
+      "gdeltCountryCodes": [
+        "GY"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:hkg",
+      "displayName": "Hong Kong",
+      "naturalEarthFeatureIds": [
+        "1159320473"
+      ],
+      "gdeltCountryCodes": [
+        "HK"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:hmd",
+      "displayName": "Heard I. and McDonald Islands",
+      "naturalEarthFeatureIds": [
+        "1159320361"
+      ],
+      "gdeltCountryCodes": [
+        "HM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:hnd",
+      "displayName": "Honduras",
+      "naturalEarthFeatureIds": [
+        "1159320827"
+      ],
+      "gdeltCountryCodes": [
+        "HO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:hrv",
+      "displayName": "Croatia",
+      "naturalEarthFeatureIds": [
+        "1159320833"
+      ],
+      "gdeltCountryCodes": [
+        "HR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:hti",
+      "displayName": "Haiti",
+      "naturalEarthFeatureIds": [
+        "1159320839"
+      ],
+      "gdeltCountryCodes": [
+        "HA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:hun",
+      "displayName": "Hungary",
+      "naturalEarthFeatureIds": [
+        "1159320841"
+      ],
+      "gdeltCountryCodes": [
+        "HU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:idn",
+      "displayName": "Indonesia",
+      "naturalEarthFeatureIds": [
+        "1159320845"
+      ],
+      "gdeltCountryCodes": [
+        "ID"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:imn",
+      "displayName": "Isle of Man",
+      "naturalEarthFeatureIds": [
+        "1159320721"
+      ],
+      "gdeltCountryCodes": [
+        "IM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ind",
+      "displayName": "India",
+      "naturalEarthFeatureIds": [
+        "1159320847"
+      ],
+      "gdeltCountryCodes": [
+        "IN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ioa",
+      "displayName": "Indian Ocean Territories",
+      "naturalEarthFeatureIds": [
+        "1159320363"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:iot",
+      "displayName": "British Indian Ocean Territory",
+      "naturalEarthFeatureIds": [
+        "1159320723"
+      ],
+      "gdeltCountryCodes": [
+        "IO"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:irl",
+      "displayName": "Ireland",
+      "naturalEarthFeatureIds": [
+        "1159320877"
+      ],
+      "gdeltCountryCodes": [
+        "EI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:irn",
+      "displayName": "Iran",
+      "naturalEarthFeatureIds": [
+        "1159320881"
+      ],
+      "gdeltCountryCodes": [
+        "IR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:irq",
+      "displayName": "Iraq",
+      "naturalEarthFeatureIds": [
+        "1159320887"
+      ],
+      "gdeltCountryCodes": [
+        "IZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:isl",
+      "displayName": "Iceland",
+      "naturalEarthFeatureIds": [
+        "1159320917"
+      ],
+      "gdeltCountryCodes": [
+        "IC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:isr",
+      "displayName": "Israel",
+      "naturalEarthFeatureIds": [
+        "1159320895"
+      ],
+      "gdeltCountryCodes": [
+        "IS"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:ita",
+      "displayName": "Italy",
+      "naturalEarthFeatureIds": [
+        "1159320919"
+      ],
+      "gdeltCountryCodes": [
+        "IT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:jam",
+      "displayName": "Jamaica",
+      "naturalEarthFeatureIds": [
+        "1159320931"
+      ],
+      "gdeltCountryCodes": [
+        "JM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:jey",
+      "displayName": "Jersey",
+      "naturalEarthFeatureIds": [
+        "1159320725"
+      ],
+      "gdeltCountryCodes": [
+        "JE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:jor",
+      "displayName": "Jordan",
+      "naturalEarthFeatureIds": [
+        "1159320935"
+      ],
+      "gdeltCountryCodes": [
+        "JO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:jpn",
+      "displayName": "Japan",
+      "naturalEarthFeatureIds": [
+        "1159320937"
+      ],
+      "gdeltCountryCodes": [
+        "JA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:kab",
+      "displayName": "Baikonur Cosmodrome",
+      "naturalEarthFeatureIds": [
+        "1159320965"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:kas",
+      "displayName": "Siachen Glacier",
+      "naturalEarthFeatureIds": [
+        "1159320963"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:kaz",
+      "displayName": "Kazakhstan",
+      "naturalEarthFeatureIds": [
+        "1159320967"
+      ],
+      "gdeltCountryCodes": [
+        "KZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ken",
+      "displayName": "Kenya",
+      "naturalEarthFeatureIds": [
+        "1159320971"
+      ],
+      "gdeltCountryCodes": [
+        "KE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:kgz",
+      "displayName": "Kyrgyzstan",
+      "naturalEarthFeatureIds": [
+        "1159320977"
+      ],
+      "gdeltCountryCodes": [
+        "KG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:khm",
+      "displayName": "Cambodia",
+      "naturalEarthFeatureIds": [
+        "1159320979"
+      ],
+      "gdeltCountryCodes": [
+        "CB"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:kir",
+      "displayName": "Kiribati",
+      "naturalEarthFeatureIds": [
+        "1159320981"
+      ],
+      "gdeltCountryCodes": [
+        "KR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:kna",
+      "displayName": "Saint Kitts and Nevis",
+      "naturalEarthFeatureIds": [
+        "1159320983"
+      ],
+      "gdeltCountryCodes": [
+        "SC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:kor",
+      "displayName": "Republic of Korea",
+      "naturalEarthFeatureIds": [
+        "1159320985"
+      ],
+      "gdeltCountryCodes": [
+        "KS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:kos",
+      "displayName": "Kosovo",
+      "naturalEarthFeatureIds": [
+        "1159321007"
+      ],
+      "gdeltCountryCodes": [
+        "KV"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:kwt",
+      "displayName": "Kuwait",
+      "naturalEarthFeatureIds": [
+        "1159321009"
+      ],
+      "gdeltCountryCodes": [
+        "KU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lao",
+      "displayName": "Lao PDR",
+      "naturalEarthFeatureIds": [
+        "1159321011"
+      ],
+      "gdeltCountryCodes": [
+        "LA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lbn",
+      "displayName": "Lebanon",
+      "naturalEarthFeatureIds": [
+        "1159321013"
+      ],
+      "gdeltCountryCodes": [
+        "LE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lbr",
+      "displayName": "Liberia",
+      "naturalEarthFeatureIds": [
+        "1159321015"
+      ],
+      "gdeltCountryCodes": [
+        "LI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lby",
+      "displayName": "Libya",
+      "naturalEarthFeatureIds": [
+        "1159321017"
+      ],
+      "gdeltCountryCodes": [
+        "LY"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lca",
+      "displayName": "Saint Lucia",
+      "naturalEarthFeatureIds": [
+        "1159321019"
+      ],
+      "gdeltCountryCodes": [
+        "ST"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lie",
+      "displayName": "Liechtenstein",
+      "naturalEarthFeatureIds": [
+        "1159321021"
+      ],
+      "gdeltCountryCodes": [
+        "LS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lka",
+      "displayName": "Sri Lanka",
+      "naturalEarthFeatureIds": [
+        "1159321025"
+      ],
+      "gdeltCountryCodes": [
+        "CE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lso",
+      "displayName": "Lesotho",
+      "naturalEarthFeatureIds": [
+        "1159321027"
+      ],
+      "gdeltCountryCodes": [
+        "LT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ltu",
+      "displayName": "Lithuania",
+      "naturalEarthFeatureIds": [
+        "1159321029"
+      ],
+      "gdeltCountryCodes": [
+        "LH"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lux",
+      "displayName": "Luxembourg",
+      "naturalEarthFeatureIds": [
+        "1159321031"
+      ],
+      "gdeltCountryCodes": [
+        "LU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:lva",
+      "displayName": "Latvia",
+      "naturalEarthFeatureIds": [
+        "1159321033"
+      ],
+      "gdeltCountryCodes": [
+        "LG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mac",
+      "displayName": "Macao",
+      "naturalEarthFeatureIds": [
+        "1159320475"
+      ],
+      "gdeltCountryCodes": [
+        "MC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:maf",
+      "displayName": "Saint-Martin",
+      "naturalEarthFeatureIds": [
+        "1159320639"
+      ],
+      "gdeltCountryCodes": [
+        "RN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mar",
+      "displayName": "Morocco",
+      "naturalEarthFeatureIds": [
+        "1159321035"
+      ],
+      "gdeltCountryCodes": [
+        "MO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mco",
+      "displayName": "Monaco",
+      "naturalEarthFeatureIds": [
+        "1159321043"
+      ],
+      "gdeltCountryCodes": [
+        "MN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mda",
+      "displayName": "Moldova",
+      "naturalEarthFeatureIds": [
+        "1159321045"
+      ],
+      "gdeltCountryCodes": [
+        "MD"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mdg",
+      "displayName": "Madagascar",
+      "naturalEarthFeatureIds": [
+        "1159321051"
+      ],
+      "gdeltCountryCodes": [
+        "MA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mdv",
+      "displayName": "Maldives",
+      "naturalEarthFeatureIds": [
+        "1159321053"
+      ],
+      "gdeltCountryCodes": [
+        "MV"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mex",
+      "displayName": "Mexico",
+      "naturalEarthFeatureIds": [
+        "1159321055"
+      ],
+      "gdeltCountryCodes": [
+        "MX"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mhl",
+      "displayName": "Marshall Islands",
+      "naturalEarthFeatureIds": [
+        "1159321057"
+      ],
+      "gdeltCountryCodes": [
+        "RM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mkd",
+      "displayName": "North Macedonia",
+      "naturalEarthFeatureIds": [
+        "1159321061"
+      ],
+      "gdeltCountryCodes": [
+        "MK"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mli",
+      "displayName": "Mali",
+      "naturalEarthFeatureIds": [
+        "1159321063"
+      ],
+      "gdeltCountryCodes": [
+        "ML"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mlt",
+      "displayName": "Malta",
+      "naturalEarthFeatureIds": [
+        "1159321065"
+      ],
+      "gdeltCountryCodes": [
+        "MT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mmr",
+      "displayName": "Myanmar",
+      "naturalEarthFeatureIds": [
+        "1159321067"
+      ],
+      "gdeltCountryCodes": [
+        "BM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mne",
+      "displayName": "Montenegro",
+      "naturalEarthFeatureIds": [
+        "1159321069"
+      ],
+      "gdeltCountryCodes": [
+        "MJ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mng",
+      "displayName": "Mongolia",
+      "naturalEarthFeatureIds": [
+        "1159321071"
+      ],
+      "gdeltCountryCodes": [
+        "MG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mnp",
+      "displayName": "Northern Mariana Islands",
+      "naturalEarthFeatureIds": [
+        "1159321361"
+      ],
+      "gdeltCountryCodes": [
+        "CQ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:moz",
+      "displayName": "Mozambique",
+      "naturalEarthFeatureIds": [
+        "1159321073"
+      ],
+      "gdeltCountryCodes": [
+        "MZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mrt",
+      "displayName": "Mauritania",
+      "naturalEarthFeatureIds": [
+        "1159321075"
+      ],
+      "gdeltCountryCodes": [
+        "MR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:msr",
+      "displayName": "Montserrat",
+      "naturalEarthFeatureIds": [
+        "1159320727"
+      ],
+      "gdeltCountryCodes": [
+        "MH"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mus",
+      "displayName": "Mauritius",
+      "naturalEarthFeatureIds": [
+        "1159321079"
+      ],
+      "gdeltCountryCodes": [
+        "MP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mwi",
+      "displayName": "Malawi",
+      "naturalEarthFeatureIds": [
+        "1159321081"
+      ],
+      "gdeltCountryCodes": [
+        "MI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:mys",
+      "displayName": "Malaysia",
+      "naturalEarthFeatureIds": [
+        "1159321083"
+      ],
+      "gdeltCountryCodes": [
+        "MY"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:nam",
+      "displayName": "Namibia",
+      "naturalEarthFeatureIds": [
+        "1159321085"
+      ],
+      "gdeltCountryCodes": [
+        "WA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ncl",
+      "displayName": "New Caledonia",
+      "naturalEarthFeatureIds": [
+        "1159320641"
+      ],
+      "gdeltCountryCodes": [
+        "NC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ner",
+      "displayName": "Niger",
+      "naturalEarthFeatureIds": [
+        "1159321087"
+      ],
+      "gdeltCountryCodes": [
+        "NG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:nfk",
+      "displayName": "Norfolk Island",
+      "naturalEarthFeatureIds": [
+        "1159320365"
+      ],
+      "gdeltCountryCodes": [
+        "NF"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:nga",
+      "displayName": "Nigeria",
+      "naturalEarthFeatureIds": [
+        "1159321089"
+      ],
+      "gdeltCountryCodes": [
+        "NI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:nic",
+      "displayName": "Nicaragua",
+      "naturalEarthFeatureIds": [
+        "1159321091"
+      ],
+      "gdeltCountryCodes": [
+        "NU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:niu",
+      "displayName": "Niue",
+      "naturalEarthFeatureIds": [
+        "1159321133"
+      ],
+      "gdeltCountryCodes": [
+        "NE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:nld",
+      "displayName": "Netherlands",
+      "naturalEarthFeatureIds": [
+        "1159321101"
+      ],
+      "gdeltCountryCodes": [
+        "NL"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:nor",
+      "displayName": "Norway",
+      "naturalEarthFeatureIds": [
+        "1159321109"
+      ],
+      "gdeltCountryCodes": [
+        "NO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:npl",
+      "displayName": "Nepal",
+      "naturalEarthFeatureIds": [
+        "1159321121"
+      ],
+      "gdeltCountryCodes": [
+        "NP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:nru",
+      "displayName": "Nauru",
+      "naturalEarthFeatureIds": [
+        "1159321123"
+      ],
+      "gdeltCountryCodes": [
+        "NR"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:nzl",
+      "displayName": "New Zealand",
+      "naturalEarthFeatureIds": [
+        "1159321135"
+      ],
+      "gdeltCountryCodes": [
+        "NZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:omn",
+      "displayName": "Oman",
+      "naturalEarthFeatureIds": [
+        "1159321151"
+      ],
+      "gdeltCountryCodes": [
+        "MU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:pak",
+      "displayName": "Pakistan",
+      "naturalEarthFeatureIds": [
+        "1159321153"
+      ],
+      "gdeltCountryCodes": [
+        "PK"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:pan",
+      "displayName": "Panama",
+      "naturalEarthFeatureIds": [
+        "1159321161"
+      ],
+      "gdeltCountryCodes": [
+        "PM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:pcn",
+      "displayName": "Pitcairn Islands",
+      "naturalEarthFeatureIds": [
+        "1159320729"
+      ],
+      "gdeltCountryCodes": [
+        "PC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:per",
+      "displayName": "Peru",
+      "naturalEarthFeatureIds": [
+        "1159321163"
+      ],
+      "gdeltCountryCodes": [
+        "PE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:pga",
+      "displayName": "Spratly Islands",
+      "naturalEarthFeatureIds": [
+        "1159321165"
+      ],
+      "gdeltCountryCodes": [
+        "PG"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:phl",
+      "displayName": "Philippines",
+      "naturalEarthFeatureIds": [
+        "1159321169"
+      ],
+      "gdeltCountryCodes": [
+        "RP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:plw",
+      "displayName": "Palau",
+      "naturalEarthFeatureIds": [
+        "1159321171"
+      ],
+      "gdeltCountryCodes": [
+        "PS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:png",
+      "displayName": "Papua New Guinea",
+      "naturalEarthFeatureIds": [
+        "1159321173"
+      ],
+      "gdeltCountryCodes": [
+        "PP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:pol",
+      "displayName": "Poland",
+      "naturalEarthFeatureIds": [
+        "1159321179"
+      ],
+      "gdeltCountryCodes": [
+        "PL"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:pri",
+      "displayName": "Puerto Rico",
+      "naturalEarthFeatureIds": [
+        "1159321363"
+      ],
+      "gdeltCountryCodes": [
+        "RQ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:prk",
+      "displayName": "Dem. Rep. Korea",
+      "naturalEarthFeatureIds": [
+        "1159321181"
+      ],
+      "gdeltCountryCodes": [
+        "KN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:prt",
+      "displayName": "Portugal",
+      "naturalEarthFeatureIds": [
+        "1159321187"
+      ],
+      "gdeltCountryCodes": [
+        "PO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:pry",
+      "displayName": "Paraguay",
+      "naturalEarthFeatureIds": [
+        "1159321195"
+      ],
+      "gdeltCountryCodes": [
+        "PA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:psx",
+      "displayName": "Palestine",
+      "naturalEarthFeatureIds": [
+        "1159320899"
+      ],
+      "gdeltCountryCodes": [
+        "GZ",
+        "WE"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:pyf",
+      "displayName": "French Polynesia",
+      "naturalEarthFeatureIds": [
+        "1159320643"
+      ],
+      "gdeltCountryCodes": [
+        "FP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:qat",
+      "displayName": "Qatar",
+      "naturalEarthFeatureIds": [
+        "1159321197"
+      ],
+      "gdeltCountryCodes": [
+        "QA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:rou",
+      "displayName": "Romania",
+      "naturalEarthFeatureIds": [
+        "1159321199"
+      ],
+      "gdeltCountryCodes": [
+        "RO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:rus",
+      "displayName": "Russian Federation",
+      "naturalEarthFeatureIds": [
+        "1159321201"
+      ],
+      "gdeltCountryCodes": [
+        "RS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:rwa",
+      "displayName": "Rwanda",
+      "naturalEarthFeatureIds": [
+        "1159321219"
+      ],
+      "gdeltCountryCodes": [
+        "RW"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:sah",
+      "displayName": "Western Sahara",
+      "naturalEarthFeatureIds": [
+        "1159321223"
+      ],
+      "gdeltCountryCodes": [
+        "WI"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:sau",
+      "displayName": "Saudi Arabia",
+      "naturalEarthFeatureIds": [
+        "1159321225"
+      ],
+      "gdeltCountryCodes": [
+        "SA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:scr",
+      "displayName": "Scarborough Reef",
+      "naturalEarthFeatureIds": [
+        "1159321227"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:sdn",
+      "displayName": "Sudan",
+      "naturalEarthFeatureIds": [
+        "1159321229"
+      ],
+      "gdeltCountryCodes": [
+        "SU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:sds",
+      "displayName": "South Sudan",
+      "naturalEarthFeatureIds": [
+        "1159321235"
+      ],
+      "gdeltCountryCodes": [
+        "OD"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:sen",
+      "displayName": "Senegal",
+      "naturalEarthFeatureIds": [
+        "1159321243"
+      ],
+      "gdeltCountryCodes": [
+        "SG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ser",
+      "displayName": "Serranilla Bank",
+      "naturalEarthFeatureIds": [
+        "1159321245"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:sgp",
+      "displayName": "Singapore",
+      "naturalEarthFeatureIds": [
+        "1159321247"
+      ],
+      "gdeltCountryCodes": [
+        "SN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:sgs",
+      "displayName": "South Georgia and the Islands",
+      "naturalEarthFeatureIds": [
+        "1159320731"
+      ],
+      "gdeltCountryCodes": [
+        "SX"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:shn",
+      "displayName": "Saint Helena",
+      "naturalEarthFeatureIds": [
+        "1159320733"
+      ],
+      "gdeltCountryCodes": [
+        "SH"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:slb",
+      "displayName": "Solomon Islands",
+      "naturalEarthFeatureIds": [
+        "1159321249"
+      ],
+      "gdeltCountryCodes": [
+        "BP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:sle",
+      "displayName": "Sierra Leone",
+      "naturalEarthFeatureIds": [
+        "1159321251"
+      ],
+      "gdeltCountryCodes": [
+        "SL"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:slv",
+      "displayName": "El Salvador",
+      "naturalEarthFeatureIds": [
+        "1159321253"
+      ],
+      "gdeltCountryCodes": [
+        "ES"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:smr",
+      "displayName": "San Marino",
+      "naturalEarthFeatureIds": [
+        "1159321255"
+      ],
+      "gdeltCountryCodes": [
+        "SM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:sol",
+      "displayName": "Somaliland",
+      "naturalEarthFeatureIds": [
+        "1159321259"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:som",
+      "displayName": "Somalia",
+      "naturalEarthFeatureIds": [
+        "1159321261"
+      ],
+      "gdeltCountryCodes": [
+        "SO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:spi",
+      "displayName": "Southern Patagonian Ice Field",
+      "naturalEarthFeatureIds": [
+        "1729635141"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:spm",
+      "displayName": "Saint Pierre and Miquelon",
+      "naturalEarthFeatureIds": [
+        "1159320647"
+      ],
+      "gdeltCountryCodes": [
+        "SB"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:srb",
+      "displayName": "Serbia",
+      "naturalEarthFeatureIds": [
+        "1159321267"
+      ],
+      "gdeltCountryCodes": [
+        "RI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:stp",
+      "displayName": "São Tomé and Principe",
+      "naturalEarthFeatureIds": [
+        "1159321273"
+      ],
+      "gdeltCountryCodes": [
+        "TP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:sur",
+      "displayName": "Suriname",
+      "naturalEarthFeatureIds": [
+        "1159321281"
+      ],
+      "gdeltCountryCodes": [
+        "NS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:svk",
+      "displayName": "Slovakia",
+      "naturalEarthFeatureIds": [
+        "1159321283"
+      ],
+      "gdeltCountryCodes": [
+        "LO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:svn",
+      "displayName": "Slovenia",
+      "naturalEarthFeatureIds": [
+        "1159321285"
+      ],
+      "gdeltCountryCodes": [
+        "SI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:swe",
+      "displayName": "Sweden",
+      "naturalEarthFeatureIds": [
+        "1159321287"
+      ],
+      "gdeltCountryCodes": [
+        "SW"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:swz",
+      "displayName": "Kingdom of eSwatini",
+      "naturalEarthFeatureIds": [
+        "1159321289"
+      ],
+      "gdeltCountryCodes": [
+        "WZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:sxm",
+      "displayName": "Sint Maarten",
+      "naturalEarthFeatureIds": [
+        "1159321103"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:syc",
+      "displayName": "Seychelles",
+      "naturalEarthFeatureIds": [
+        "1159321291"
+      ],
+      "gdeltCountryCodes": [
+        "SE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:syr",
+      "displayName": "Syria",
+      "naturalEarthFeatureIds": [
+        "1159321295"
+      ],
+      "gdeltCountryCodes": [
+        "SY"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tca",
+      "displayName": "Turks and Caicos Islands",
+      "naturalEarthFeatureIds": [
+        "1159320737"
+      ],
+      "gdeltCountryCodes": [
+        "TK"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tcd",
+      "displayName": "Chad",
+      "naturalEarthFeatureIds": [
+        "1159321301"
+      ],
+      "gdeltCountryCodes": [
+        "CD"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tgo",
+      "displayName": "Togo",
+      "naturalEarthFeatureIds": [
+        "1159321303"
+      ],
+      "gdeltCountryCodes": [
+        "TO"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tha",
+      "displayName": "Thailand",
+      "naturalEarthFeatureIds": [
+        "1159321305"
+      ],
+      "gdeltCountryCodes": [
+        "TH"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tjk",
+      "displayName": "Tajikistan",
+      "naturalEarthFeatureIds": [
+        "1159321307"
+      ],
+      "gdeltCountryCodes": [
+        "TI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tkm",
+      "displayName": "Turkmenistan",
+      "naturalEarthFeatureIds": [
+        "1159321309"
+      ],
+      "gdeltCountryCodes": [
+        "TX"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tls",
+      "displayName": "Timor-Leste",
+      "naturalEarthFeatureIds": [
+        "1159321313"
+      ],
+      "gdeltCountryCodes": [
+        "TT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ton",
+      "displayName": "Tonga",
+      "naturalEarthFeatureIds": [
+        "1159321319"
+      ],
+      "gdeltCountryCodes": [
+        "TN"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tto",
+      "displayName": "Trinidad and Tobago",
+      "naturalEarthFeatureIds": [
+        "1159321321"
+      ],
+      "gdeltCountryCodes": [
+        "TD"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tun",
+      "displayName": "Tunisia",
+      "naturalEarthFeatureIds": [
+        "1159321327"
+      ],
+      "gdeltCountryCodes": [
+        "TS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tur",
+      "displayName": "Turkey",
+      "naturalEarthFeatureIds": [
+        "1159321331"
+      ],
+      "gdeltCountryCodes": [
+        "TU"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:tuv",
+      "displayName": "Tuvalu",
+      "naturalEarthFeatureIds": [
+        "1159321333"
+      ],
+      "gdeltCountryCodes": [
+        "TV"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:twn",
+      "displayName": "Taiwan",
+      "naturalEarthFeatureIds": [
+        "1159321335"
+      ],
+      "gdeltCountryCodes": [
+        "TW"
+      ],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:tza",
+      "displayName": "Tanzania",
+      "naturalEarthFeatureIds": [
+        "1159321337"
+      ],
+      "gdeltCountryCodes": [
+        "TZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:uga",
+      "displayName": "Uganda",
+      "naturalEarthFeatureIds": [
+        "1159321343"
+      ],
+      "gdeltCountryCodes": [
+        "UG"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ukr",
+      "displayName": "Ukraine",
+      "naturalEarthFeatureIds": [
+        "1159321345"
+      ],
+      "gdeltCountryCodes": [
+        "UP"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:umi",
+      "displayName": "United States Minor Outlying Islands",
+      "naturalEarthFeatureIds": [
+        "1159321367"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ury",
+      "displayName": "Uruguay",
+      "naturalEarthFeatureIds": [
+        "1159321353"
+      ],
+      "gdeltCountryCodes": [
+        "UY"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:usa",
+      "displayName": "United States",
+      "naturalEarthFeatureIds": [
+        "1159321369"
+      ],
+      "gdeltCountryCodes": [
+        "US"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:usg",
+      "displayName": "US Naval Base Guantanamo Bay",
+      "naturalEarthFeatureIds": [
+        "1159320529"
+      ],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "natural-earth-10m-admin-0-countries"
+    },
+    {
+      "regionId": "country:uzb",
+      "displayName": "Uzbekistan",
+      "naturalEarthFeatureIds": [
+        "1159321405"
+      ],
+      "gdeltCountryCodes": [
+        "UZ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:vat",
+      "displayName": "Vatican",
+      "naturalEarthFeatureIds": [
+        "1159321407"
+      ],
+      "gdeltCountryCodes": [
+        "VT"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:vct",
+      "displayName": "Saint Vincent and the Grenadines",
+      "naturalEarthFeatureIds": [
+        "1159321409"
+      ],
+      "gdeltCountryCodes": [
+        "VC"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:ven",
+      "displayName": "Venezuela",
+      "naturalEarthFeatureIds": [
+        "1159321411"
+      ],
+      "gdeltCountryCodes": [
+        "VE"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:vgb",
+      "displayName": "British Virgin Islands",
+      "naturalEarthFeatureIds": [
+        "1159320739"
+      ],
+      "gdeltCountryCodes": [
+        "VI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:vir",
+      "displayName": "United States Virgin Islands",
+      "naturalEarthFeatureIds": [
+        "1159321371"
+      ],
+      "gdeltCountryCodes": [
+        "VQ"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:vnm",
+      "displayName": "Vietnam",
+      "naturalEarthFeatureIds": [
+        "1159321417"
+      ],
+      "gdeltCountryCodes": [
+        "VM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:vut",
+      "displayName": "Vanuatu",
+      "naturalEarthFeatureIds": [
+        "1159321421"
+      ],
+      "gdeltCountryCodes": [
+        "NH"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:wlf",
+      "displayName": "Wallis and Futuna Islands",
+      "naturalEarthFeatureIds": [
+        "1159320649"
+      ],
+      "gdeltCountryCodes": [
+        "WF"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:wsb",
+      "displayName": "Akrotiri",
+      "naturalEarthFeatureIds": [
+        "1159320741"
+      ],
+      "gdeltCountryCodes": [
+        "AX"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:wsm",
+      "displayName": "Samoa",
+      "naturalEarthFeatureIds": [
+        "1159321423"
+      ],
+      "gdeltCountryCodes": [
+        "WS"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:yem",
+      "displayName": "Yemen",
+      "naturalEarthFeatureIds": [
+        "1159321425"
+      ],
+      "gdeltCountryCodes": [
+        "YM"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:zaf",
+      "displayName": "South Africa",
+      "naturalEarthFeatureIds": [
+        "1159321431"
+      ],
+      "gdeltCountryCodes": [
+        "SF"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:zmb",
+      "displayName": "Zambia",
+      "naturalEarthFeatureIds": [
+        "1159321439"
+      ],
+      "gdeltCountryCodes": [
+        "ZA"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:zwe",
+      "displayName": "Zimbabwe",
+      "naturalEarthFeatureIds": [
+        "1159321441"
+      ],
+      "gdeltCountryCodes": [
+        "ZI"
+      ],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    }
+  ],
+  "mappedLegacyGdeltCountryCodeEvidence": [],
+  "unmappedGdeltCountryCodes": [
+    {
+      "code": "BQ",
+      "lookupName": "Navassa Island",
+      "reason": "NO_TERRITORIAL_GEOMETRY"
+    },
+    {
+      "code": "BS",
+      "lookupName": "Bassas da India",
+      "reason": "NO_TERRITORIAL_GEOMETRY"
+    },
+    {
+      "code": "BV",
+      "lookupName": "Bouvet Island",
+      "reason": "NO_TERRITORIAL_GEOMETRY"
+    },
+    {
+      "code": "CK",
+      "lookupName": "Cocos Keeling Islands",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "DQ",
+      "lookupName": "Jarvis Island",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "EU",
+      "lookupName": "Europa Island",
+      "reason": "NO_TERRITORIAL_GEOMETRY"
+    },
+    {
+      "code": "FG",
+      "lookupName": "French Guiana",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "FQ",
+      "lookupName": "Baker Island",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "GO",
+      "lookupName": "Glorioso Islands",
+      "reason": "NO_TERRITORIAL_GEOMETRY"
+    },
+    {
+      "code": "GP",
+      "lookupName": "Guadeloupe",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "HQ",
+      "lookupName": "Howland Island",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "JN",
+      "lookupName": "Jan Mayen",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "JQ",
+      "lookupName": "Johnston Atoll",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "JU",
+      "lookupName": "Juan de Nova Island",
+      "reason": "NO_TERRITORIAL_GEOMETRY"
+    },
+    {
+      "code": "KQ",
+      "lookupName": "Kingman Reef",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "KT",
+      "lookupName": "Christmas Island",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "LQ",
+      "lookupName": "Palmyra Atoll",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "MB",
+      "lookupName": "Martinique",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "MF",
+      "lookupName": "Mayotte",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "MQ",
+      "lookupName": "Midway Islands",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "NM",
+      "lookupName": "No Mans Land",
+      "reason": "UNSUPPORTED_NON_COUNTRY_CODE"
+    },
+    {
+      "code": "NT",
+      "lookupName": "Netherlands Antilles",
+      "reason": "AMBIGUOUS_MULTIPLE_REGIONS"
+    },
+    {
+      "code": "OC",
+      "lookupName": "Oceans",
+      "reason": "UNSUPPORTED_NON_COUNTRY_CODE",
+      "evidence": {
+        "kind": "VERIFIED_DATASET_OBSERVATION",
+        "datasetSha256": "75be83f05fd84eca2e3be29b0386a84e513b641c7ceac0792261a7d4cf972bbe",
+        "observationCount": 2,
+        "observedValue": "OC",
+        "description": "Verified GDELT Event sample used for the 2026-08-10 boundary coverage measurement"
+      }
+    },
+    {
+      "code": "OS",
+      "lookupName": "Oceans",
+      "reason": "UNSUPPORTED_NON_COUNTRY_CODE"
+    },
+    {
+      "code": "PF",
+      "lookupName": "Paracel Islands",
+      "reason": "NO_TERRITORIAL_GEOMETRY"
+    },
+    {
+      "code": "PJ",
+      "lookupName": "Etorofu, Habomai, Kunashiri and Shikotan Islands",
+      "reason": "AMBIGUOUS_MULTIPLE_REGIONS"
+    },
+    {
+      "code": "RE",
+      "lookupName": "Reunion",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "SV",
+      "lookupName": "Svalbard",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "TE",
+      "lookupName": "Tromelin Island",
+      "reason": "NO_TERRITORIAL_GEOMETRY"
+    },
+    {
+      "code": "TL",
+      "lookupName": "Tokelau",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    },
+    {
+      "code": "UF",
+      "lookupName": "Undersea Features",
+      "reason": "UNSUPPORTED_NON_COUNTRY_CODE"
+    },
+    {
+      "code": "UU",
+      "lookupName": "Undesignated Sovereignty",
+      "reason": "UNSUPPORTED_NON_COUNTRY_CODE"
+    },
+    {
+      "code": "WQ",
+      "lookupName": "Wake Island",
+      "reason": "SOURCE_GEOMETRY_NOT_INDEPENDENT"
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "manifestSchemaVersion": "1",
+  "sources": [
+    {
+      "sourceId": "natural-earth-10m-admin-0-countries",
+      "fileName": "ne_10m_admin_0_countries.geojson",
+      "url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/ca96624a56bd078437bca8184e78163e5039ad19/geojson/ne_10m_admin_0_countries.geojson",
+      "providerIdentity": "github:nvkelso/natural-earth-vector",
+      "repositoryCommit": "ca96624a56bd078437bca8184e78163e5039ad19",
+      "license": {
+        "name": "Public Domain",
+        "url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/ca96624a56bd078437bca8184e78163e5039ad19/LICENSE.md"
+      },
+      "sha256": "239eec57ac17f100a11e2536cffc56752c318b50ae765b0918ff7aab4ce8f255",
+      "maxBytes": 13287234,
+      "contentTypes": [
+        "text/plain"
+      ]
+    },
+    {
+      "sourceId": "gdelt-country-lookup",
+      "fileName": "GEOLOOKUP-COUNTRY.TXT",
+      "url": "https://storage.googleapis.com/data.gdeltproject.org/blog/stability-dashboard-api/GEOLOOKUP-COUNTRY.TXT",
+      "providerIdentity": "gdelt-project:gcs:data.gdeltproject.org",
+      "repositoryCommit": null,
+      "license": {
+        "name": "GDELT Terms of Use",
+        "url": "https://www.gdeltproject.org/about.html"
+      },
+      "sha256": "5c749d1e447b47be45de78702ab49e9697cc54a0bf058f13664cdbe5c71beec1",
+      "maxBytes": 4268,
+      "contentTypes": [
+        "text/plain"
+      ]
+    }
+  ]
+}

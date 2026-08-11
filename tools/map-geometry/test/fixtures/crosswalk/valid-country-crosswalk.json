@@ -1,0 +1,34 @@
+{
+  "crosswalkSchemaVersion": 1,
+  "crosswalkVersion": "country-crosswalk-v1",
+  "naturalEarthSourceId": "natural-earth-fixture-v1",
+  "gdeltCountryLookupSourceId": "gdelt-country-lookup-fixture-v1",
+  "naturalEarthFeatureKey": "NE_ID",
+  "naturalEarthFeatureCoverage": "ALL",
+  "regions": [
+    {
+      "regionId": "country:alpha",
+      "displayName": "Alpha",
+      "naturalEarthFeatureIds": ["101"],
+      "gdeltCountryCodes": ["AA"],
+      "disputeStatus": "STANDARD",
+      "disputeSource": null
+    },
+    {
+      "regionId": "country:beta-territory",
+      "displayName": "Beta Territory",
+      "naturalEarthFeatureIds": ["102"],
+      "gdeltCountryCodes": [],
+      "disputeStatus": "DISPUTED_DE_FACTO",
+      "disputeSource": "fixture-dispute-register-v1"
+    }
+  ],
+  "mappedLegacyGdeltCountryCodeEvidence": [],
+  "unmappedGdeltCountryCodes": [
+    {
+      "code": "BB",
+      "lookupName": "Beta Territory",
+      "reason": "AMBIGUOUS_MULTIPLE_REGIONS"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "NE_ID": 101,
+        "NAME": "Alpha"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "NE_ID": 102,
+        "NAME": "Beta Territory"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[2, 0], [3, 0], [3, 1], [2, 0]]]
+      }
+    }
+  ]
+}

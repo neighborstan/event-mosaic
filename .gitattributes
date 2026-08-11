@@ -16,6 +16,10 @@ gradle/wrapper/gradle-wrapper.properties text eol=lf
 *.sql text eol=lf
 *.java text eol=lf
 *.kt text eol=lf
+*.json text eol=lf
+*.geojson text eol=lf
+*.mjs text eol=lf
+*.tsv text eol=lf
 
 # Пустой Extras в Mention fixture физически представлен trailing TAB.
 src/test/resources/gdelt/csv/mention-valid.csv -whitespace
