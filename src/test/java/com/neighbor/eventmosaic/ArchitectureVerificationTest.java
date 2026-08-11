@@ -30,6 +30,8 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageUnavailableExcept
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
+import com.neighbor.eventmosaic.search.api.CountryMapSnapshot;
+import com.neighbor.eventmosaic.search.api.CountryMapSnapshotQuery;
 import com.neighbor.eventmosaic.search.api.EventDetails;
 import com.neighbor.eventmosaic.search.api.EventDetailsQuery;
 import java.util.List;
@@ -108,7 +110,11 @@ class ArchitectureVerificationTest {
 		assertNamedApi(
 				modules,
 				"search",
-				List.of(EventDetails.class, EventDetailsQuery.class));
+				List.of(
+						CountryMapSnapshot.class,
+						CountryMapSnapshotQuery.class,
+						EventDetails.class,
+						EventDetailsQuery.class));
 	}
 
 	private static void assertNamedApi(
