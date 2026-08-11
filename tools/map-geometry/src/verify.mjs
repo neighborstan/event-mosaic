@@ -1,3 +1,3 @@
 import { runCli } from "./cli.mjs";
 
-await runCli("verify");
+await runCli("verify", process.argv.slice(2));

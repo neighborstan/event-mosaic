@@ -1,0 +1,58 @@
+{
+  "geometryConfigSchemaVersion": 1,
+  "geometryVersion": "country-v1",
+  "geometrySource": "natural-earth-10m",
+  "toolchain": {
+    "toolVersion": "0.1.0",
+    "nodeVersion": "24.19.0",
+    "npmVersion": "11.17.0",
+    "mapshaperVersion": "0.7.51"
+  },
+  "candidateProfiles": [
+    {
+      "profileId": "retain-20-p5",
+      "simplificationMethod": "weighted",
+      "retainPercent": 20,
+      "keepShapes": true,
+      "coordinatePrecision": 0.00001
+    },
+    {
+      "profileId": "retain-20-p4",
+      "simplificationMethod": "weighted",
+      "retainPercent": 20,
+      "keepShapes": true,
+      "coordinatePrecision": 0.0001
+    },
+    {
+      "profileId": "retain-20-p3",
+      "simplificationMethod": "weighted",
+      "retainPercent": 20,
+      "keepShapes": true,
+      "coordinatePrecision": 0.001
+    },
+    {
+      "profileId": "retain-15-p4",
+      "simplificationMethod": "weighted",
+      "retainPercent": 15,
+      "keepShapes": true,
+      "coordinatePrecision": 0.0001
+    },
+    {
+      "profileId": "retain-10-p4",
+      "simplificationMethod": "weighted",
+      "retainPercent": 10,
+      "keepShapes": true,
+      "coordinatePrecision": 0.0001
+    }
+  ],
+  "selectedProfileId": "retain-20-p4",
+  "gzip": {
+    "level": 9,
+    "mtime": 0
+  },
+  "budgets": {
+    "maxGeojsonBytes": 2600000,
+    "maxGzipBytes": 1000000,
+    "maxVertices": 125000
+  }
+}
