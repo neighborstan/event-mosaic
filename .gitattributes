@@ -19,6 +19,11 @@ gradle/wrapper/gradle-wrapper.properties text eol=lf
 *.json text eol=lf
 *.geojson text eol=lf
 *.mjs text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
 *.tsv text eol=lf
 
 # Пустой Extras в Mention fixture физически представлен trailing TAB.

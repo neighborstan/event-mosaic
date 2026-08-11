@@ -10,6 +10,9 @@ Event Mosaic - приложение для загрузки, обработки 
 - PostgreSQL
 - Flyway
 - Elasticsearch
+- React 19
+- TypeScript 6
+- Vite 8
 
 ## Инфраструктура
 
@@ -18,6 +21,35 @@ Event Mosaic - приложение для загрузки, обработки 
 ```shell
 docker compose -f compose.local.yml up -d
 ```
+
+## Локальный frontend
+
+Frontend требует Node.js `24.19.0` и npm `11.19.0`. Backend и Vite запускаются
+отдельно. Сначала в одном терминале запустите Spring Boot:
+
+```powershell
+# Windows
+.\gradlew.bat bootRun
+```
+
+```shell
+# macOS
+sh ./gradlew bootRun
+```
+
+В другом терминале установите зависимости только из lockfile и запустите Vite:
+
+```shell
+cd frontend
+npm ci
+npm run dev
+```
+
+Vite по умолчанию проксирует только запросы `/map` на
+`http://localhost:8080`. Другой адрес backend можно задать в локальном
+`frontend/.env.local` по образцу `frontend/.env.example`; этот файл не нужно
+добавлять в Git. Сейчас frontend собирается отдельно и пока не включается в
+Spring Boot artifact.
 
 ## Геометрия карты
 
