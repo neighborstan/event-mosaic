@@ -24,8 +24,24 @@ docker compose -f compose.local.yml up -d
 
 ## Локальный frontend
 
-Frontend требует Node.js `24.19.0` и npm `11.19.0`. Backend и Vite запускаются
-отдельно. Сначала в одном терминале запустите Spring Boot:
+Frontend требует Node.js `24.19.0` и npm `11.19.0`.
+
+На Windows ранний экран можно открыть одним запуском из корня проекта:
+
+```powershell
+.\run-frontend.cmd
+```
+
+Также можно дважды щелкнуть `run-frontend.cmd` в Проводнике. При наличии скрипт
+сначала использует точный локальный runtime проекта; если его нет, проверяет
+runtime из `PATH`. Затем он выполняет `npm ci`, запускает Vite только на
+`127.0.0.1` и сам открывает браузер. Окно нужно оставить открытым, а для
+остановки нажать `Ctrl+C`. Проверить bootstrap без запуска dev-сервера и
+браузера можно командой `.\run-frontend.cmd --check`.
+
+Текущий экран-каркас еще не обращается к backend, поэтому для его просмотра
+Spring Boot не нужен. Когда потребуется проверить `/map`, backend можно
+запустить вручную конфигурацией Spring Boot в IntelliJ IDEA или командой:
 
 ```powershell
 # Windows
@@ -37,12 +53,13 @@ Frontend требует Node.js `24.19.0` и npm `11.19.0`. Backend и Vite за
 sh ./gradlew bootRun
 ```
 
-В другом терминале установите зависимости только из lockfile и запустите Vite:
+На macOS или для ручного запуска Vite установите зависимости только из lockfile
+и откройте dev-сервер так:
 
 ```shell
 cd frontend
 npm ci
-npm run dev
+npm run dev -- --host 127.0.0.1 --open
 ```
 
 Vite по умолчанию проксирует только запросы `/map` на
