@@ -22,6 +22,11 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.IndexedEventDocument;
 import com.neighbor.eventmosaic.indexing.api.IndexedMentionDocument;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageEvidence;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageInterval;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageQuery;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageStatus;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageUnavailableException;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
@@ -74,9 +79,18 @@ class ArchitectureVerificationTest {
 
 	@Test
 	@DisplayName("Новые модули публикуют только явные named API boundaries")
-	void exposesProcessingIndexingAndSearchNamedInterfaces() {
+	void exposesModuleContractsThroughNamedInterfaces() {
 		var modules = ApplicationModules.of(EventMosaicApplication.class);
 
+		assertNamedApi(
+				modules,
+				"ingestion",
+				List.of(
+						IngestionCoverageEvidence.class,
+						IngestionCoverageInterval.class,
+						IngestionCoverageQuery.class,
+						IngestionCoverageStatus.class,
+						IngestionCoverageUnavailableException.class));
 		assertNamedApi(
 				modules,
 				"processing",

@@ -31,6 +31,7 @@ public enum IngestionErrorCode implements ApplicationErrorCode {
 	STAGING_ATOMIC_PUBLICATION_UNSUPPORTED("Filesystem does not support required atomic publication"),
 	FILESYSTEM_IO_FAILURE("Local ingestion filesystem operation failed"),
 	STORAGE_PRESSURE("Available storage is below the configured safe reserve"),
+	COVERAGE_QUERY_UNAVAILABLE("Ingestion coverage query is temporarily unavailable"),
 	OPERATION_DEADLINE_EXCEEDED("Ingestion operation exceeded the shared deadline"),
 	OPERATION_INTERRUPTED("Ingestion operation was interrupted"),
 	INTERNAL_ERROR("Unexpected internal ingestion error");

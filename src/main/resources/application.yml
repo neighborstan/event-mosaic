@@ -54,6 +54,10 @@ event-mosaic:
       automatic-deletion-enabled: false
   search:
     max-sources-per-event: 20
+  map:
+    country-snapshot:
+      geometry-version: country-v1
+      ingestion-grace: 15m
   indexing:
     bulk-size: 500
     max-bulk-bytes: 5242880

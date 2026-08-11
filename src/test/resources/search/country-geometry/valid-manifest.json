@@ -1,0 +1,28 @@
+{
+  "manifestSchemaVersion": "1",
+  "geometryVersion": "country-v1",
+  "regions": [
+    {
+      "regionId": "country:aaa",
+      "gdeltCountryCodes": ["AA"]
+    },
+    {
+      "regionId": "country:bbb",
+      "gdeltCountryCodes": []
+    },
+    {
+      "regionId": "country:psx",
+      "gdeltCountryCodes": ["GZ", "WE"]
+    }
+  ],
+  "unmappedGdeltCountryCodes": [
+    {
+      "code": "NT",
+      "reason": "AMBIGUOUS_MULTIPLE_REGIONS"
+    },
+    {
+      "code": "OS",
+      "reason": "UNSUPPORTED_NON_COUNTRY_CODE"
+    }
+  ]
+}
