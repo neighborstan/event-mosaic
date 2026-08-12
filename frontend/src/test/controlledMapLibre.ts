@@ -1,4 +1,6 @@
-import type { MapOptions } from "maplibre-gl";
+import type { AddLayerObject, MapOptions } from "maplibre-gl";
+
+import type { CountryGeometry } from "../features/country-map/api/countryGeometry";
 
 import type {
   MapLibreMapFactory,
@@ -21,6 +23,19 @@ export class ControlledMapLibreMap implements MapLibreOwnedMap {
   };
 
   private readonly subscriptions: SubscriptionRecord[] = [];
+
+  readonly sourceAdditions: Readonly<{
+    id: string;
+    geometry: CountryGeometry;
+  }>[] = [];
+
+  readonly layerAdditions: AddLayerObject[] = [];
+
+  readonly operationLog: string[] = [];
+
+  private readonly sourceIds = new Set<string>();
+
+  private readonly layerIds = new Set<string>();
 
   removeCalls = 0;
 
@@ -48,6 +63,34 @@ export class ControlledMapLibreMap implements MapLibreOwnedMap {
         }
       },
     };
+  }
+
+  hasSource(id: string): boolean {
+    return this.sourceIds.has(id);
+  }
+
+  addCountryGeometrySource(id: string, geometry: CountryGeometry): void {
+    if (this.sourceIds.has(id)) {
+      throw new Error(`Тестовая карта уже содержит source ${id}`);
+    }
+
+    this.sourceIds.add(id);
+    this.sourceAdditions.push({ id, geometry });
+    this.operationLog.push(`source:${id}`);
+  }
+
+  hasLayer(id: string): boolean {
+    return this.layerIds.has(id);
+  }
+
+  addLayer(layer: AddLayerObject): void {
+    if (this.layerIds.has(layer.id)) {
+      throw new Error(`Тестовая карта уже содержит layer ${layer.id}`);
+    }
+
+    this.layerIds.add(layer.id);
+    this.layerAdditions.push(layer);
+    this.operationLog.push(`layer:${layer.id}`);
   }
 
   remove(): void {

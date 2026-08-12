@@ -79,7 +79,7 @@ if defined CHECK_ONLY goto :check_mode
 
 echo.
 echo Запускаю frontend на loopback-адресе и открываю браузер.
-echo Backend для текущего экрана-каркаса не требуется.
+echo Для загрузки границ стран отдельно запустите Spring Boot backend.
 echo Для остановки нажмите Ctrl+C в этом окне.
 call npm run dev -- --host 127.0.0.1 --open
 set "DEV_EXIT=%ERRORLEVEL%"

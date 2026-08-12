@@ -2,6 +2,10 @@ import { useRef } from "react";
 import type { JSX } from "react";
 
 import {
+  useCountryGeometry,
+  type CountryGeometryLoader,
+} from "../api/useCountryGeometry";
+import {
   resolveBasemapProvider,
   type BasemapConfiguration,
 } from "../lib/basemapProvider";
@@ -13,16 +17,22 @@ import {
 
 type CountryMapScreenProps = Readonly<{
   providerValue?: string;
+  geometryLoader?: CountryGeometryLoader | undefined;
   mapFactory?: MapLibreMapFactory | undefined;
 }>;
 
 type CountryMapCanvasProps = Readonly<{
   configuration: BasemapConfiguration;
+  geometryLoader?: CountryGeometryLoader | undefined;
   mapFactory?: MapLibreMapFactory | undefined;
 }>;
 
+type CountryMapTechnicalState =
+  MapLibreTechnicalState | Readonly<{ status: "geometry-error" }>;
+
 export function CountryMapScreen({
   providerValue = import.meta.env.VITE_MAP_BASEMAP_PROVIDER,
+  geometryLoader,
   mapFactory,
 }: CountryMapScreenProps = {}): JSX.Element {
   const providerResolution = resolveBasemapProvider(providerValue);
@@ -42,6 +52,7 @@ export function CountryMapScreen({
         {providerResolution.status === "resolved" ? (
           <CountryMapCanvas
             configuration={providerResolution.configuration}
+            geometryLoader={geometryLoader}
             mapFactory={mapFactory}
           />
         ) : (
@@ -61,15 +72,19 @@ export function CountryMapScreen({
 
 function CountryMapCanvas({
   configuration,
+  geometryLoader,
   mapFactory,
 }: CountryMapCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
-  const technicalState = useMapLibreMap({
+  const geometryState = useCountryGeometry({ loader: geometryLoader });
+  const mapState = useMapLibreMap({
     containerRef,
     style: configuration.styleUrl,
     attributionControl: configuration.attributionControl,
+    geometry: geometryState.status === "loaded" ? geometryState.geometry : null,
     mapFactory,
   });
+  const technicalState = resolveTechnicalState(mapState, geometryState.status);
 
   return (
     <section
@@ -90,7 +105,7 @@ function CountryMapCanvas({
 
 function MapTechnicalStatus({
   state,
-}: Readonly<{ state: MapLibreTechnicalState }>): JSX.Element {
+}: Readonly<{ state: CountryMapTechnicalState }>): JSX.Element {
   switch (state.status) {
     case "loading":
       return (
@@ -99,7 +114,17 @@ function MapTechnicalStatus({
           role="status"
           aria-live="polite"
         >
-          Фоновая карта загружается. Данные по странам пока не подключены.
+          Карта загружается. Ожидаем фоновый слой и проверенные границы стран.
+        </p>
+      );
+    case "ready":
+      return (
+        <p
+          className="country-map-shell__status"
+          role="status"
+          aria-live="polite"
+        >
+          Карта готова. Показаны границы 258 стран и территорий.
         </p>
       );
     case "provider-error":
@@ -109,5 +134,27 @@ function MapTechnicalStatus({
           переключение источника не выполняется.
         </p>
       );
+    case "geometry-error":
+      return (
+        <p className="country-map-shell__alert" role="alert">
+          Не удалось загрузить или проверить геометрию стран. Поврежденные
+          данные не отображаются как пустая карта.
+        </p>
+      );
   }
+}
+
+function resolveTechnicalState(
+  mapState: MapLibreTechnicalState,
+  geometryStatus: "loading" | "loaded" | "error",
+): CountryMapTechnicalState {
+  if (mapState.status === "provider-error") {
+    return mapState;
+  }
+
+  if (geometryStatus === "error") {
+    return { status: "geometry-error" };
+  }
+
+  return mapState;
 }
