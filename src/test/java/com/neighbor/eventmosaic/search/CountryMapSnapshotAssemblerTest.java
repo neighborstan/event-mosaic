@@ -62,9 +62,13 @@ class CountryMapSnapshotAssemblerTest {
 		assertThat(first.eventCount()).isEqualTo(2);
 		assertThat(first.coloredEventCount()).isEqualTo(2);
 		assertThat(first.missingToneEventCount()).isZero();
-		assertThat(first.toneCounts().count(Tone.NEGATIVE)).isEqualTo(1);
+		assertThat(first.toneCounts().count(Tone.NEGATIVE_EXTREME)).isEqualTo(1);
+		assertThat(first.toneCounts().count(Tone.NEGATIVE_STRONG)).isZero();
+		assertThat(first.toneCounts().count(Tone.NEGATIVE_MILD)).isZero();
 		assertThat(first.toneCounts().count(Tone.ZERO)).isZero();
-		assertThat(first.toneCounts().count(Tone.POSITIVE)).isEqualTo(1);
+		assertThat(first.toneCounts().count(Tone.POSITIVE_MILD)).isZero();
+		assertThat(first.toneCounts().count(Tone.POSITIVE_STRONG)).isZero();
+		assertThat(first.toneCounts().count(Tone.POSITIVE_EXTREME)).isEqualTo(1);
 
 		CountryMapSnapshot.Region second = snapshot.regions().get(1);
 		assertThat(second.eventCount()).isEqualTo(1);
@@ -105,6 +109,9 @@ class CountryMapSnapshotAssemblerTest {
 					assertThat(region.eventCount()).isZero();
 					assertThat(region.coloredEventCount()).isZero();
 					assertThat(region.missingToneEventCount()).isZero();
+					for (Tone tone : Tone.values()) {
+						assertThat(region.toneCounts().count(tone)).isZero();
+					}
 				});
 		assertThat(complete.coverage().status()).isEqualTo(CoverageStatus.COMPLETE);
 		assertThat(complete.coverage().missingIntervals()).isEmpty();
@@ -164,17 +171,30 @@ class CountryMapSnapshotAssemblerTest {
 		Aggregation valid = populatedAggregation();
 
 		Map<String, RegionCounts> inconsistentRegion = new HashMap<>(valid.regions());
-		inconsistentRegion.put("country:aaa", new RegionCounts(2, 1, 0, 0, 0));
+		inconsistentRegion.put(
+				"country:aaa",
+				new RegionCounts(2, 1, 0, 0, 0, 0, 0, 0, 0));
 		assertSearchFailure(withRegions(valid, inconsistentRegion));
 
 		Map<String, RegionCounts> negativeRegion = new HashMap<>(valid.regions());
-		negativeRegion.put("country:aaa", new RegionCounts(0, -1, 0, 0, 1));
+		negativeRegion.put(
+				"country:aaa",
+				new RegionCounts(0, -1, 0, 0, 0, 0, 0, 0, 1));
 		assertSearchFailure(withRegions(valid, negativeRegion));
 
 		Map<String, RegionCounts> overflowRegion = new HashMap<>(valid.regions());
 		overflowRegion.put(
 				"country:aaa",
-				new RegionCounts(Long.MAX_VALUE, Long.MAX_VALUE, 0, 1, 0));
+				new RegionCounts(
+						Long.MAX_VALUE,
+						Long.MAX_VALUE,
+						0,
+						0,
+						0,
+						0,
+						0,
+						1,
+						0));
 		assertSearchFailure(withRegions(valid, overflowRegion));
 
 		assertSearchFailure(new Aggregation(
@@ -226,8 +246,8 @@ class CountryMapSnapshotAssemblerTest {
 	private static Aggregation populatedAggregation() {
 		Map<String, RegionCounts> regions = new LinkedHashMap<>();
 		regions.put("country:ccc", zeroRegion());
-		regions.put("country:bbb", new RegionCounts(1, 0, 0, 0, 1));
-		regions.put("country:aaa", new RegionCounts(2, 1, 0, 1, 0));
+		regions.put("country:bbb", new RegionCounts(1, 0, 0, 0, 0, 0, 0, 0, 1));
+		regions.put("country:aaa", new RegionCounts(2, 1, 0, 0, 0, 0, 0, 1, 0));
 		return new Aggregation(
 				7,
 				3,
@@ -276,7 +296,7 @@ class CountryMapSnapshotAssemblerTest {
 	}
 
 	private static RegionCounts zeroRegion() {
-		return new RegionCounts(0, 0, 0, 0, 0);
+		return new RegionCounts(0, 0, 0, 0, 0, 0, 0, 0, 0);
 	}
 
 	private static Map<UnlocatedReason, Long> zeroUnlocatedReasons() {

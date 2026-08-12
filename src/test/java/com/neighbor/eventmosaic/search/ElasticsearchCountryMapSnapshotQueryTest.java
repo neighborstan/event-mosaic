@@ -259,24 +259,86 @@ class ElasticsearchCountryMapSnapshotQueryTest {
 		assertThat(tones.isFilters()).isTrue();
 		Map<String, Query> toneFilters = tones.filters().filters().keyed();
 		assertThat(toneFilters).containsOnlyKeys(
-				ElasticsearchCountryMapSnapshotQuery.NEGATIVE_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.NEGATIVE_EXTREME_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.NEGATIVE_STRONG_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.NEGATIVE_MILD_TONE_BUCKET,
 				ElasticsearchCountryMapSnapshotQuery.ZERO_TONE_BUCKET,
-				ElasticsearchCountryMapSnapshotQuery.POSITIVE_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.POSITIVE_MILD_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.POSITIVE_STRONG_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.POSITIVE_EXTREME_TONE_BUCKET,
 				ElasticsearchCountryMapSnapshotQuery.MISSING_TONE_BUCKET);
-		var negativeRange = toneFilters
-				.get(ElasticsearchCountryMapSnapshotQuery.NEGATIVE_TONE_BUCKET)
+		var negativeExtremeRange = toneFilters
+				.get(ElasticsearchCountryMapSnapshotQuery.NEGATIVE_EXTREME_TONE_BUCKET)
 				.range()
 				.number();
+		assertThat(negativeExtremeRange.gt()).isNull();
+		assertThat(negativeExtremeRange.gte()).isNull();
+		assertThat(negativeExtremeRange.lt()).isNull();
+		assertThat(negativeExtremeRange.lte()).isEqualTo(-8.0);
+
+		var negativeStrongRange = toneFilters
+				.get(ElasticsearchCountryMapSnapshotQuery.NEGATIVE_STRONG_TONE_BUCKET)
+				.range()
+				.number();
+		assertThat(negativeStrongRange.gt()).isEqualTo(-8.0);
+		assertThat(negativeStrongRange.gte()).isNull();
+		assertThat(negativeStrongRange.lt()).isNull();
+		assertThat(negativeStrongRange.lte()).isEqualTo(-3.0);
+
+		var negativeMildRange = toneFilters
+				.get(ElasticsearchCountryMapSnapshotQuery.NEGATIVE_MILD_TONE_BUCKET)
+				.range()
+				.number();
+		assertThat(negativeMildRange.gt()).isEqualTo(-3.0);
+		assertThat(negativeMildRange.gte()).isNull();
+		assertThat(negativeMildRange.lte()).isNull();
+		assertThat(Double.doubleToRawLongBits(negativeMildRange.lt()))
+				.isEqualTo(Double.doubleToRawLongBits(-0.0));
+
 		var zeroRange = toneFilters
 				.get(ElasticsearchCountryMapSnapshotQuery.ZERO_TONE_BUCKET)
 				.range()
 				.number();
-		assertThat(Double.doubleToRawLongBits(negativeRange.lt()))
-				.isEqualTo(Double.doubleToRawLongBits(-0.0));
 		assertThat(Double.doubleToRawLongBits(zeroRange.gte()))
 				.isEqualTo(Double.doubleToRawLongBits(-0.0));
 		assertThat(Double.doubleToRawLongBits(zeroRange.lte()))
 				.isEqualTo(Double.doubleToRawLongBits(0.0));
+
+		var positiveMildRange = toneFilters
+				.get(ElasticsearchCountryMapSnapshotQuery.POSITIVE_MILD_TONE_BUCKET)
+				.range()
+				.number();
+		assertThat(positiveMildRange.gt()).isEqualTo(0.0);
+		assertThat(positiveMildRange.gte()).isNull();
+		assertThat(positiveMildRange.lt()).isEqualTo(3.0);
+		assertThat(positiveMildRange.lte()).isNull();
+
+		var positiveStrongRange = toneFilters
+				.get(ElasticsearchCountryMapSnapshotQuery.POSITIVE_STRONG_TONE_BUCKET)
+				.range()
+				.number();
+		assertThat(positiveStrongRange.gt()).isNull();
+		assertThat(positiveStrongRange.gte()).isEqualTo(3.0);
+		assertThat(positiveStrongRange.lt()).isEqualTo(8.0);
+		assertThat(positiveStrongRange.lte()).isNull();
+
+		var positiveExtremeRange = toneFilters
+				.get(ElasticsearchCountryMapSnapshotQuery.POSITIVE_EXTREME_TONE_BUCKET)
+				.range()
+				.number();
+		assertThat(positiveExtremeRange.gt()).isNull();
+		assertThat(positiveExtremeRange.gte()).isEqualTo(8.0);
+		assertThat(positiveExtremeRange.lt()).isNull();
+		assertThat(positiveExtremeRange.lte()).isNull();
+
+		Query missingTone = toneFilters.get(
+				ElasticsearchCountryMapSnapshotQuery.MISSING_TONE_BUCKET);
+		assertThat(missingTone.isBool()).isTrue();
+		assertThat(missingTone.bool().mustNot()).singleElement()
+				.satisfies(query -> {
+					assertThat(query.isExists()).isTrue();
+					assertThat(query.exists().field()).isEqualTo("averageTone");
+				});
 
 		assertReasonFilters(
 				request,
@@ -384,9 +446,13 @@ class ElasticsearchCountryMapSnapshotQueryTest {
 	private static FiltersBucket zeroRegionBucket() {
 		Map<String, FiltersBucket> tones = new LinkedHashMap<>();
 		for (String tone : List.of(
-				ElasticsearchCountryMapSnapshotQuery.NEGATIVE_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.NEGATIVE_EXTREME_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.NEGATIVE_STRONG_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.NEGATIVE_MILD_TONE_BUCKET,
 				ElasticsearchCountryMapSnapshotQuery.ZERO_TONE_BUCKET,
-				ElasticsearchCountryMapSnapshotQuery.POSITIVE_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.POSITIVE_MILD_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.POSITIVE_STRONG_TONE_BUCKET,
+				ElasticsearchCountryMapSnapshotQuery.POSITIVE_EXTREME_TONE_BUCKET,
 				ElasticsearchCountryMapSnapshotQuery.MISSING_TONE_BUCKET)) {
 			tones.put(tone, FiltersBucket.of(bucket -> bucket.docCount(0)));
 		}

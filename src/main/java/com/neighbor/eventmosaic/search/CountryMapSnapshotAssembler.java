@@ -108,14 +108,22 @@ final class CountryMapSnapshotAssembler {
 						"Elasticsearch response has no counts for a catalog region");
 			}
 			ToneCounts toneCounts = new ToneCounts(
-					counts.negative(),
+					counts.negativeExtreme(),
+					counts.negativeStrong(),
+					counts.negativeMild(),
 					counts.zero(),
-					counts.positive());
+					counts.positiveMild(),
+					counts.positiveStrong(),
+					counts.positiveExtreme());
 			long colored = addCounts(
 					"colored region count",
-					counts.negative(),
+					counts.negativeExtreme(),
+					counts.negativeStrong(),
+					counts.negativeMild(),
 					counts.zero(),
-					counts.positive());
+					counts.positiveMild(),
+					counts.positiveStrong(),
+					counts.positiveExtreme());
 			assembled.add(new Region(
 					catalogRegion.regionId(),
 					counts.event(),
@@ -232,9 +240,13 @@ final class CountryMapSnapshotAssembler {
 	/** Сырые счетчики одного region bucket и его tone subfilters. */
 	record RegionCounts(
 			long event,
-			long negative,
+			long negativeExtreme,
+			long negativeStrong,
+			long negativeMild,
 			long zero,
-			long positive,
+			long positiveMild,
+			long positiveStrong,
+			long positiveExtreme,
 			long missingTone
 	) {
 	}

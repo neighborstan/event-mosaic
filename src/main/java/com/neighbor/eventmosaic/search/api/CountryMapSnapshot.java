@@ -29,8 +29,8 @@ public record CountryMapSnapshot(
 		List<Region> regions
 ) {
 
-	/** Версия первой фактической модели, которая различает знак tone. */
-	public static final String TONE_MODEL_VERSION = "sign-v1";
+	/** Версия фактической модели, которая различает семь диапазонов tone. */
+	public static final String TONE_MODEL_VERSION = "tone-bands-v1";
 
 	private static final Duration SNAPSHOT_DURATION = Duration.ofHours(24);
 	private static final long SOURCE_CADENCE_SECONDS = Duration.ofMinutes(15).toSeconds();
@@ -53,7 +53,7 @@ public record CountryMapSnapshot(
 			throw new IllegalArgumentException("geometryVersion must identify country-vN");
 		}
 		if (!TONE_MODEL_VERSION.equals(toneModelVersion)) {
-			throw new IllegalArgumentException("toneModelVersion must be sign-v1");
+			throw new IllegalArgumentException("toneModelVersion must be tone-bands-v1");
 		}
 		Objects.requireNonNull(coverage, "coverage must not be null");
 		Objects.requireNonNull(quality, "quality must not be null");
@@ -304,52 +304,92 @@ public record CountryMapSnapshot(
 		}
 	}
 
-	/** Три фактические группы первой версии модели tone. */
+	/** Семь фактических групп подтвержденной модели tone. */
 	public enum Tone {
 
-		/** Значение averageTone меньше нуля. */
-		NEGATIVE,
+		/** Значение averageTone меньше или равно -8. */
+		NEGATIVE_EXTREME,
+
+		/** Значение averageTone больше -8, но меньше или равно -3. */
+		NEGATIVE_STRONG,
+
+		/** Значение averageTone больше -3, но меньше нуля. */
+		NEGATIVE_MILD,
 
 		/** Значение averageTone точно равно нулю. */
 		ZERO,
 
-		/** Значение averageTone больше нуля. */
-		POSITIVE
+		/** Значение averageTone больше нуля, но меньше 3. */
+		POSITIVE_MILD,
+
+		/** Значение averageTone не меньше 3, но меньше 8. */
+		POSITIVE_STRONG,
+
+		/** Значение averageTone не меньше 8. */
+		POSITIVE_EXTREME
 	}
 
 	/**
-	 * Счетчики трех групп фактического tone.
+	 * Счетчики семи групп фактического tone.
 	 *
-	 * @param negative Event с отрицательным averageTone
+	 * @param negativeExtreme Event со значением не больше -8
+	 * @param negativeStrong Event со значением от -8 исключительно до -3 включительно
+	 * @param negativeMild Event со значением от -3 исключительно до нуля исключительно
 	 * @param zero Event с averageTone, равным нулю
-	 * @param positive Event с положительным averageTone
+	 * @param positiveMild Event со значением от нуля исключительно до 3 исключительно
+	 * @param positiveStrong Event со значением от 3 включительно до 8 исключительно
+	 * @param positiveExtreme Event со значением не меньше 8
 	 */
-	public record ToneCounts(long negative, long zero, long positive) {
+	public record ToneCounts(
+			long negativeExtreme,
+			long negativeStrong,
+			long negativeMild,
+			long zero,
+			long positiveMild,
+			long positiveStrong,
+			long positiveExtreme
+	) {
 
 		/** Проверяет, что каждый счетчик неотрицателен. */
 		public ToneCounts {
-			requireNonNegative(negative, "negative");
+			requireNonNegative(negativeExtreme, "negativeExtreme");
+			requireNonNegative(negativeStrong, "negativeStrong");
+			requireNonNegative(negativeMild, "negativeMild");
 			requireNonNegative(zero, "zero");
-			requireNonNegative(positive, "positive");
-			addCounts("colored event count", negative, zero, positive);
+			requireNonNegative(positiveMild, "positiveMild");
+			requireNonNegative(positiveStrong, "positiveStrong");
+			requireNonNegative(positiveExtreme, "positiveExtreme");
+			coloredEventCount();
 		}
 
 		/**
 		 * Возвращает число событий выбранной группы tone.
 		 *
-		 * @param tone одна из трех групп sign-v1
-		 * @return число Event с таким знаком tone
+		 * @param tone одна из семи групп tone-bands-v1
+		 * @return число Event в таком диапазоне tone
 		 */
 		public long count(Tone tone) {
 			return switch (Objects.requireNonNull(tone, "tone must not be null")) {
-				case NEGATIVE -> negative;
+				case NEGATIVE_EXTREME -> negativeExtreme;
+				case NEGATIVE_STRONG -> negativeStrong;
+				case NEGATIVE_MILD -> negativeMild;
 				case ZERO -> zero;
-				case POSITIVE -> positive;
+				case POSITIVE_MILD -> positiveMild;
+				case POSITIVE_STRONG -> positiveStrong;
+				case POSITIVE_EXTREME -> positiveExtreme;
 			};
 		}
 
 		private long coloredEventCount() {
-			return addCounts("colored event count", negative, zero, positive);
+			return addCounts(
+					"colored event count",
+					negativeExtreme,
+					negativeStrong,
+					negativeMild,
+					zero,
+					positiveMild,
+					positiveStrong,
+					positiveExtreme);
 		}
 	}
 
@@ -360,7 +400,7 @@ public record CountryMapSnapshot(
 	 * @param eventCount все точно размещенные Event региона
 	 * @param coloredEventCount Event с известным tone
 	 * @param missingToneEventCount Event без tone
-	 * @param toneCounts фактические счетчики трех sign-v1 групп
+	 * @param toneCounts фактические счетчики семи групп tone-bands-v1
 	 */
 	public record Region(
 			String regionId,
@@ -381,7 +421,7 @@ public record CountryMapSnapshot(
 			Objects.requireNonNull(toneCounts, "toneCounts must not be null");
 			if (coloredEventCount != toneCounts.coloredEventCount()) {
 				throw new IllegalArgumentException(
-						"coloredEventCount must equal negative, zero and positive counts");
+						"coloredEventCount must equal all seven tone band counts");
 			}
 			if (eventCount != addCounts(
 					"region event count",

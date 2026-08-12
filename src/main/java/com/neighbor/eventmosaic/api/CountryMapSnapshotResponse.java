@@ -1,6 +1,8 @@
 package com.neighbor.eventmosaic.api;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.neighbor.eventmosaic.search.api.CountryMapSnapshot;
+import com.neighbor.eventmosaic.search.api.SearchAccessException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -22,6 +24,8 @@ public record CountryMapSnapshotResponse(
 		List<RegionResponse> regions
 ) {
 
+	private static final long MAX_BROWSER_SAFE_INTEGER = 9_007_199_254_740_991L;
+
 	/** Проверяет обязательные части ответа и защищает список регионов. */
 	public CountryMapSnapshotResponse {
 		Objects.requireNonNull(snapshot, "snapshot must not be null");
@@ -38,15 +42,20 @@ public record CountryMapSnapshotResponse(
 	 */
 	public static CountryMapSnapshotResponse from(CountryMapSnapshot source) {
 		Objects.requireNonNull(source, "source must not be null");
-		return new CountryMapSnapshotResponse(
-				new SnapshotResponse(
-						source.from(),
-						source.to(),
-						source.geometryVersion(),
-						source.toneModelVersion()),
-				CoverageResponse.from(source.coverage()),
-				QualityResponse.from(source.quality()),
-				source.regions().stream().map(RegionResponse::from).toList());
+		try {
+			return new CountryMapSnapshotResponse(
+					new SnapshotResponse(
+							source.from(),
+							source.to(),
+							source.geometryVersion(),
+							source.toneModelVersion()),
+					CoverageResponse.from(source.coverage()),
+					QualityResponse.from(source.quality()),
+					source.regions().stream().map(RegionResponse::from).toList());
+		}
+		catch (IllegalArgumentException exception) {
+			throw new SearchAccessException(exception);
+		}
 	}
 
 	/**
@@ -131,6 +140,10 @@ public record CountryMapSnapshotResponse(
 
 		/** Защищает оба списка причин от изменения после создания ответа. */
 		public QualityResponse {
+			requireBrowserSafeCount(eligibleEventCount, "eligibleEventCount");
+			requireBrowserSafeCount(mappedEventCount, "mappedEventCount");
+			requireBrowserSafeCount(unlocatedEventCount, "unlocatedEventCount");
+			requireBrowserSafeCount(unmappedEventCount, "unmappedEventCount");
 			unlocatedReasonCounts = List.copyOf(Objects.requireNonNull(
 					unlocatedReasonCounts,
 					"unlocatedReasonCounts must not be null"));
@@ -165,6 +178,12 @@ public record CountryMapSnapshotResponse(
 	 * @param eventCount число событий этой категории
 	 */
 	public record ReasonCountResponse(String reason, long eventCount) {
+
+		/** Проверяет обязательную причину и точность счетчика в браузере. */
+		public ReasonCountResponse {
+			Objects.requireNonNull(reason, "reason must not be null");
+			requireBrowserSafeCount(eventCount, "reason eventCount");
+		}
 	}
 
 	/**
@@ -174,7 +193,7 @@ public record CountryMapSnapshotResponse(
 	 * @param eventCount все точно размещенные Event региона
 	 * @param coloredEventCount Event с известной тональностью
 	 * @param missingToneEventCount Event без тональности
-	 * @param toneCounts фактические счетчики трех групп sign-v1
+	 * @param toneCounts фактические счетчики семи групп tone-bands-v1
 	 */
 	public record RegionResponse(
 			String regionId,
@@ -183,6 +202,15 @@ public record CountryMapSnapshotResponse(
 			long missingToneEventCount,
 			ToneCountsResponse toneCounts
 	) {
+
+		/** Проверяет точность всех общих счетчиков региона в браузере. */
+		public RegionResponse {
+			Objects.requireNonNull(regionId, "regionId must not be null");
+			requireBrowserSafeCount(eventCount, "region eventCount");
+			requireBrowserSafeCount(coloredEventCount, "coloredEventCount");
+			requireBrowserSafeCount(missingToneEventCount, "missingToneEventCount");
+			Objects.requireNonNull(toneCounts, "toneCounts must not be null");
+		}
 
 		private static RegionResponse from(CountryMapSnapshot.Region source) {
 			return new RegionResponse(
@@ -195,19 +223,54 @@ public record CountryMapSnapshotResponse(
 	}
 
 	/**
-	 * Фактические счетчики отрицательной, нулевой и положительной тональности.
+	 * Фактические счетчики семи диапазонов тональности. Явные имена полей
+	 * сохраняют стабильные ключи wire-контракта без неявного переименования.
 	 *
-	 * @param negative Event со значением меньше нуля
+	 * @param negativeExtreme Event со значением не больше -8
+	 * @param negativeStrong Event со значением от -8 исключительно до -3 включительно
+	 * @param negativeMild Event со значением от -3 исключительно до нуля исключительно
 	 * @param zero Event с настоящим числовым нулем
-	 * @param positive Event со значением больше нуля
+	 * @param positiveMild Event со значением от нуля исключительно до 3 исключительно
+	 * @param positiveStrong Event со значением от 3 включительно до 8 исключительно
+	 * @param positiveExtreme Event со значением не меньше 8
 	 */
-	public record ToneCountsResponse(long negative, long zero, long positive) {
+	public record ToneCountsResponse(
+			@JsonProperty("NEGATIVE_EXTREME") long negativeExtreme,
+			@JsonProperty("NEGATIVE_STRONG") long negativeStrong,
+			@JsonProperty("NEGATIVE_MILD") long negativeMild,
+			@JsonProperty("ZERO") long zero,
+			@JsonProperty("POSITIVE_MILD") long positiveMild,
+			@JsonProperty("POSITIVE_STRONG") long positiveStrong,
+			@JsonProperty("POSITIVE_EXTREME") long positiveExtreme
+	) {
+
+		/** Проверяет точность каждого фактического счетчика в браузере. */
+		public ToneCountsResponse {
+			requireBrowserSafeCount(negativeExtreme, "NEGATIVE_EXTREME");
+			requireBrowserSafeCount(negativeStrong, "NEGATIVE_STRONG");
+			requireBrowserSafeCount(negativeMild, "NEGATIVE_MILD");
+			requireBrowserSafeCount(zero, "ZERO");
+			requireBrowserSafeCount(positiveMild, "POSITIVE_MILD");
+			requireBrowserSafeCount(positiveStrong, "POSITIVE_STRONG");
+			requireBrowserSafeCount(positiveExtreme, "POSITIVE_EXTREME");
+		}
 
 		private static ToneCountsResponse from(CountryMapSnapshot.ToneCounts source) {
 			return new ToneCountsResponse(
-					source.negative(),
+					source.negativeExtreme(),
+					source.negativeStrong(),
+					source.negativeMild(),
 					source.zero(),
-					source.positive());
+					source.positiveMild(),
+					source.positiveStrong(),
+					source.positiveExtreme());
+		}
+	}
+
+	private static void requireBrowserSafeCount(long count, String label) {
+		if (count < 0 || count > MAX_BROWSER_SAFE_INTEGER) {
+			throw new IllegalArgumentException(
+					label + " must be a browser-safe non-negative integer");
 		}
 	}
 }

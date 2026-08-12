@@ -119,7 +119,7 @@ class CountryMapSnapshotApiIntegrationTest {
 				.isEqualTo(manifest.path("geometryVersion").asString())
 				.isEqualTo("country-v1");
 		assertThat(response.path("snapshot").path("toneModelVersion").asString())
-				.isEqualTo("sign-v1");
+				.isEqualTo("tone-bands-v1");
 		assertThat(response.path("coverage").path("status").asString())
 				.isEqualTo("UNKNOWN");
 		JsonNode missingIntervals = response.path("coverage").get("missingIntervals");
@@ -167,14 +167,19 @@ class CountryMapSnapshotApiIntegrationTest {
 		assertThat(zeroRegionCount(regions)).isEqualTo(255);
 		JsonNode palestineToneCounts = region(
 				regions, "country:psx").path("toneCounts");
-		assertThat(palestineToneCounts.path("negative").asLong()).isEqualTo(1);
-		assertThat(palestineToneCounts.path("zero").asLong()).isEqualTo(1);
-		assertThat(palestineToneCounts.path("positive").asLong()).isZero();
+		assertThat(palestineToneCounts.size()).isEqualTo(7);
+		assertThat(palestineToneCounts.path("NEGATIVE_EXTREME").asLong()).isZero();
+		assertThat(palestineToneCounts.path("NEGATIVE_STRONG").asLong()).isZero();
+		assertThat(palestineToneCounts.path("NEGATIVE_MILD").asLong()).isEqualTo(1);
+		assertThat(palestineToneCounts.path("ZERO").asLong()).isEqualTo(1);
+		assertThat(palestineToneCounts.path("POSITIVE_MILD").asLong()).isZero();
+		assertThat(palestineToneCounts.path("POSITIVE_STRONG").asLong()).isZero();
+		assertThat(palestineToneCounts.path("POSITIVE_EXTREME").asLong()).isZero();
 		assertThat(requiredLong(
 				region(regions, "country:rus"), "missingToneEventCount"))
 				.isEqualTo(1);
 		assertThat(requiredLong(
-				region(regions, "country:usa").path("toneCounts"), "positive"))
+				region(regions, "country:usa").path("toneCounts"), "POSITIVE_STRONG"))
 				.isEqualTo(1);
 
 		assertThat(responseJson).doesNotContain(
@@ -401,9 +406,13 @@ class CountryMapSnapshotApiIntegrationTest {
 			long missingToneEventCount = requiredLong(
 					region, "missingToneEventCount");
 			JsonNode toneCounts = region.path("toneCounts");
-			long coloredFromTones = requiredLong(toneCounts, "negative")
-					+ requiredLong(toneCounts, "zero")
-					+ requiredLong(toneCounts, "positive");
+			long coloredFromTones = requiredLong(toneCounts, "NEGATIVE_EXTREME")
+					+ requiredLong(toneCounts, "NEGATIVE_STRONG")
+					+ requiredLong(toneCounts, "NEGATIVE_MILD")
+					+ requiredLong(toneCounts, "ZERO")
+					+ requiredLong(toneCounts, "POSITIVE_MILD")
+					+ requiredLong(toneCounts, "POSITIVE_STRONG")
+					+ requiredLong(toneCounts, "POSITIVE_EXTREME");
 
 			assertThat(coloredEventCount)
 					.as(region.path("regionId").asString())
@@ -455,9 +464,13 @@ class CountryMapSnapshotApiIntegrationTest {
 	}
 
 	private static long sumToneCounts(JsonNode toneCounts) {
-		return requiredLong(toneCounts, "negative")
-				+ requiredLong(toneCounts, "zero")
-				+ requiredLong(toneCounts, "positive");
+		return requiredLong(toneCounts, "NEGATIVE_EXTREME")
+				+ requiredLong(toneCounts, "NEGATIVE_STRONG")
+				+ requiredLong(toneCounts, "NEGATIVE_MILD")
+				+ requiredLong(toneCounts, "ZERO")
+				+ requiredLong(toneCounts, "POSITIVE_MILD")
+				+ requiredLong(toneCounts, "POSITIVE_STRONG")
+				+ requiredLong(toneCounts, "POSITIVE_EXTREME");
 	}
 
 	private static long requiredLong(JsonNode object, String field) {

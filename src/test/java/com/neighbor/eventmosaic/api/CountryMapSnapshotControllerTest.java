@@ -1,5 +1,6 @@
 package com.neighbor.eventmosaic.api;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -41,6 +42,7 @@ class CountryMapSnapshotControllerTest {
 
 	private static final Instant FROM = Instant.parse("2026-08-10T12:15:00Z");
 	private static final Instant TO = Instant.parse("2026-08-11T12:15:00Z");
+	private static final long MAX_BROWSER_SAFE_INTEGER = 9_007_199_254_740_991L;
 
 	@Autowired
 	private MockMvc mockMvc;
@@ -62,7 +64,7 @@ class CountryMapSnapshotControllerTest {
 				.andExpect(jsonPath("$.snapshot.from").value(FROM.toString()))
 				.andExpect(jsonPath("$.snapshot.to").value(TO.toString()))
 				.andExpect(jsonPath("$.snapshot.geometryVersion").value("country-v1"))
-				.andExpect(jsonPath("$.snapshot.toneModelVersion").value("sign-v1"))
+				.andExpect(jsonPath("$.snapshot.toneModelVersion").value("tone-bands-v1"))
 				.andExpect(jsonPath("$.coverage.status").value("COMPLETE"))
 				.andExpect(jsonPath("$.coverage", aMapWithSize(2)))
 				.andExpect(jsonPath("$.coverage.missingIntervals.length()").value(0))
@@ -101,10 +103,14 @@ class CountryMapSnapshotControllerTest {
 				.andExpect(jsonPath("$.regions[0].eventCount").value(4))
 				.andExpect(jsonPath("$.regions[0].coloredEventCount").value(3))
 				.andExpect(jsonPath("$.regions[0].missingToneEventCount").value(1))
-				.andExpect(jsonPath("$.regions[0].toneCounts.negative").value(1))
-				.andExpect(jsonPath("$.regions[0].toneCounts.zero").value(1))
-				.andExpect(jsonPath("$.regions[0].toneCounts.positive").value(1))
-				.andExpect(jsonPath("$.regions[0].toneCounts", aMapWithSize(3)))
+				.andExpect(jsonPath("$.regions[0].toneCounts.NEGATIVE_EXTREME").value(1))
+				.andExpect(jsonPath("$.regions[0].toneCounts.NEGATIVE_STRONG").value(0))
+				.andExpect(jsonPath("$.regions[0].toneCounts.NEGATIVE_MILD").value(0))
+				.andExpect(jsonPath("$.regions[0].toneCounts.ZERO").value(1))
+				.andExpect(jsonPath("$.regions[0].toneCounts.POSITIVE_MILD").value(0))
+				.andExpect(jsonPath("$.regions[0].toneCounts.POSITIVE_STRONG").value(0))
+				.andExpect(jsonPath("$.regions[0].toneCounts.POSITIVE_EXTREME").value(1))
+				.andExpect(jsonPath("$.regions[0].toneCounts", aMapWithSize(7)))
 				.andExpect(jsonPath("$.regions[1].regionId").value("country:bbb"))
 				.andExpect(jsonPath("$.regions[1].eventCount").value(0))
 				.andExpect(jsonPath("$.regions[0].displayName").doesNotExist())
@@ -178,6 +184,51 @@ class CountryMapSnapshotControllerTest {
 				.andExpect(content().string(not(containsString("secret"))));
 	}
 
+	@Test
+	@DisplayName("Сохраняет точное максимальное число, которое безопасно читает браузер")
+	void returnsExactMaximumBrowserSafeCount() throws Exception {
+		when(snapshotQuery.read()).thenReturn(snapshotWithUnlocatedCount(
+				MAX_BROWSER_SAFE_INTEGER));
+
+		mockMvc.perform(get("/api/v1/map/country-snapshot"))
+				.andExpect(status().isOk())
+				.andExpect(content().string(containsString(
+						"\"eligibleEventCount\":9007199254740991")))
+				.andExpect(content().string(containsString(
+						"\"eventCount\":9007199254740991")));
+	}
+
+	@Test
+	@DisplayName("Небезопасный публичный счетчик отклоняет весь снимок безопасным ответом")
+	void rejectsUnsafeCountWithSafeServiceUnavailableProblem() throws Exception {
+		when(snapshotQuery.read()).thenReturn(snapshotWithUnlocatedCount(
+				MAX_BROWSER_SAFE_INTEGER + 1));
+
+		mockMvc.perform(get("/api/v1/map/country-snapshot"))
+				.andExpect(status().isServiceUnavailable())
+				.andExpect(content().contentTypeCompatibleWith(
+						MediaType.APPLICATION_PROBLEM_JSON))
+				.andExpect(jsonPath("$.code").value("SEARCH_UNAVAILABLE"))
+				.andExpect(jsonPath("$.detail")
+						.value("Сервис поиска временно недоступен"))
+				.andExpect(content().string(not(containsString("9007199254740992"))));
+	}
+
+	@Test
+	@DisplayName("Вложенный счетчик tone выше безопасной границы отклоняется до JSON")
+	void rejectsUnsafeNestedToneCount() {
+		assertThatThrownBy(() -> new CountryMapSnapshotResponse.ToneCountsResponse(
+				MAX_BROWSER_SAFE_INTEGER + 1,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("browser-safe");
+	}
+
 	private static CountryMapSnapshot snapshot(Coverage coverage) {
 		return new CountryMapSnapshot(
 				FROM,
@@ -210,12 +261,49 @@ class CountryMapSnapshotControllerTest {
 								4,
 								3,
 								1,
-								new ToneCounts(1, 1, 1)),
+								new ToneCounts(1, 0, 0, 1, 0, 0, 1)),
 						new Region(
 								"country:bbb",
 								0,
 								0,
 								0,
-								new ToneCounts(0, 0, 0))));
+								new ToneCounts(0, 0, 0, 0, 0, 0, 0))));
+	}
+
+	private static CountryMapSnapshot snapshotWithUnlocatedCount(long count) {
+		return new CountryMapSnapshot(
+				FROM,
+				TO,
+				"country-v1",
+				CountryMapSnapshot.TONE_MODEL_VERSION,
+				new Coverage(CoverageStatus.COMPLETE, List.of()),
+				new Quality(
+						count,
+						0,
+						count,
+						0,
+						List.of(
+								new UnlocatedReasonCount(
+										UnlocatedReason.ACTION_GEO_MISSING_OR_INVALID,
+										count),
+								new UnlocatedReasonCount(UnlocatedReason.ACTOR_FALLBACK, 0),
+								new UnlocatedReasonCount(UnlocatedReason.OTHER, 0)),
+						List.of(
+								new UnmappedReasonCount(UnmappedReason.COUNTRY_CODE_MISSING, 0),
+								new UnmappedReasonCount(UnmappedReason.UNKNOWN_COUNTRY_CODE, 0),
+								new UnmappedReasonCount(UnmappedReason.NO_REGION_GEOMETRY, 0),
+								new UnmappedReasonCount(
+										UnmappedReason.AMBIGUOUS_REGION_MAPPING,
+										0),
+								new UnmappedReasonCount(
+										UnmappedReason.UNSUPPORTED_COUNTRY_CODE,
+										0),
+								new UnmappedReasonCount(UnmappedReason.OTHER, 0))),
+				List.of(new Region(
+						"country:aaa",
+						0,
+						0,
+						0,
+						new ToneCounts(0, 0, 0, 0, 0, 0, 0))));
 	}
 }

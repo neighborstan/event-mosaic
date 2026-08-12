@@ -1,0 +1,18 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Event Mosaic Backend" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <module name="event-mosaic.main" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.neighbor.eventmosaic.EventMosaicApplication" />
+    <envs>
+      <env name="SERVER_PORT" value="18080" />
+      <env name="SPRING_DOCKER_COMPOSE_ENABLED" value="false" />
+      <env name="SPRING_DATASOURCE_URL" value="jdbc:postgresql://127.0.0.1:15432/event_mosaic_map04b_review" />
+      <env name="SPRING_DATASOURCE_USERNAME" value="event_mosaic" />
+      <env name="SPRING_DATASOURCE_PASSWORD" value="event_mosaic" />
+      <env name="SPRING_ELASTICSEARCH_URIS" value="http://127.0.0.1:19200" />
+    </envs>
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

@@ -164,28 +164,65 @@ class ElasticsearchCountryMapSnapshotQueryIntegrationTest {
 				2,
 				2,
 				0,
-				new ToneCounts(1, 1, 0)));
+				new ToneCounts(0, 0, 1, 1, 0, 0, 0)));
 		assertThat(region(snapshot, "country:rus")).isEqualTo(new Region(
 				"country:rus",
 				1,
 				0,
 				1,
-				new ToneCounts(0, 0, 0)));
+				new ToneCounts(0, 0, 0, 0, 0, 0, 0)));
 		assertThat(region(snapshot, "country:usa")).isEqualTo(new Region(
 				"country:usa",
 				2,
 				2,
 				0,
-				new ToneCounts(0, 1, 1)));
+				new ToneCounts(0, 0, 0, 1, 0, 1, 0)));
 		assertThat(snapshot.regions())
 				.filteredOn(region -> !REGIONS_WITH_EVENTS.contains(region.regionId()))
 				.allSatisfy(region -> {
 					assertThat(region.eventCount()).isZero();
 					assertThat(region.coloredEventCount()).isZero();
 					assertThat(region.missingToneEventCount()).isZero();
-					assertThat(region.toneCounts()).isEqualTo(new ToneCounts(0, 0, 0));
+					assertThat(region.toneCounts())
+							.isEqualTo(new ToneCounts(0, 0, 0, 0, 0, 0, 0));
 				});
 		verify(coverageQuery).read(FROM, TO);
+	}
+
+	@Test
+	@DisplayName("Точные границы семи диапазонов относят каждое значение только к одной группе")
+	void classifiesExactToneBandBoundaries() throws IOException {
+		indexWriter.write(new BulkIndexCommand<>(
+				GdeltIndexKind.EVENT,
+				firstEventTarget,
+				List.of(
+						event(2_001, FROM, -9.0, actionLocation("US")),
+						event(2_002, FROM, -8.0, actionLocation("US")),
+						event(2_003, FROM, -7.999, actionLocation("US")),
+						event(2_004, FROM, -3.0, actionLocation("US")),
+						event(2_005, FROM, -2.999, actionLocation("US")),
+						event(2_006, FROM, -0.001, actionLocation("US")),
+						event(2_007, FROM, -0.0, actionLocation("US")),
+						event(2_008, FROM, 0.0, actionLocation("US")),
+						event(2_009, FROM, 0.001, actionLocation("US")),
+						event(2_010, FROM, 2.999, actionLocation("US")),
+						event(2_011, FROM, 3.0, actionLocation("US")),
+						event(2_012, FROM, 7.999, actionLocation("US")),
+						event(2_013, FROM, 8.0, actionLocation("US")),
+						event(2_014, FROM, 9.0, actionLocation("US")),
+						event(2_015, FROM, null, actionLocation("US")))));
+		indexWriter.refresh(GdeltIndexKind.EVENT, firstEventTarget);
+
+		CountryMapSnapshot snapshot = snapshotQuery.read();
+
+		assertThat(snapshot.quality().eligibleEventCount()).isEqualTo(15);
+		assertThat(snapshot.quality().mappedEventCount()).isEqualTo(15);
+		assertThat(region(snapshot, "country:usa")).isEqualTo(new Region(
+				"country:usa",
+				15,
+				14,
+				1,
+				new ToneCounts(2, 2, 2, 2, 2, 2, 2)));
 	}
 
 	@Test
@@ -207,7 +244,8 @@ class ElasticsearchCountryMapSnapshotQueryIntegrationTest {
 					assertThat(region.eventCount()).isZero();
 					assertThat(region.coloredEventCount()).isZero();
 					assertThat(region.missingToneEventCount()).isZero();
-					assertThat(region.toneCounts()).isEqualTo(new ToneCounts(0, 0, 0));
+					assertThat(region.toneCounts())
+							.isEqualTo(new ToneCounts(0, 0, 0, 0, 0, 0, 0));
 				});
 		verify(coverageQuery).read(FROM, TO);
 	}

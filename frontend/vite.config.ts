@@ -48,6 +48,10 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
+        "/api": {
+          target: backendOrigin,
+          changeOrigin: true,
+        },
         "/map": {
           target: backendOrigin,
           changeOrigin: true,

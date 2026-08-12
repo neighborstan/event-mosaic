@@ -1,0 +1,7 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Event Mosaic Local" type="CompoundRunConfigurationType">
+    <toRun name="Event Mosaic Backend" type="SpringBootApplicationConfigurationType" />
+    <toRun name="Event Mosaic Frontend" type="js.build_tools.npm" />
+    <method v="2" />
+  </configuration>
+</component>

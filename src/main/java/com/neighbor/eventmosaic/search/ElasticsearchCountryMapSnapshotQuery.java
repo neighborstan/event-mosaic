@@ -55,9 +55,13 @@ public class ElasticsearchCountryMapSnapshotQuery implements CountryMapSnapshotQ
 	static final String UNLOCATED_AGGREGATION = "unlocated";
 	static final String UNMAPPED_AGGREGATION = "unmapped";
 	static final String REASONS_AGGREGATION = "reasons";
-	static final String NEGATIVE_TONE_BUCKET = "NEGATIVE";
+	static final String NEGATIVE_EXTREME_TONE_BUCKET = "NEGATIVE_EXTREME";
+	static final String NEGATIVE_STRONG_TONE_BUCKET = "NEGATIVE_STRONG";
+	static final String NEGATIVE_MILD_TONE_BUCKET = "NEGATIVE_MILD";
 	static final String ZERO_TONE_BUCKET = "ZERO";
-	static final String POSITIVE_TONE_BUCKET = "POSITIVE";
+	static final String POSITIVE_MILD_TONE_BUCKET = "POSITIVE_MILD";
+	static final String POSITIVE_STRONG_TONE_BUCKET = "POSITIVE_STRONG";
+	static final String POSITIVE_EXTREME_TONE_BUCKET = "POSITIVE_EXTREME";
 	static final String MISSING_TONE_BUCKET = "MISSING";
 
 	private static final Set<String> ROOT_AGGREGATIONS = Set.of(
@@ -65,9 +69,13 @@ public class ElasticsearchCountryMapSnapshotQuery implements CountryMapSnapshotQ
 			UNLOCATED_AGGREGATION,
 			UNMAPPED_AGGREGATION);
 	private static final Set<String> TONE_BUCKETS = Set.of(
-			NEGATIVE_TONE_BUCKET,
+			NEGATIVE_EXTREME_TONE_BUCKET,
+			NEGATIVE_STRONG_TONE_BUCKET,
+			NEGATIVE_MILD_TONE_BUCKET,
 			ZERO_TONE_BUCKET,
-			POSITIVE_TONE_BUCKET,
+			POSITIVE_MILD_TONE_BUCKET,
+			POSITIVE_STRONG_TONE_BUCKET,
+			POSITIVE_EXTREME_TONE_BUCKET,
 			MISSING_TONE_BUCKET);
 
 	private final ElasticsearchClient elasticsearchClient;
@@ -203,9 +211,17 @@ public class ElasticsearchCountryMapSnapshotQuery implements CountryMapSnapshotQ
 
 	private static Map<String, Query> toneFilters() {
 		Map<String, Query> filters = new LinkedHashMap<>();
-		filters.put(NEGATIVE_TONE_BUCKET, openNumberRange(null, -0.0));
+		filters.put(NEGATIVE_EXTREME_TONE_BUCKET, atMostNumberRange(-8.0));
+		filters.put(
+				NEGATIVE_STRONG_TONE_BUCKET,
+				greaterThanAtMostNumberRange(-8.0, -3.0));
+		filters.put(NEGATIVE_MILD_TONE_BUCKET, openNumberRange(-3.0, -0.0));
 		filters.put(ZERO_TONE_BUCKET, zeroToneRange());
-		filters.put(POSITIVE_TONE_BUCKET, openNumberRange(0.0, null));
+		filters.put(POSITIVE_MILD_TONE_BUCKET, openNumberRange(0.0, 3.0));
+		filters.put(
+				POSITIVE_STRONG_TONE_BUCKET,
+				atLeastLessThanNumberRange(3.0, 8.0));
+		filters.put(POSITIVE_EXTREME_TONE_BUCKET, atLeastNumberRange(8.0));
 		filters.put(MISSING_TONE_BUCKET, not(exists(AVERAGE_TONE_FIELD)));
 		return filters;
 	}
@@ -335,17 +351,45 @@ public class ElasticsearchCountryMapSnapshotQuery implements CountryMapSnapshotQ
 		return Query.of(query -> query.exists(exists -> exists.field(field)));
 	}
 
-	private static Query openNumberRange(Double greaterThan, Double lessThan) {
+	private static Query atMostNumberRange(double upperInclusive) {
+		return Query.of(query -> query.range(range -> range.number(number -> number
+				.field(AVERAGE_TONE_FIELD)
+				.lte(upperInclusive))));
+	}
+
+	private static Query greaterThanAtMostNumberRange(
+			double lowerExclusive,
+			double upperInclusive
+	) {
+		return Query.of(query -> query.range(range -> range.number(number -> number
+				.field(AVERAGE_TONE_FIELD)
+				.gt(lowerExclusive)
+				.lte(upperInclusive))));
+	}
+
+	private static Query openNumberRange(double lowerExclusive, double upperExclusive) {
 		return Query.of(query -> query.range(range -> range.number(number -> {
 			number.field(AVERAGE_TONE_FIELD);
-			if (greaterThan != null) {
-				number.gt(greaterThan);
-			}
-			if (lessThan != null) {
-				number.lt(lessThan);
-			}
+			number.gt(lowerExclusive);
+			number.lt(upperExclusive);
 			return number;
 		})));
+	}
+
+	private static Query atLeastLessThanNumberRange(
+			double lowerInclusive,
+			double upperExclusive
+	) {
+		return Query.of(query -> query.range(range -> range.number(number -> number
+				.field(AVERAGE_TONE_FIELD)
+				.gte(lowerInclusive)
+				.lt(upperExclusive))));
+	}
+
+	private static Query atLeastNumberRange(double lowerInclusive) {
+		return Query.of(query -> query.range(range -> range.number(number -> number
+				.field(AVERAGE_TONE_FIELD)
+				.gte(lowerInclusive))));
 	}
 
 	private static Query zeroToneRange() {
@@ -399,9 +443,25 @@ public class ElasticsearchCountryMapSnapshotQuery implements CountryMapSnapshotQ
 					region.regionId(),
 					new CountryMapSnapshotAssembler.RegionCounts(
 							eventCount,
-							requireCount(tones.get(NEGATIVE_TONE_BUCKET).docCount(), "negative tone"),
+							requireCount(
+									tones.get(NEGATIVE_EXTREME_TONE_BUCKET).docCount(),
+									"negative extreme tone"),
+							requireCount(
+									tones.get(NEGATIVE_STRONG_TONE_BUCKET).docCount(),
+									"negative strong tone"),
+							requireCount(
+									tones.get(NEGATIVE_MILD_TONE_BUCKET).docCount(),
+									"negative mild tone"),
 							requireCount(tones.get(ZERO_TONE_BUCKET).docCount(), "zero tone"),
-							requireCount(tones.get(POSITIVE_TONE_BUCKET).docCount(), "positive tone"),
+							requireCount(
+									tones.get(POSITIVE_MILD_TONE_BUCKET).docCount(),
+									"positive mild tone"),
+							requireCount(
+									tones.get(POSITIVE_STRONG_TONE_BUCKET).docCount(),
+									"positive strong tone"),
+							requireCount(
+									tones.get(POSITIVE_EXTREME_TONE_BUCKET).docCount(),
+									"positive extreme tone"),
 							requireCount(tones.get(MISSING_TONE_BUCKET).docCount(), "missing tone")));
 		}
 

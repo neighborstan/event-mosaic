@@ -26,7 +26,30 @@ docker compose -f compose.local.yml up -d
 
 Frontend требует Node.js `24.19.0` и npm `11.19.0`.
 
-На Windows frontend можно открыть одним запуском из корня проекта:
+Для совместной проверки карты с настоящим backend на Windows:
+
+1. Подготовьте отдельные PostgreSQL и Elasticsearch:
+
+   ```powershell
+   .\tools\map-review\start-map-review.ps1
+   ```
+
+2. В IDEA выберите shared-конфигурацию `Event Mosaic Local` и нажмите `Run`.
+3. После строки `Started EventMosaicApplication` откройте
+   <http://127.0.0.1:5173>.
+4. После проверки остановите конфигурацию в IDEA и удалите временный стек:
+
+   ```powershell
+   .\tools\map-review\stop-map-review.ps1
+   ```
+
+`.env` для этого сценария не нужен. Скрипты используют отдельные containers,
+порты и volumes; назначение шагов описано в
+[инструкции локального review](tools/map-review/README.md) и комментариях внутри
+самих скриптов.
+
+Если нужен только frontend, на Windows его можно открыть одним запуском из
+корня проекта:
 
 ```powershell
 .\run-frontend.cmd
@@ -62,7 +85,7 @@ npm ci
 npm run dev -- --host 127.0.0.1 --open
 ```
 
-Vite по умолчанию проксирует только запросы `/map` на
+Vite по умолчанию проксирует запросы `/map` и `/api` на
 `http://localhost:8080`. Другой адрес backend можно задать в локальном
 `frontend/.env.local` по образцу `frontend/.env.example`; этот файл не нужно
 добавлять в Git. Если backend не запущен или вернул несовместимую геометрию,

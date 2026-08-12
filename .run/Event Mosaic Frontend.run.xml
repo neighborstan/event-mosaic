@@ -1,0 +1,15 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Event Mosaic Frontend" type="js.build_tools.npm" factoryName="npm">
+    <package-json value="$PROJECT_DIR$/frontend/package.json" />
+    <command value="run" />
+    <scripts>
+      <script value="dev" />
+    </scripts>
+    <arguments value="-- --host 127.0.0.1 --port 5173 --strictPort" />
+    <node-interpreter value="$PROJECT_DIR$/.local/node-v24.19.0-win-x64/node.exe" />
+    <envs>
+      <env name="MAP_BACKEND_ORIGIN" value="http://127.0.0.1:18080" />
+    </envs>
+    <method v="2" />
+  </configuration>
+</component>
