@@ -1,4 +1,5 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -9,6 +10,8 @@ import {
 import {
   createCountrySnapshotDocument,
   createValidatedCountrySnapshot,
+  type MutableCountrySnapshotDocument,
+  type MutableCountrySnapshotRegion,
 } from "../../../test/countrySnapshotFixtures";
 import {
   createControlledMapLibreFactory,
@@ -53,7 +56,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("Экран нейтральной карты с проверенным snapshot", () => {
+describe("Экран карты с проверенным snapshot", () => {
   test("Запускает geometry и snapshot параллельно, но объявляет данные готовыми только после exact join", async () => {
     const mapFixture = createControlledMapLibreFactory();
     const geometryFixture = createControlledGeometryLoader();
@@ -112,7 +115,7 @@ describe("Экран нейтральной карты с проверенным
       screen.getByRole("status", { name: "Состояние данных событий" }),
     ).toHaveTextContent("Сопоставлено событий: 4. Полнота: COMPLETE");
     expect(requireControlledMap(mapFixture).sourceAdditions).toHaveLength(1);
-    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(2);
+    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(4);
   });
 
   test("Неизвестный provider показывает безопасную ошибку до MapLibre и обоих HTTP owners", () => {
@@ -261,7 +264,7 @@ describe("Экран нейтральной карты с проверенным
     );
     expect(screen.getByRole("main")).not.toHaveTextContent("0 событий");
     expect(requireControlledMap(mapFixture).sourceAdditions).toHaveLength(1);
-    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(2);
+    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(4);
   });
 
   test("Roster mismatch отклоняет snapshot целиком, не создавая второй source или динамический layer", async () => {
@@ -294,7 +297,7 @@ describe("Экран нейтральной карты с проверенным
       screen.getByRole("alert", { name: "Ошибка данных событий" }),
     ).toHaveTextContent("Не удалось загрузить, проверить или связать");
     expect(requireControlledMap(mapFixture).sourceAdditions).toHaveLength(1);
-    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(2);
+    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(4);
   });
 
   test.each(["PARTIAL", "UNKNOWN"] satisfies CountryCoverageStatus[])(
@@ -329,6 +332,15 @@ describe("Экран нейтральной карты с проверенным
       expect(
         screen.getByRole("status", { name: "Состояние данных событий" }),
       ).toHaveTextContent("Сопоставлено событий: 4");
+      expect(
+        screen.getByRole("status", {
+          name: "Дополнительное состояние данных событий",
+        }),
+      ).toHaveTextContent(
+        coverageStatus === "PARTIAL"
+          ? "Известные пропуски UTC: [2026-08-10T12:15:00Z, 2026-08-10T12:30:00Z)"
+          : "Полнота сейчас неизвестна; список пропусков недоступен",
+      );
       expect(
         screen.queryByRole("alert", { name: "Ошибка данных событий" }),
       ).not.toBeInTheDocument();
@@ -366,9 +378,9 @@ describe("Экран нейтральной карты с проверенным
     });
     expect(
       screen.getByRole("status", {
-        name: "Состояние обновления данных событий",
+        name: "Дополнительное состояние данных событий",
       }),
-    ).toHaveTextContent("Последние принятые данные остаются доступными");
+    ).toHaveTextContent("последние принятые данные остаются видимыми");
 
     await act(async () => {
       requireSnapshotRequest(snapshotFixture, 1).reject(new Error("503"));
@@ -431,46 +443,212 @@ describe("Экран нейтральной карты с проверенным
       screen.getByRole("status", { name: "Состояние данных событий" }),
     ).toHaveTextContent("Принят снимок событий");
     expect(secondMap.sourceAdditions).toHaveLength(1);
-    expect(secondMap.layerAdditions).toHaveLength(2);
+    expect(secondMap.layerAdditions).toHaveLength(4);
   });
 
-  test("Принятый snapshot пока не добавляет легенду, выбор страны или управляющие элементы", async () => {
-    const mapFixture = createControlledMapLibreFactory();
-    const geometryFixture = createControlledGeometryLoader();
-    const snapshotFixture = createControlledSnapshotLoader();
-    render(
-      <CountryMapScreen
-        geometryLoader={geometryFixture.loader}
-        snapshotLoader={snapshotFixture.loader}
-        mapFactory={mapFixture.factory}
-      />,
+  test("Показывает именованную легенду с семью фактическими группами и специальными состояниями", async () => {
+    const { mapFixture } = await renderAcceptedScreen();
+    const legend = screen.getByRole("region", {
+      name: "Легенда тональности",
+    });
+    const toneGroups = within(legend).getByRole("list", {
+      name: "Семь фактических групп тональности",
+    });
+    const specialStates = within(legend).getByRole("list", {
+      name: "Плотность и специальные состояния",
+    });
+
+    expect(within(toneGroups).getAllByRole("listitem")).toHaveLength(7);
+    expect(toneGroups).toHaveTextContent("Крайне негативный");
+    expect(toneGroups).toHaveTextContent("Тон ровно 0");
+    expect(toneGroups).toHaveTextContent("Крайне позитивный");
+    expect(legend).toHaveTextContent("фактические проценты");
+    expect(specialStates).toHaveTextContent("Плотность и прозрачность растут");
+    expect(specialStates).toHaveTextContent(
+      '"Тональность неизвестна" не считается настоящим тоном 0',
     );
+    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(4);
+  });
+
+  test("Наведение не заменяет выбор, а новая страна, фон, кнопка закрытия и Escape управляют одной закрепленной сводкой", async () => {
+    const user = userEvent.setup();
+    const { geometry, mapFixture } = await renderAcceptedScreen();
+    const firstRegion = requireGeometryFeature(geometry, 0);
+    const secondRegion = requireGeometryFeature(geometry, 1);
+    const map = requireControlledMap(mapFixture);
 
     act(() => {
-      requireControlledMap(mapFixture).emit("load");
+      map.emitCountry("select", firstRegion.properties.regionId);
+      map.emitCountry("hover", secondRegion.properties.regionId);
     });
-    await flushSnapshotStart();
+
+    expect(
+      screen.getByRole("complementary", {
+        name: firstRegion.properties.displayName,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tooltip", { name: "Краткая сводка страны" }),
+    ).toHaveTextContent(secondRegion.properties.displayName);
+
+    act(() => {
+      map.emitCountry("leave", null);
+    });
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("complementary", {
+        name: firstRegion.properties.displayName,
+      }),
+    ).toBeInTheDocument();
+
+    act(() => {
+      map.emitCountry("select", secondRegion.properties.regionId);
+    });
+    expect(
+      screen.queryByRole("complementary", {
+        name: firstRegion.properties.displayName,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("complementary", {
+        name: secondRegion.properties.displayName,
+      }),
+    ).toBeInTheDocument();
+
+    act(() => {
+      map.emitBackgroundSelect();
+    });
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+
+    act(() => {
+      map.emitCountry("select", firstRegion.properties.regionId);
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Закрыть сводку страны" }),
+    );
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+
+    act(() => {
+      map.emitCountry("select", secondRegion.properties.regionId);
+    });
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(mapFixture.maps).toHaveLength(1);
+  });
+
+  test("Выбор по regionId переживает наведение и обновляет факты после refresh", async () => {
+    vi.useFakeTimers();
+    const geometry = createValidatedCountryGeometry();
+    const selectedFeature = requireGeometryFeature(geometry, 0);
+    const hoveredFeature = requireGeometryFeature(geometry, 1);
+    const { mapFixture, snapshotFixture } = await renderAcceptedScreen({
+      geometry,
+      snapshotRefreshIntervalMilliseconds: 1_000,
+    });
+    const map = requireControlledMap(mapFixture);
+
+    act(() => {
+      map.emitCountry("select", selectedFeature.properties.regionId);
+      map.emitCountry("hover", hoveredFeature.properties.regionId);
+    });
+    expect(
+      screen.getByRole("complementary", {
+        name: selectedFeature.properties.displayName,
+      }),
+    ).toHaveTextContent("Событий: 4");
+    expect(
+      screen.getByRole("tooltip", { name: "Краткая сводка страны" }),
+    ).toHaveTextContent(hoveredFeature.properties.displayName);
+
     await act(async () => {
-      requireGeometryRequest(geometryFixture).resolve(
-        createValidatedCountryGeometry(),
-      );
-      requireSnapshotRequest(snapshotFixture).resolve(
-        createValidatedCountrySnapshot(),
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    await act(async () => {
+      requireSnapshotRequest(snapshotFixture, 1).resolve(
+        createRefreshedCountrySnapshot(selectedFeature.properties.regionId),
       );
       await Promise.resolve();
     });
 
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.queryByRole("list")).not.toBeInTheDocument();
-    expect(screen.queryByText(/легенд/i)).not.toBeInTheDocument();
-    expect(requireControlledMap(mapFixture).sourceAdditions).toHaveLength(1);
-    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(2);
-    expect(requireControlledMap(mapFixture).activeListenerCount("load")).toBe(
-      1,
+    const refreshedSummary = screen.getByRole("complementary", {
+      name: selectedFeature.properties.displayName,
+    });
+    expect(refreshedSummary).toHaveTextContent("Событий: 8");
+    expect(refreshedSummary).toHaveTextContent("С известной тональностью: 7");
+    expect(
+      screen.getByRole("tooltip", { name: "Краткая сводка страны" }),
+    ).toHaveTextContent(hoveredFeature.properties.displayName);
+    expect(mapFixture.maps).toHaveLength(1);
+  });
+
+  test.each([
+    ["COMPLETE", "0 событий"],
+    ["PARTIAL", "0 в доступных данных"],
+    ["UNKNOWN", "0 в доступных данных"],
+  ] satisfies readonly (readonly [CountryCoverageStatus, string])[])(
+    "Нулевая страна при %s сообщает: %s",
+    async (coverageStatus, expectedText) => {
+      const geometry = createValidatedCountryGeometry();
+      const emptyFeature = requireGeometryFeature(geometry, 2);
+      const { mapFixture } = await renderAcceptedScreen({
+        geometry,
+        snapshot: createSnapshotWithCoverage(coverageStatus),
+      });
+
+      act(() => {
+        requireControlledMap(mapFixture).emitCountry(
+          "select",
+          emptyFeature.properties.regionId,
+        );
+      });
+
+      const summary = screen.getByRole("complementary", {
+        name: emptyFeature.properties.displayName,
+      });
+      expect(summary).toHaveTextContent(expectedText);
+      expect(summary).toHaveTextContent("С известной тональностью: 0");
+      expect(summary).toHaveTextContent("Тональность неизвестна: 0");
+      expect(summary).toHaveTextContent(
+        `Полнота всего снимка: ${coverageStatus}`,
+      );
+    },
+  );
+
+  test("Неизвестная тональность, спорный статус и источник геометрии видны без приписывания стране общей статистики", async () => {
+    const geometry = createValidatedCountryGeometry();
+    const disputedFeature = requireGeometryFeature(geometry, 1);
+    const { mapFixture } = await renderAcceptedScreen({
+      geometry,
+      snapshot: createMissingToneSnapshot(disputedFeature.properties.regionId),
+    });
+
+    act(() => {
+      requireControlledMap(mapFixture).emitCountry(
+        "select",
+        disputedFeature.properties.regionId,
+      );
+    });
+
+    const summary = screen.getByRole("complementary", {
+      name: disputedFeature.properties.displayName,
+    });
+    expect(summary).toHaveTextContent(
+      "Для всех событий тональность неизвестна",
     );
-    expect(requireControlledMap(mapFixture).activeListenerCount("error")).toBe(
-      1,
+    expect(summary).toHaveTextContent("Тональность неизвестна: 2");
+    expect(summary).toHaveTextContent(
+      "Источник геометрии: Natural Earth 10m (natural-earth-10m), версия country-v1",
     );
+    expect(summary).toHaveTextContent(
+      "Статус: спорная территория в представлении de facto",
+    );
+    expect(summary).not.toHaveTextContent("Без надежного места действия: 3");
+    expect(summary).not.toHaveTextContent("Не сопоставлено с границами: 6");
+    expect(
+      screen.getByRole("status", {
+        name: "Дополнительное состояние данных событий",
+      }),
+    ).toHaveTextContent("Без надежного места действия: 3");
   });
 });
 
@@ -555,6 +733,132 @@ function createMismatchedCountryGeometry(): CountryGeometry {
   }
   firstFeature.properties.regionId = "country:different";
   return validateCountryGeometry(document);
+}
+
+type RenderAcceptedScreenOptions = Readonly<{
+  geometry?: CountryGeometry;
+  snapshot?: CountrySnapshot;
+  snapshotRefreshIntervalMilliseconds?: number;
+}>;
+
+async function renderAcceptedScreen({
+  geometry = createValidatedCountryGeometry(),
+  snapshot = createValidatedCountrySnapshot(),
+  snapshotRefreshIntervalMilliseconds,
+}: RenderAcceptedScreenOptions = {}) {
+  const mapFixture = createControlledMapLibreFactory();
+  const geometryFixture = createControlledGeometryLoader();
+  const snapshotFixture = createControlledSnapshotLoader();
+  render(
+    <CountryMapScreen
+      geometryLoader={geometryFixture.loader}
+      snapshotLoader={snapshotFixture.loader}
+      snapshotClock={() => new Date("2026-08-11T12:16:30Z")}
+      snapshotRefreshIntervalMilliseconds={snapshotRefreshIntervalMilliseconds}
+      mapFactory={mapFixture.factory}
+    />,
+  );
+
+  await flushSnapshotStart();
+  act(() => {
+    requireControlledMap(mapFixture).emit("load");
+  });
+  await act(async () => {
+    requireGeometryRequest(geometryFixture).resolve(geometry);
+    requireSnapshotRequest(snapshotFixture).resolve(snapshot);
+    await Promise.resolve();
+  });
+
+  return {
+    geometry,
+    geometryFixture,
+    mapFixture,
+    snapshotFixture,
+  };
+}
+
+function requireGeometryFeature(
+  geometry: CountryGeometry,
+  index: number,
+): CountryGeometry["features"][number] {
+  const feature = geometry.features[index];
+  if (feature === undefined) {
+    throw new Error(`Не найден тестовый регион с индексом ${index}`);
+  }
+  return feature;
+}
+
+function createRefreshedCountrySnapshot(regionId: string): CountrySnapshot {
+  const document = createCountrySnapshotDocument();
+  const region = requireSnapshotRegion(document, regionId);
+  const previousEventCount = region.eventCount;
+
+  region.eventCount = 8;
+  region.coloredEventCount = 7;
+  region.missingToneEventCount = 1;
+  region.toneCounts.NEGATIVE_EXTREME = 2;
+  region.toneCounts.NEGATIVE_STRONG = 1;
+  region.toneCounts.NEGATIVE_MILD = 1;
+  region.toneCounts.ZERO = 1;
+  region.toneCounts.POSITIVE_MILD = 1;
+  region.toneCounts.POSITIVE_STRONG = 1;
+  region.toneCounts.POSITIVE_EXTREME = 0;
+  document.quality.mappedEventCount += region.eventCount - previousEventCount;
+  document.quality.eligibleEventCount =
+    document.quality.mappedEventCount +
+    document.quality.unlocatedEventCount +
+    document.quality.unmappedEventCount;
+  return validateCountrySnapshot(document);
+}
+
+function createMissingToneSnapshot(regionId: string): CountrySnapshot {
+  const document = createCountrySnapshotDocument();
+  const originalPopulatedRegion = document.regions.find(
+    (region) => region.eventCount > 0,
+  );
+  if (originalPopulatedRegion === undefined) {
+    throw new Error("Тестовый snapshot не содержит заполненный регион");
+  }
+  const missingToneRegion = requireSnapshotRegion(document, regionId);
+  if (missingToneRegion === originalPopulatedRegion) {
+    throw new Error("Для missing tone нужен отдельный тестовый регион");
+  }
+
+  originalPopulatedRegion.eventCount = 2;
+  originalPopulatedRegion.coloredEventCount = 2;
+  originalPopulatedRegion.missingToneEventCount = 0;
+  originalPopulatedRegion.toneCounts.NEGATIVE_EXTREME = 1;
+  originalPopulatedRegion.toneCounts.NEGATIVE_STRONG = 0;
+  originalPopulatedRegion.toneCounts.NEGATIVE_MILD = 0;
+  originalPopulatedRegion.toneCounts.ZERO = 1;
+  originalPopulatedRegion.toneCounts.POSITIVE_MILD = 0;
+  originalPopulatedRegion.toneCounts.POSITIVE_STRONG = 0;
+  originalPopulatedRegion.toneCounts.POSITIVE_EXTREME = 0;
+
+  missingToneRegion.eventCount = 2;
+  missingToneRegion.coloredEventCount = 0;
+  missingToneRegion.missingToneEventCount = 2;
+  missingToneRegion.toneCounts.NEGATIVE_EXTREME = 0;
+  missingToneRegion.toneCounts.NEGATIVE_STRONG = 0;
+  missingToneRegion.toneCounts.NEGATIVE_MILD = 0;
+  missingToneRegion.toneCounts.ZERO = 0;
+  missingToneRegion.toneCounts.POSITIVE_MILD = 0;
+  missingToneRegion.toneCounts.POSITIVE_STRONG = 0;
+  missingToneRegion.toneCounts.POSITIVE_EXTREME = 0;
+  return validateCountrySnapshot(document);
+}
+
+function requireSnapshotRegion(
+  document: MutableCountrySnapshotDocument,
+  regionId: string,
+): MutableCountrySnapshotRegion {
+  const region = document.regions.find(
+    (candidate) => candidate.regionId === regionId,
+  );
+  if (region === undefined) {
+    throw new Error(`Не найден тестовый snapshot region ${regionId}`);
+  }
+  return region;
 }
 
 async function flushSnapshotStart(): Promise<void> {
