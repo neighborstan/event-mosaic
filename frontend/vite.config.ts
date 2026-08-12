@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
 
 const DEFAULT_BACKEND_ORIGIN = "http://localhost:8080";
+const MAP_BUNDLE_WARNING_LIMIT_KB = 1_200;
 
 function resolveBackendOrigin(value: string | undefined): string {
   const candidate = value ?? DEFAULT_BACKEND_ORIGIN;
@@ -39,6 +40,12 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    optimizeDeps: {
+      exclude: ["maplibre-gl"],
+    },
+    build: {
+      chunkSizeWarningLimit: MAP_BUNDLE_WARNING_LIMIT_KB,
+    },
     server: {
       proxy: {
         "/map": {

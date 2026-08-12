@@ -76,28 +76,44 @@ body {
   line-height: 1.65;
 }
 
-.country-map-shell__placeholder {
+.country-map-shell__map-region {
+  overflow: hidden;
+  border: 1px solid rgb(50 109 112 / 28%);
+  border-radius: 1rem;
+  background: #dce8ea;
+}
+
+.country-map-shell__map-region--error {
   min-height: clamp(14rem, 38vw, 24rem);
   padding: 1.5rem;
   display: grid;
   place-items: center;
-  border: 1px dashed rgb(50 109 112 / 45%);
-  border-radius: 1rem;
-  background:
-    linear-gradient(rgb(255 255 255 / 54%), rgb(255 255 255 / 54%)),
-    repeating-linear-gradient(
-      45deg,
-      rgb(50 109 112 / 7%) 0,
-      rgb(50 109 112 / 7%) 1px,
-      transparent 1px,
-      transparent 18px
-    );
   text-align: center;
 }
 
-.country-map-shell__placeholder p {
-  max-width: 30rem;
+.country-map-shell__canvas {
+  width: 100%;
+  height: clamp(16rem, 42vw, 28rem);
+  background: #dce8ea;
+}
+
+.country-map-shell__status,
+.country-map-shell__alert {
   margin: 0;
+  padding: 0.85rem 1rem;
+  border-top: 1px solid rgb(50 109 112 / 18%);
+  background: rgb(255 255 255 / 92%);
   color: #365458;
   line-height: 1.55;
+}
+
+.country-map-shell__map-region--error .country-map-shell__alert {
+  max-width: 34rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid rgb(142 61 56 / 22%);
+  border-radius: 0.75rem;
+}
+
+.country-map-shell__alert {
+  color: #733a36;
 }
