@@ -1,6 +1,16 @@
 spring:
   application:
     name: event-mosaic
+  datasource:
+    hikari:
+      connection-timeout: 30000
+      data-source-properties:
+        connectTimeout: 10
+        socketTimeout: 45
+        cancelSignalTimeout: 5
+  jdbc:
+    template:
+      query-timeout: 30s
   flyway:
     locations: classpath:db/migration
     validate-migration-naming: true
@@ -61,6 +71,7 @@ event-mosaic:
   indexing:
     bulk-size: 500
     max-bulk-bytes: 5242880
+    request-timeout: 2m
   gdelt:
     csv:
       max-record-chars: 1048576
@@ -80,4 +91,15 @@ event-mosaic:
       continuity:
         recovery-lease: 15m
         first-run-policy: LATEST
+      automatic:
+        enabled: false
+        poll-delay: 1m
+        cycle-lease: 15m
+        shutdown-grace: 30s
+        scheduler-stale-base: 5m
+        source-outage-threshold: 30m
+        due-work-limit: 256
+        receipt-audit:
+          interval: 15m
+          batch-size: 2
       one-shot-enabled: false

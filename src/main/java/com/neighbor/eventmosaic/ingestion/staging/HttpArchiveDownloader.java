@@ -18,6 +18,10 @@ import com.neighbor.eventmosaic.ingestion.error.TransferredArtifactIntegrityExce
 import com.neighbor.eventmosaic.ingestion.source.ArchiveDownloadUriResolver;
 import com.neighbor.eventmosaic.ingestion.source.HttpRetryAfterParser;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
+import com.neighbor.eventmosaic.shared.time.OperationEffectiveTimeout;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
+import com.neighbor.eventmosaic.shared.time.OperationTimeoutOrigin;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -31,8 +35,8 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
-import java.time.Duration;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -151,14 +155,14 @@ public class HttpArchiveDownloader {
 		return download(attempt, paths, OperationBudget.start(Duration.ofDays(1)));
 	}
 
-	/** Скачивает archive в пределах общего monotonic cycle budget. */
+	/** Скачивает архив в пределах общей границы времени и владения циклом. */
 	public DownloadedArchive download(
 			ArchiveAttempt attempt,
 			StagingPaths paths,
 			OperationBudget budget
 	) {
 		IngestionInterruption.throwIfRequested();
-		throwIfExpired(budget);
+		ensureAvailable(budget);
 		if (attempt.archive().expectedSizeBytes() > maxArchiveBytes) {
 			throw new RemoteResponseRejectedException(
 					IngestionErrorCode.DOWNLOAD_SIZE_LIMIT_EXCEEDED);
@@ -168,55 +172,60 @@ public class HttpArchiveDownloader {
 					paths.root(),
 					paths.archivePath().getParent(),
 					budget);
+			ensureAvailable(budget);
 			Files.deleteIfExists(paths.archivePartPath());
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
 			throw new StagingStorageException(IngestionErrorCode.FILESYSTEM_IO_FAILURE, exception);
 		}
+		ensureAvailable(budget);
 		if (Files.exists(paths.archivePath(), LinkOption.NOFOLLOW_LINKS)) {
 			return verifyExisting(attempt, paths.archivePath(), budget);
 		}
 
 		try {
-			Duration effectiveTimeout = requireRemaining(budget);
-			boolean cycleLimited = effectiveTimeout.compareTo(requestTimeout) < 0;
-			long deadlineNanos = GdeltHttpBodyDeadline.deadlineAfter(effectiveTimeout);
+			OperationEffectiveTimeout effectiveTimeout = effectiveTimeout(budget);
+			long deadlineNanos = GdeltHttpBodyDeadline.deadlineAfter(
+					effectiveTimeout.timeout());
 			HttpResponse<InputStream> response = send(
 					attempt,
 					effectiveTimeout,
-					budget,
-					cycleLimited);
+					budget);
 			DownloadedArchive downloaded;
-			try (InputStream input = response.body();
-					GdeltHttpBodyDeadline deadline = GdeltHttpBodyDeadline.start(input, deadlineNanos)) {
-				if (response.statusCode() != 200) {
-					int status = response.statusCode();
-					if (GdeltHttpStatusPolicy.isTransient(status)) {
-						throw new RemoteSourceAccessException(
-								IngestionErrorCode.DOWNLOAD_HTTP_ERROR,
-								IngestionErrorContext.forHttpStatus(status),
-								retryAfterParser.parse(response.headers()));
-					}
-					throw new RemoteResponseRejectedException(
-							IngestionErrorCode.DOWNLOAD_HTTP_STATUS_REJECTED,
-							IngestionErrorContext.forHttpStatus(status));
-				}
-				validateContentLength(response, attempt);
-				downloaded = writeAndVerify(
+			try (InputStream input = response.body()) {
+				ensureAvailableAfterExternalResult(budget);
+				try (GdeltHttpBodyDeadline deadline = GdeltHttpBodyDeadline.start(
 						input,
-						attempt,
-						paths.archivePartPath(),
-						deadline,
-						budget,
-						cycleLimited);
-				if (deadline.expired()) {
-					throwIfCycleLimited(cycleLimited);
-					throwIfExpired(budget);
-					throw new RemoteSourceAccessException(IngestionErrorCode.DOWNLOAD_TIMEOUT);
+						deadlineNanos)) {
+					if (response.statusCode() != 200) {
+						int status = response.statusCode();
+						if (GdeltHttpStatusPolicy.isTransient(status)) {
+							throw new RemoteSourceAccessException(
+									IngestionErrorCode.DOWNLOAD_HTTP_ERROR,
+									IngestionErrorContext.forHttpStatus(status),
+									retryAfterParser.parse(response.headers()));
+						}
+						throw new RemoteResponseRejectedException(
+								IngestionErrorCode.DOWNLOAD_HTTP_STATUS_REJECTED,
+								IngestionErrorContext.forHttpStatus(status));
+					}
+					validateContentLength(response, attempt);
+					downloaded = writeAndVerify(
+							input,
+							attempt,
+							paths.archivePartPath(),
+							deadline,
+							budget,
+							effectiveTimeout);
+					if (deadline.expired()) {
+						throwIfGuardLimitedTimeout(budget, effectiveTimeout);
+						throw new RemoteSourceAccessException(
+								IngestionErrorCode.DOWNLOAD_TIMEOUT);
+					}
 				}
 			}
 			IngestionInterruption.throwIfRequested();
-			if (!publishAtomically(paths.archivePartPath(), paths.archivePath())) {
+			if (!publishAtomically(paths.archivePartPath(), paths.archivePath(), budget)) {
 				return verifyExisting(attempt, paths.archivePath(), budget);
 			}
 			return new DownloadedArchive(
@@ -235,27 +244,27 @@ public class HttpArchiveDownloader {
 
 	private HttpResponse<InputStream> send(
 			ArchiveAttempt attempt,
-			Duration effectiveTimeout,
-			OperationBudget budget,
-			boolean cycleLimited
+			OperationEffectiveTimeout effectiveTimeout,
+			OperationBudget budget
 	) {
 		HttpRequest request = HttpRequest.newBuilder(downloadUriResolver.resolve(
 				GdeltArchiveName.requireSupported(attempt.archive().archiveName())))
-				.timeout(effectiveTimeout)
+				.timeout(effectiveTimeout.timeout())
 				.GET()
 				.build();
 		try {
-			return httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+			return httpClient.send(
+					request,
+					HttpResponse.BodyHandlers.ofInputStream());
 		} catch (InterruptedException exception) {
 			Thread.currentThread().interrupt();
 			throw new IngestionInterruptedException(exception);
 		} catch (HttpTimeoutException exception) {
-			throwIfCycleLimited(cycleLimited);
-			throwIfExpired(budget);
+			throwIfGuardLimitedTimeout(budget, effectiveTimeout);
 			throw new RemoteSourceAccessException(IngestionErrorCode.DOWNLOAD_TIMEOUT, exception);
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
-			throwIfExpired(budget);
+			ensureAvailable(budget);
 			throw new RemoteSourceAccessException(IngestionErrorCode.DOWNLOAD_HTTP_ERROR, exception);
 		}
 	}
@@ -266,10 +275,11 @@ public class HttpArchiveDownloader {
 			OperationBudget budget
 	) {
 		try {
-			throwIfExpired(budget);
+			ensureAvailable(budget);
 			if (!Files.isRegularFile(archivePath, LinkOption.NOFOLLOW_LINKS)) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
+			ensureAvailable(budget);
 			long size = Files.size(archivePath);
 			if (size != attempt.archive().expectedSizeBytes() || size > maxArchiveBytes) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
@@ -303,17 +313,23 @@ public class HttpArchiveDownloader {
 			Path partPath,
 			GdeltHttpBodyDeadline deadline,
 			OperationBudget budget,
-			boolean cycleLimited
+			OperationEffectiveTimeout effectiveTimeout
 	) {
 		MessageDigest digest = Md5Checksum.newDigest();
 		long total = 0;
 		byte[] buffer = new byte[BUFFER_SIZE];
+		ensureAvailable(budget);
 		try (OutputStream output = Files.newOutputStream(partPath, StandardOpenOption.CREATE_NEW)) {
 			while (true) {
 				IngestionInterruption.throwIfRequested();
-				throwIfExpired(budget);
-				int read = readChunk(input, buffer, deadline, budget, cycleLimited);
-				throwIfExpired(budget);
+				ensureLoopAvailable(budget);
+				int read = readChunk(
+						input,
+						buffer,
+						deadline,
+						budget,
+						effectiveTimeout);
+				ensureLoopAvailable(budget);
 				if (read == -1) {
 					break;
 				}
@@ -322,7 +338,7 @@ public class HttpArchiveDownloader {
 					throw new TransferredArtifactIntegrityException(
 							IngestionErrorCode.DOWNLOAD_SIZE_MISMATCH);
 				}
-				writeChunk(output, buffer, read);
+				writeChunk(output, buffer, read, budget);
 				digest.update(buffer, 0, read);
 			}
 		} catch (IOException exception) {
@@ -344,25 +360,31 @@ public class HttpArchiveDownloader {
 			byte[] buffer,
 			GdeltHttpBodyDeadline deadline,
 			OperationBudget budget,
-			boolean cycleLimited
+			OperationEffectiveTimeout effectiveTimeout
 	) {
 		try {
 			return input.read(buffer);
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
-			throwIfExpired(budget);
 			if (deadline.expired()) {
-				throwIfCycleLimited(cycleLimited);
+				throwIfGuardLimitedTimeout(budget, effectiveTimeout);
 				throw new RemoteSourceAccessException(
 						IngestionErrorCode.DOWNLOAD_TIMEOUT,
 						exception);
 			}
+			ensureAvailable(budget);
 			throw new RemoteSourceAccessException(IngestionErrorCode.DOWNLOAD_HTTP_ERROR, exception);
 		}
 	}
 
-	private static void writeChunk(OutputStream output, byte[] buffer, int length) {
+	private static void writeChunk(
+			OutputStream output,
+			byte[] buffer,
+			int length,
+			OperationBudget budget
+	) {
 		try {
+			ensureLoopAvailable(budget);
 			output.write(buffer, 0, length);
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
@@ -370,11 +392,17 @@ public class HttpArchiveDownloader {
 		}
 	}
 
-	private static boolean publishAtomically(Path partPath, Path finalPath) {
+	private static boolean publishAtomically(
+			Path partPath,
+			Path finalPath,
+			OperationBudget budget
+	) {
 		try {
+			ensureAvailable(budget);
 			if (!Files.isRegularFile(partPath, LinkOption.NOFOLLOW_LINKS)) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
+			ensureAvailable(budget);
 			Files.createLink(finalPath, partPath);
 			return true;
 		} catch (FileAlreadyExistsException _) {
@@ -393,23 +421,53 @@ public class HttpArchiveDownloader {
 		TemporaryArtifactCleaner.delete(path, metrics, LOGGER);
 	}
 
-	private Duration requireRemaining(OperationBudget budget) {
-		Duration timeout = budget.cap(requestTimeout);
-		if (timeout.isZero()) {
-			throw new OperationDeadlineExceededException();
-		}
-		return timeout;
-	}
-
-	private static void throwIfExpired(OperationBudget budget) {
-		if (!budget.hasRemaining()) {
+	private OperationEffectiveTimeout effectiveTimeout(OperationBudget budget) {
+		try {
+			return budget.effectiveTimeout(requestTimeout);
+		} catch (OperationDeadlineReachedException _) {
 			throw new OperationDeadlineExceededException();
 		}
 	}
 
-	private static void throwIfCycleLimited(boolean cycleLimited) {
-		if (cycleLimited) {
+	private static void ensureAvailable(OperationBudget budget) {
+		requireAvailable(budget);
+	}
+
+	private static Duration requireAvailable(OperationBudget budget) {
+		try {
+			return budget.requireAvailable();
+		} catch (OperationDeadlineReachedException _) {
 			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void ensureAvailableAfterExternalResult(OperationBudget budget) {
+		try {
+			budget.requireAvailableAfterExternalResult();
+		}
+		catch (OperationDeadlineReachedException _) {
+			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void ensureLoopAvailable(OperationBudget budget) {
+		try {
+			budget.requireLoopAvailable();
+		} catch (OperationDeadlineReachedException _) {
+			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void throwIfGuardLimitedTimeout(
+			OperationBudget budget,
+			OperationEffectiveTimeout effectiveTimeout
+	) {
+		OperationTimeoutOrigin origin = budget.resolveTimeoutOrigin(effectiveTimeout);
+		if (origin == OperationTimeoutOrigin.OPERATION_DEADLINE) {
+			throw new OperationDeadlineExceededException();
+		}
+		if (origin == OperationTimeoutOrigin.LEASE_SAFETY) {
+			throw new OperationOwnershipLostException();
 		}
 	}
 }

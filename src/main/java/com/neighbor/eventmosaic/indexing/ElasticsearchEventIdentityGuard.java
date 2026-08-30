@@ -1,6 +1,5 @@
 package com.neighbor.eventmosaic.indexing;
 
-import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.ShardStatistics;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
@@ -18,6 +17,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
 import com.neighbor.eventmosaic.indexing.api.IndexWriteMode;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -39,10 +39,11 @@ final class ElasticsearchEventIdentityGuard {
 			"sourceLineNumber",
 			"processingFingerprint");
 
-	private final ElasticsearchClient client;
+	private final ElasticsearchRequestExecutor requestExecutor;
 
-	ElasticsearchEventIdentityGuard(ElasticsearchClient client) {
-		this.client = Objects.requireNonNull(client, "client must not be null");
+	ElasticsearchEventIdentityGuard(ElasticsearchRequestExecutor requestExecutor) {
+		this.requestExecutor = Objects.requireNonNull(
+				requestExecutor, "requestExecutor must not be null");
 	}
 
 	/**
@@ -57,6 +58,41 @@ final class ElasticsearchEventIdentityGuard {
 			ExactIndexTarget target,
 			List<IndexedEventDocument> documents,
 			IndexWriteMode writeMode
+	) {
+		return plan(
+				target,
+				documents,
+				writeMode,
+				ElasticsearchRequestContext.standalone());
+	}
+
+	/**
+	 * Строит Event write plan в пределах общего ingestion cycle.
+	 *
+	 * @param target exact Event target current либо shadow generation
+	 * @param documents bounded непустая Event bulk-порция
+	 * @param writeMode обычная запись либо восстанавливаемое заполнение shadow
+	 * @param budget общий deadline и ownership guard cycle
+	 * @return immutable write plan в порядке исходной порции
+	 */
+	EventIdentityGuardPlan plan(
+			ExactIndexTarget target,
+			List<IndexedEventDocument> documents,
+			IndexWriteMode writeMode,
+			OperationBudget budget
+	) {
+		return plan(
+				target,
+				documents,
+				writeMode,
+				ElasticsearchRequestContext.guarded(budget));
+	}
+
+	EventIdentityGuardPlan plan(
+			ExactIndexTarget target,
+			List<IndexedEventDocument> documents,
+			IndexWriteMode writeMode,
+			ElasticsearchRequestContext context
 	) {
 		Objects.requireNonNull(target, "target must not be null");
 		Objects.requireNonNull(writeMode, "writeMode must not be null");
@@ -74,7 +110,8 @@ final class ElasticsearchEventIdentityGuard {
 		SearchResponse<EventIdentityProjection> response = search(
 				target,
 				candidates.ids(),
-				writeMode);
+				writeMode,
+				context);
 		Set<String> existingIds = validateResponse(target, candidates, response, writeMode);
 
 		List<IndexedEventDocument> documentsToCreate = boundedDocuments.stream()
@@ -101,7 +138,8 @@ final class ElasticsearchEventIdentityGuard {
 	private SearchResponse<EventIdentityProjection> search(
 			ExactIndexTarget target,
 			List<String> ids,
-			IndexWriteMode writeMode
+			IndexWriteMode writeMode,
+			ElasticsearchRequestContext context
 	) {
 		List<String> indices = writeMode == IndexWriteMode.REBUILD
 				? List.of(GdeltIndexKind.EVENT.readAlias(), target.indexName())
@@ -120,7 +158,9 @@ final class ElasticsearchEventIdentityGuard {
 						.includes(PROVENANCE_SOURCE_FIELDS)))
 				.query(query -> query.ids(idsQuery -> idsQuery.values(ids))));
 		try {
-			return client.search(request, EventIdentityProjection.class);
+			return context.execute(
+					requestExecutor,
+					client -> client.search(request, EventIdentityProjection.class));
 		}
 		catch (IOException exception) {
 			throw ioFailure(exception);

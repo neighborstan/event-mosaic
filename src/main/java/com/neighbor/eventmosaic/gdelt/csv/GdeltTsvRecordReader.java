@@ -3,8 +3,10 @@ package com.neighbor.eventmosaic.gdelt.csv;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvErrorCode;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvInterruptedException;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvSchemaException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.io.IOException;
 import java.io.Reader;
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -17,6 +19,7 @@ final class GdeltTsvRecordReader {
 
 	private final Reader source;
 	private final int maxRecordChars;
+	private final OperationBudget budget;
 	private final char[] buffer = new char[BUFFER_SIZE];
 
 	private int bufferPosition;
@@ -27,11 +30,20 @@ final class GdeltTsvRecordReader {
 	private boolean exhausted;
 
 	GdeltTsvRecordReader(Reader source, int maxRecordChars) {
+		this(source, maxRecordChars, OperationBudget.start(Duration.ofDays(1)));
+	}
+
+	GdeltTsvRecordReader(
+			Reader source,
+			int maxRecordChars,
+			OperationBudget budget
+	) {
 		this.source = Objects.requireNonNull(source, "source must not be null");
 		if (maxRecordChars <= 0) {
 			throw new IllegalArgumentException("maxRecordChars must be positive");
 		}
 		this.maxRecordChars = maxRecordChars;
+		this.budget = Objects.requireNonNull(budget, "budget must not be null");
 	}
 
 	GdeltTsvRecord readRecord() throws IOException {
@@ -39,6 +51,7 @@ final class GdeltTsvRecordReader {
 			return null;
 		}
 		throwIfInterrupted();
+		budget.requireLoopAvailable();
 		StringBuilder line = new StringBuilder(Math.min(maxRecordChars, 512));
 		while (true) {
 			int character = readNextCharacter();
@@ -56,7 +69,9 @@ final class GdeltTsvRecordReader {
 	private int readCharacter() throws IOException {
 		while (bufferPosition == bufferLimit) {
 			throwIfInterrupted();
+			budget.requireLoopAvailable();
 			bufferLimit = source.read(buffer);
+			budget.requireLoopAvailable();
 			bufferPosition = 0;
 			if (bufferLimit == -1) {
 				return -1;

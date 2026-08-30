@@ -33,6 +33,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableException;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import com.neighbor.eventmosaic.indexing.api.IndexWriteMode;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import io.micrometer.core.instrument.Timer;
 import jakarta.json.JsonException;
 import java.io.IOException;
@@ -61,6 +62,7 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	private final ElasticsearchClient client;
 	private final ElasticsearchIndexTemplateInstaller templateInstaller;
+	private final ElasticsearchRequestExecutor requestExecutor;
 	private final IndexingProperties properties;
 	private final IndexingMetrics metrics;
 	private final ElasticsearchArchiveReceiptVerifier receiptVerifier;
@@ -73,15 +75,18 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			ElasticsearchClient client,
 			ElasticsearchIndexTemplateInstaller templateInstaller,
 			IndexingProperties properties,
-			IndexingMetrics metrics
+			IndexingMetrics metrics,
+			ElasticsearchRequestExecutor requestExecutor
 	) {
 		this.client = Objects.requireNonNull(client, "client must not be null");
 		this.templateInstaller = Objects.requireNonNull(
 				templateInstaller, "templateInstaller must not be null");
 		this.properties = Objects.requireNonNull(properties, "properties must not be null");
 		this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
-		this.receiptVerifier = new ElasticsearchArchiveReceiptVerifier(client);
-		this.eventIdentityGuard = new ElasticsearchEventIdentityGuard(client);
+		this.requestExecutor = Objects.requireNonNull(
+				requestExecutor, "requestExecutor must not be null");
+		this.receiptVerifier = new ElasticsearchArchiveReceiptVerifier(requestExecutor);
+		this.eventIdentityGuard = new ElasticsearchEventIdentityGuard(requestExecutor);
 	}
 
 	@Override
@@ -131,11 +136,20 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	@Override
 	public void prepareReadModel() {
+		prepareReadModel(ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public void prepareReadModel(OperationBudget budget) {
+		prepareReadModel(ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private void prepareReadModel(ElasticsearchRequestContext context) {
 		checkInterrupted();
 		synchronized (preparationMonitor) {
 			templatesPrepared = false;
 			try {
-				templateInstaller.install();
+				templateInstaller.install(context);
 				templatesPrepared = true;
 			}
 			catch (IOException exception) {
@@ -151,12 +165,27 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 	public BulkIndexResult write(
 			BulkIndexCommand<? extends GdeltIndexedDocument> command
 	) {
+		return write(command, ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public BulkIndexResult write(
+			BulkIndexCommand<? extends GdeltIndexedDocument> command,
+			OperationBudget budget
+	) {
+		return write(command, ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private BulkIndexResult write(
+			BulkIndexCommand<? extends GdeltIndexedDocument> command,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(command, "command must not be null");
 		Timer.Sample timer = metrics.startBulkTimer();
 		IndexingRequestMetricOutcome metricOutcome =
 				IndexingRequestMetricOutcome.NON_RETRYABLE_FAILURE;
 		try {
-			BulkIndexResult result = writeOnce(command);
+			BulkIndexResult result = writeOnce(command, context);
 			metricOutcome = IndexingMetrics.requestOutcome(result.outcome());
 			return result;
 		}
@@ -170,20 +199,21 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 	}
 
 	private BulkIndexResult writeOnce(
-			BulkIndexCommand<? extends GdeltIndexedDocument> command
+			BulkIndexCommand<? extends GdeltIndexedDocument> command,
+			ElasticsearchRequestContext context
 	) {
 		checkInterrupted();
 		if (command.documents().size() > properties.bulkSize()) {
 			throw new IllegalArgumentException("bulk command exceeds configured bulkSize");
 		}
 		List<BinaryData> serializedDocuments = validateAndSerialize(command);
-		ensureTemplatesPrepared();
+		ensureTemplatesPrepared(context);
 
 		try {
-			verifyExactTarget(command.kind(), command.target());
+			verifyExactTarget(command.kind(), command.target(), context);
 			BulkIndexResult result = command.kind() == GdeltIndexKind.EVENT
-					? writeEvents(command, serializedDocuments)
-					: writeDocuments(command, serializedDocuments);
+					? writeEvents(command, serializedDocuments, context)
+					: writeDocuments(command, serializedDocuments, context);
 			metrics.completed(result);
 			return result;
 		}
@@ -210,16 +240,20 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	private BulkIndexResult writeDocuments(
 			BulkIndexCommand<? extends GdeltIndexedDocument> command,
-			List<BinaryData> serializedDocuments
+			List<BinaryData> serializedDocuments,
+			ElasticsearchRequestContext context
 	) throws IOException {
 		BulkRequest request = indexRequest(command, serializedDocuments);
-		BulkResponse response = client.bulk(request);
+		BulkResponse response = context.execute(
+				requestExecutor,
+				asyncClient -> asyncClient.bulk(request));
 		return BulkResponseAnalyzer.analyze(command, response.items());
 	}
 
 	private BulkIndexResult writeEvents(
 			BulkIndexCommand<? extends GdeltIndexedDocument> command,
-			List<BinaryData> serializedDocuments
+			List<BinaryData> serializedDocuments,
+			ElasticsearchRequestContext context
 	) throws IOException {
 		List<IndexedEventDocument> events = command.documents().stream()
 				.map(IndexedEventDocument.class::cast)
@@ -227,7 +261,8 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		EventIdentityGuardPlan plan = guardEvents(
 				command.target(),
 				events,
-				command.writeMode());
+				command.writeMode(),
+				context);
 		if (plan.documentsToCreate().isEmpty()) {
 			return successfulEventResult(command.documents().size());
 		}
@@ -236,21 +271,29 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 				events,
 				serializedDocuments,
 				plan.documentsToCreate());
-		BulkResponse response = client.bulk(eventCreateRequest(
+		BulkRequest request = eventCreateRequest(
 				command.target(),
 				plan.documentsToCreate(),
-				createSources));
-		return analyzeEventCreates(command, plan, response.items());
+				createSources);
+		BulkResponse response = context.execute(
+				requestExecutor,
+				asyncClient -> asyncClient.bulk(request));
+		return analyzeEventCreates(command, plan, response.items(), context);
 	}
 
 	private EventIdentityGuardPlan guardEvents(
 			ExactIndexTarget target,
 			List<IndexedEventDocument> events,
-			IndexWriteMode writeMode
+			IndexWriteMode writeMode,
+			ElasticsearchRequestContext context
 	) {
 		long startedAt = System.nanoTime();
 		try {
-			EventIdentityGuardPlan plan = eventIdentityGuard.plan(target, events, writeMode);
+			EventIdentityGuardPlan plan = eventIdentityGuard.plan(
+					target,
+					events,
+					writeMode,
+					context);
 			metrics.eventIdentityGuard(
 					System.nanoTime() - startedAt,
 					plan.replayCount() == 0
@@ -296,7 +339,8 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 	private BulkIndexResult analyzeEventCreates(
 			BulkIndexCommand<? extends GdeltIndexedDocument> originalCommand,
 			EventIdentityGuardPlan plan,
-			List<BulkResponseItem> responseItems
+			List<BulkResponseItem> responseItems,
+			ElasticsearchRequestContext context
 	) throws IOException {
 		List<BulkResponseItem> items = List.copyOf(responseItems);
 		if (items.size() != plan.documentsToCreate().size()) {
@@ -315,7 +359,7 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 			}
 		}
 		if (!conflicts.isEmpty()) {
-			verifyCreateConflicts(originalCommand.target(), conflicts);
+			verifyCreateConflicts(originalCommand.target(), conflicts, context);
 		}
 
 		long succeededCreates = 0;
@@ -353,16 +397,19 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	private void verifyCreateConflicts(
 			ExactIndexTarget target,
-			List<IndexedEventDocument> conflicts
+			List<IndexedEventDocument> conflicts,
+			ElasticsearchRequestContext context
 	) throws IOException {
 		MgetRequest request = MgetRequest.of(builder -> builder
 				.index(target.indexName())
 				.ids(conflicts.stream().map(IndexedEventDocument::documentId).toList())
 				.realtime(true)
 				.sourceIncludes(EVENT_PROVENANCE_FIELDS));
-		MgetResponse<EventIdentityProjection> response = client.mget(
-				request,
-				EventIdentityProjection.class);
+		MgetResponse<EventIdentityProjection> response = context.execute(
+				requestExecutor,
+				asyncClient -> asyncClient.mget(
+						request,
+						EventIdentityProjection.class));
 		if (response.docs().size() != conflicts.size()) {
 			throw new IndexingProtocolException(IndexingErrorCode.INDEXING_RESPONSE_INVALID);
 		}
@@ -441,14 +488,33 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	@Override
 	public void refresh(GdeltIndexKind kind, ExactIndexTarget target) {
+		refresh(kind, target, ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public void refresh(
+			GdeltIndexKind kind,
+			ExactIndexTarget target,
+			OperationBudget budget
+	) {
+		refresh(kind, target, ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private void refresh(
+			GdeltIndexKind kind,
+			ExactIndexTarget target,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(kind, "kind must not be null");
 		Objects.requireNonNull(target, "target must not be null");
 		requireMatchingTarget(kind, target);
 		checkInterrupted();
 		try {
-			verifyExactTarget(kind, target);
-			RefreshResponse response = client.indices()
-					.refresh(request -> request.index(target.indexName()));
+			verifyExactTarget(kind, target, context);
+			RefreshResponse response = context.execute(
+					requestExecutor,
+					asyncClient -> asyncClient.indices()
+							.refresh(request -> request.index(target.indexName())));
 			rejectFailedShards(response.shards());
 		}
 		catch (IOException exception) {
@@ -461,12 +527,27 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	@Override
 	public ArchiveReceiptVerification verifyReceipt(ArchiveReceiptQuery query) {
+		return verifyReceipt(query, ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public ArchiveReceiptVerification verifyReceipt(
+			ArchiveReceiptQuery query,
+			OperationBudget budget
+	) {
+		return verifyReceipt(query, ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private ArchiveReceiptVerification verifyReceipt(
+			ArchiveReceiptQuery query,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(query, "query must not be null");
 		Timer.Sample timer = metrics.startReceiptTimer();
 		IndexingReceiptMetricOutcome metricOutcome =
 				IndexingReceiptMetricOutcome.NON_RETRYABLE_FAILURE;
 		try {
-			ArchiveReceiptVerification result = verifyReceiptOnce(query);
+			ArchiveReceiptVerification result = verifyReceiptOnce(query, context);
 			metricOutcome = IndexingMetrics.receiptOutcome(result.status());
 			return result;
 		}
@@ -479,11 +560,14 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		}
 	}
 
-	private ArchiveReceiptVerification verifyReceiptOnce(ArchiveReceiptQuery query) {
+	private ArchiveReceiptVerification verifyReceiptOnce(
+			ArchiveReceiptQuery query,
+			ElasticsearchRequestContext context
+	) {
 		checkInterrupted();
 		try {
-			verifyExactTarget(query.kind(), query.target());
-			return receiptVerifier.verify(query);
+			verifyExactTarget(query.kind(), query.target(), context);
+			return receiptVerifier.verify(query, context);
 		}
 		catch (IOException exception) {
 			throw ioFailure(exception);
@@ -493,9 +577,9 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 		}
 	}
 
-	private void ensureTemplatesPrepared() {
+	private void ensureTemplatesPrepared(ElasticsearchRequestContext context) {
 		if (!templatesPrepared) {
-			prepareReadModel();
+			prepareReadModel(context);
 		}
 	}
 
@@ -573,16 +657,18 @@ final class ElasticsearchGdeltIndexWriter implements GdeltIndexWriter {
 
 	private void verifyExactTarget(
 			GdeltIndexKind kind,
-			ExactIndexTarget target
+			ExactIndexTarget target,
+			ElasticsearchRequestContext context
 	) throws IOException {
 		requireMatchingTarget(kind, target);
 		IndexState state;
 		try {
-			state = client.indices()
-					.get(request -> request
+			state = context.execute(
+					requestExecutor,
+					asyncClient -> asyncClient.indices().get(request -> request
 							.index(target.indexName())
 							.allowNoIndices(false)
-							.ignoreUnavailable(false))
+							.ignoreUnavailable(false)))
 					.get(target.indexName());
 		}
 		catch (ElasticsearchException exception) {

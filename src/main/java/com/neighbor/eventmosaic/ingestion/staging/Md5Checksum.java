@@ -3,6 +3,7 @@ package com.neighbor.eventmosaic.ingestion.staging;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruption;
 import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -35,11 +36,13 @@ final class Md5Checksum {
 	static String calculate(Path path, OperationBudget budget) throws IOException {
 		MessageDigest digest = newDigest();
 		byte[] buffer = new byte[8192];
+		ensureAvailable(budget);
 		try (InputStream input = Files.newInputStream(path)) {
 			while (true) {
 				IngestionInterruption.throwIfRequested();
-				throwIfExpired(budget);
+				ensureLoopAvailable(budget);
 				int read = input.read(buffer);
+				ensureLoopAvailable(budget);
 				if (read == -1) {
 					break;
 				}
@@ -47,12 +50,22 @@ final class Md5Checksum {
 			}
 		}
 		IngestionInterruption.throwIfRequested();
-		throwIfExpired(budget);
+		ensureLoopAvailable(budget);
 		return hex(digest);
 	}
 
-	private static void throwIfExpired(OperationBudget budget) {
-		if (!budget.hasRemaining()) {
+	private static void ensureAvailable(OperationBudget budget) {
+		try {
+			budget.requireAvailable();
+		} catch (OperationDeadlineReachedException _) {
+			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void ensureLoopAvailable(OperationBudget budget) {
+		try {
+			budget.requireLoopAvailable();
+		} catch (OperationDeadlineReachedException _) {
 			throw new OperationDeadlineExceededException();
 		}
 	}

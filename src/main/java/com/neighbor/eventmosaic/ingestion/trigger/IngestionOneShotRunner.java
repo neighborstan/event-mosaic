@@ -1,11 +1,13 @@
 package com.neighbor.eventmosaic.ingestion.trigger;
 
-import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
+import com.neighbor.eventmosaic.ingestion.IngestionCycleCoordinator;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOutcome;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.stereotype.Component;
 
 /**
@@ -13,22 +15,18 @@ import org.springframework.stereotype.Component;
  * когда это явно разрешено свойством {@code one-shot-enabled}.
  */
 @Component
-@ConditionalOnProperty(
-		prefix = "event-mosaic.ingestion.gdelt",
-		name = "one-shot-enabled",
-		havingValue = "true"
-)
+@Conditional(IngestionRuntimeModeCondition.OneShot.class)
 public class IngestionOneShotRunner implements ApplicationRunner {
 
-	private final GdeltPipelineService pipelineService;
+	private final IngestionCycleCoordinator coordinator;
 
 	/**
 	 * Создает runner для основного orchestration service.
 	 *
-	 * @param pipelineService сервис одного сквозного ingestion cycle
+	 * @param coordinator единая граница global ownership и ingestion cycle
 	 */
-	public IngestionOneShotRunner(GdeltPipelineService pipelineService) {
-		this.pipelineService = pipelineService;
+	public IngestionOneShotRunner(IngestionCycleCoordinator coordinator) {
+		this.coordinator = coordinator;
 	}
 
 	/**
@@ -39,10 +37,14 @@ public class IngestionOneShotRunner implements ApplicationRunner {
 	@Override
 	public void run(ApplicationArguments arguments) {
 		try {
-			pipelineService.runOneShot();
+			coordinator.runCycle();
 		} catch (ApplicationException exception) {
 			throw new IllegalStateException(
 					exception.errorCode().code() + ": " + exception.errorCode().safeMessage());
+		} catch (OperationOwnershipLostException _) {
+			throw new IllegalStateException(
+					IngestionCycleOutcome.OWNERSHIP_LOST.name()
+							+ ": Ingestion cycle ownership was lost");
 		} catch (RuntimeException _) {
 			throw new IllegalStateException(
 					IngestionErrorCode.INTERNAL_ERROR.code()

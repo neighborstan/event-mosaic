@@ -46,6 +46,8 @@ import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
 import com.neighbor.eventmosaic.shared.error.SafeExceptionProjection;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -138,16 +140,27 @@ public class GdeltPipelineService {
 	 * @return typed terminal outcome one-shot cycle
 	 */
 	public IngestionOneShotOutcome runOneShot() {
-		return runOneShot(OperationBudget.start(
+		return runCycle(OperationBudget.start(
 				backendDataProperties.operationDeadline()));
 	}
 
-	IngestionOneShotOutcome runOneShot(OperationBudget budget) {
+	/**
+	 * Выполняет один trigger-independent cycle внутри уже начатого общего budget.
+	 * Trigger обязан получить global ownership до этого вызова.
+	 *
+	 * @param budget общий budget, начатый до global claim
+	 * @return различимый terminal outcome pipeline
+	 */
+	public IngestionOneShotOutcome runCycle(OperationBudget budget) {
 		long startedAt = System.nanoTime();
 		IngestionOperationMetricOutcome metricOutcome =
 				IngestionOperationMetricOutcome.INTERNAL_FAILURE;
 		try {
 			AcquisitionCycleResult acquisition = ingestionRunService.runOneShot(budget);
+			if (acquisition.sourcePollOwnershipLost()) {
+				metricOutcome = IngestionOperationMetricOutcome.OWNERSHIP_LOST;
+				return IngestionOneShotOutcome.OWNERSHIP_LOST;
+			}
 			if (acquisition.runState().isPresent()
 					&& processRunState(acquisition.runState().orElseThrow(), budget)) {
 				metricOutcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
@@ -165,9 +178,17 @@ public class GdeltPipelineService {
 			metricOutcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
 			return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
 		}
+		catch (OperationDeadlineReachedException _) {
+			metricOutcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
+			return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
+		}
 		catch (StoragePressureException _) {
 			metricOutcome = IngestionOperationMetricOutcome.STORAGE_PRESSURE;
 			return IngestionOneShotOutcome.STORAGE_PRESSURE;
+		}
+		catch (OperationOwnershipLostException exception) {
+			metricOutcome = IngestionOperationMetricOutcome.OWNERSHIP_LOST;
+			throw exception;
 		}
 		catch (IngestionInterruptedException | IndexingInterruptedException exception) {
 			metricOutcome = IngestionOperationMetricOutcome.INTERRUPTED;
@@ -186,6 +207,10 @@ public class GdeltPipelineService {
 		}
 	}
 
+	IngestionOneShotOutcome runOneShot(OperationBudget budget) {
+		return runCycle(budget);
+	}
+
 	private boolean processRunState(
 			IngestionRunState runState,
 			OperationBudget budget
@@ -193,15 +218,15 @@ public class GdeltPipelineService {
 		RuntimeException deferredFailure = null;
 		for (IngestionArchiveState archiveState : runState.archives()) {
 			if (isStaged(archiveState)) {
-				if (!budget.hasRemaining()) {
-					return true;
-				}
 				try {
+					requireRemaining(budget);
 					if (processStagedArchive(archiveState, budget)) {
 						return true;
 					}
 				} catch (OperationDeadlineExceededException _) {
 					return true;
+				} catch (OperationOwnershipLostException exception) {
+					throw exception;
 				} catch (IngestionInterruptedException exception) {
 					throw exception;
 				} catch (StoragePressureException exception) {
@@ -210,11 +235,18 @@ public class GdeltPipelineService {
 					logExpectedArchiveFailure(archiveState, exception, exception);
 					throw exception;
 				} catch (IndexTargetUnavailableException exception) {
+					String outcome = targetUnavailableOutcome(exception.reason());
 					logOutcome(
 							archiveState,
 							toGdeltKind(archiveState.archive().archiveType()),
-							targetUnavailableOutcome(exception.reason()),
+							outcome,
 							exception.reason().errorCode().code());
+					if (OUTCOME_OWNERSHIP_LOST.equals(outcome)) {
+						OperationOwnershipLostException ownershipLost =
+								new OperationOwnershipLostException();
+						ownershipLost.addSuppressed(exception);
+						throw ownershipLost;
+					}
 				} catch (IndexingAccessException | IndexingProtocolException exception) {
 					logExpectedArchiveFailure(archiveState, exception, exception);
 					if (deferredFailure == null) {
@@ -245,13 +277,18 @@ public class GdeltPipelineService {
 		storageMonitor.requireCapacity(StorageResource.ELASTICSEARCH);
 		requireRemaining(budget);
 		IndexTargetResolution targetResolution = indexTargetResolver.resolve(
-				archiveState.archive().sourceUpdateTime());
+				archiveState.archive().sourceUpdateTime(),
+				budget);
+		requireRemaining(budget);
 		if (targetResolution.status() != IndexTargetResolutionStatus.READY) {
 			logOutcome(
 					archiveState,
 					kind,
 					resolutionOutcome(targetResolution),
 					null);
+			if (targetResolution.status() == IndexTargetResolutionStatus.OWNERSHIP_LOST) {
+				throw new OperationOwnershipLostException();
+			}
 			return false;
 		}
 		ActiveIndexTargets indexTargets = targetResolution.targets();
@@ -271,6 +308,7 @@ public class GdeltPipelineService {
 		requireRemaining(budget);
 		ArchiveProcessingState processingState =
 				processingLedger.register(archiveKey, fingerprint);
+		requireRemaining(budget);
 		if (processingState.status() == ArchiveProcessingStatus.INDEXED) {
 			ReceiptDecision receiptDecision =
 					reconcileIndexedReceipt(
@@ -285,6 +323,9 @@ public class GdeltPipelineService {
 						kind,
 						receiptDecision.outcome(),
 						receiptDecision.errorCode());
+				if (receiptDecision == ReceiptDecision.OWNERSHIP_LOST) {
+					throw new OperationOwnershipLostException();
+				}
 				return false;
 			}
 		}
@@ -296,20 +337,36 @@ public class GdeltPipelineService {
 				targetBinding,
 				properties.continuity().recoveryLease());
 		if (claimResult.status() != ArchiveProcessingClaimStatus.CLAIMED) {
+			requireRemaining(budget);
 			logOutcome(archiveState, kind, claimOutcome(claimResult.status()), null);
+			if (claimResult.status() == ArchiveProcessingClaimStatus.OWNERSHIP_LOST) {
+				throw new OperationOwnershipLostException();
+			}
 			return false;
 		}
 		ArchiveProcessingAttempt attempt = claimResult.attempt();
 		if (!attempt.targetBinding().equals(targetBinding)) {
 			throw new IllegalStateException("Processing claim returned another target binding");
 		}
-		return processClaimedArchive(
-				archiveState,
-				kind,
-				processingFingerprint,
-				indexTargets,
-				attempt,
-				budget);
+		try {
+			requireRemaining(budget);
+			return processClaimedArchive(
+					archiveState,
+					kind,
+					processingFingerprint,
+					indexTargets,
+					attempt,
+					budget);
+		}
+		catch (OperationDeadlineExceededException _) {
+			recordDeadlineFailure(
+					archiveState,
+					kind,
+					attempt,
+					ArchiveProcessingProgress.empty(),
+					budget);
+			return true;
+		}
 	}
 
 	private ReceiptDecision reconcileIndexedReceipt(
@@ -329,7 +386,8 @@ public class GdeltPipelineService {
 				persistedReceipt.expectedDocumentCount(),
 				new ArchiveIdentityDigest(persistedReceipt.expectedIdentityDigest()),
 				backendDataProperties.receiptPageSize());
-		var verification = indexWriter.verifyReceipt(query);
+		var verification = indexWriter.verifyReceipt(query, budget);
+		requireRemaining(budget);
 		ArchiveProcessingTargetBinding currentTargetBinding = toTargetBinding(
 				indexTargets,
 				toIndexKind(kind));
@@ -393,6 +451,7 @@ public class GdeltPipelineService {
 					request,
 					progress -> {
 						latestProgress.set(progress);
+						requireRemaining(budget);
 						return processingLedger.checkpoint(
 								attempt,
 								toLedgerProgress(progress),
@@ -402,24 +461,60 @@ public class GdeltPipelineService {
 					diagnosticFailure::set);
 		} catch (IndexTargetUnavailableException exception) {
 			throw exception;
+		} catch (OperationOwnershipLostException exception) {
+			throw exception;
+		} catch (OperationDeadlineExceededException _) {
+			recordDeadlineFailure(
+					archiveState,
+					kind,
+					attempt,
+					latestProgress.get(),
+					budget);
+			return true;
 		} catch (RuntimeException exception) {
-			recordUnexpectedFailure(attempt, latestProgress.get(), exception);
+			recordUnexpectedFailure(
+					attempt,
+					latestProgress.get(),
+					exception,
+					budget);
 			throw exception;
 		}
 
 		switch (result.outcome()) {
-			case COMPLETED -> completeAttempt(archiveState, kind, attempt, result);
+			case COMPLETED -> {
+				try {
+					completeAttempt(
+							archiveState,
+							kind,
+							attempt,
+							result,
+							budget);
+				}
+				catch (OperationDeadlineExceededException _) {
+					recordDeadlineFailure(
+							archiveState,
+							kind,
+							attempt,
+							result.progress(),
+							budget);
+					return true;
+				}
+			}
 			case FAILED -> failAttempt(
 					archiveState,
 					kind,
 					attempt,
 					result,
-					diagnosticFailure.get());
-			case OWNERSHIP_LOST -> logOwnershipLost(
-					archiveState,
-					kind,
-					attempt,
-					diagnosticFailure.get());
+					diagnosticFailure.get(),
+					budget);
+			case OWNERSHIP_LOST -> {
+				logOwnershipLost(
+						archiveState,
+						kind,
+						attempt,
+						diagnosticFailure.get());
+				throw new OperationOwnershipLostException();
+			}
 		}
 		return result.outcome() == com.neighbor.eventmosaic.processing.api.ArchiveProcessingOutcome.FAILED
 				&& result.failure().code()
@@ -430,8 +525,10 @@ public class GdeltPipelineService {
 			IngestionArchiveState archiveState,
 			GdeltArchiveKind kind,
 			ArchiveProcessingAttempt attempt,
-			ArchiveProcessingResult result
+			ArchiveProcessingResult result,
+			OperationBudget budget
 	) {
+		requireRemaining(budget);
 		AttemptTransitionResult transition = processingLedger.markIndexed(
 				attempt,
 				toLedgerProgress(result.progress()),
@@ -443,6 +540,7 @@ public class GdeltPipelineService {
 						? "INDEXED"
 						: OUTCOME_OWNERSHIP_LOST,
 				null);
+		throwIfOwnershipLost(transition);
 	}
 
 	private void failAttempt(
@@ -450,7 +548,8 @@ public class GdeltPipelineService {
 			GdeltArchiveKind kind,
 			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingResult result,
-			RuntimeException diagnosticFailure
+			RuntimeException diagnosticFailure,
+			OperationBudget budget
 	) {
 		var failure = result.failure();
 		if (isInterruption(failure.code())) {
@@ -459,8 +558,10 @@ public class GdeltPipelineService {
 					kind,
 					attempt,
 					result,
-					diagnosticFailure);
+					diagnosticFailure,
+					budget);
 		}
+		requireTerminalOwnership(budget);
 		AttemptTransitionResult transition;
 		try {
 			transition = processingLedger.markFailed(
@@ -495,6 +596,7 @@ public class GdeltPipelineService {
 					diagnosticFailure,
 					outcome);
 		}
+		throwIfOwnershipLost(transition);
 	}
 
 	private IngestionInterruptedException interruptedAttemptFailure(
@@ -502,8 +604,10 @@ public class GdeltPipelineService {
 			GdeltArchiveKind kind,
 			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingResult result,
-			RuntimeException diagnosticFailure
+			RuntimeException diagnosticFailure,
+			OperationBudget budget
 	) {
+		requireTerminalOwnership(budget);
 		Thread.currentThread().interrupt();
 		IngestionInterruptedException interruption = diagnosticFailure == null
 				? new IngestionInterruptedException()
@@ -520,6 +624,14 @@ public class GdeltPipelineService {
 			outcome = transition == AttemptTransitionResult.APPLIED
 					? OUTCOME_FAILED
 					: OUTCOME_OWNERSHIP_LOST;
+			if (transition == AttemptTransitionResult.OWNERSHIP_LOST) {
+				OperationOwnershipLostException ownershipLost =
+						new OperationOwnershipLostException();
+				ownershipLost.addSuppressed(interruption);
+				throw ownershipLost;
+			}
+		} catch (OperationOwnershipLostException ownershipLost) {
+			throw ownershipLost;
 		} catch (RuntimeException persistenceFailure) {
 			interruption.addSuppressed(persistenceFailure);
 			outcome = "PERSISTENCE_FAILED";
@@ -548,16 +660,21 @@ public class GdeltPipelineService {
 	private void recordUnexpectedFailure(
 			ArchiveProcessingAttempt attempt,
 			ArchiveProcessingProgress progress,
-			RuntimeException exception
+			RuntimeException exception,
+			OperationBudget budget
 	) {
+		requireTerminalOwnership(budget);
 		try {
-			processingLedger.markFailed(
+			AttemptTransitionResult transition = processingLedger.markFailed(
 					attempt,
 					new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
 							IngestionErrorCode.INTERNAL_ERROR.code(),
 							false),
 					toLedgerProgress(progress),
 					null);
+			throwIfOwnershipLost(transition);
+		} catch (OperationOwnershipLostException ownershipLost) {
+			throw ownershipLost;
 		} catch (RuntimeException persistenceFailure) {
 			exception.addSuppressed(persistenceFailure);
 		}
@@ -700,8 +817,46 @@ public class GdeltPipelineService {
 	}
 
 	private static void requireRemaining(OperationBudget budget) {
-		if (!budget.hasRemaining()) {
+		try {
+			budget.requireAvailable();
+		}
+		catch (OperationDeadlineReachedException _) {
 			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void requireTerminalOwnership(OperationBudget budget) {
+		budget.requireOwnershipForTerminalTransition();
+	}
+
+	private void recordDeadlineFailure(
+			IngestionArchiveState archiveState,
+			GdeltArchiveKind kind,
+			ArchiveProcessingAttempt attempt,
+			ArchiveProcessingProgress progress,
+			OperationBudget budget
+	) {
+		requireTerminalOwnership(budget);
+		AttemptTransitionResult transition = processingLedger.markFailed(
+				attempt,
+				new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
+						ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED.code(),
+						true),
+				toLedgerProgress(progress),
+				null);
+		logOutcome(
+				archiveState,
+				kind,
+				transition == AttemptTransitionResult.APPLIED
+						? OUTCOME_FAILED
+						: OUTCOME_OWNERSHIP_LOST,
+				ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED.code());
+		throwIfOwnershipLost(transition);
+	}
+
+	private static void throwIfOwnershipLost(AttemptTransitionResult transition) {
+		if (transition == AttemptTransitionResult.OWNERSHIP_LOST) {
+			throw new OperationOwnershipLostException();
 		}
 	}
 

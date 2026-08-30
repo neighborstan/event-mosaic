@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.neighbor.eventmosaic.PostgreSqlTestcontainersConfiguration;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -28,7 +29,10 @@ class BackendDataSchemaIntegrationTest {
 			"index_maintenance_operations",
 			"ingestion_archive_processing",
 			"ingestion_archives",
+			"ingestion_cycle_state",
 			"ingestion_gaps",
+			"ingestion_receipt_audit_state",
+			"ingestion_recent_recovery_plan",
 			"ingestion_runs",
 			"ingestion_source_poll_state",
 			"ingestion_source_state");
@@ -40,7 +44,7 @@ class BackendDataSchemaIntegrationTest {
 	private JdbcClient jdbcClient;
 
 	@Test
-	@DisplayName("Чистая database получает единую target baseline без pending изменений")
+	@DisplayName("Чистая database последовательно получает обе target migrations без pending изменений")
 	void cleanDatabaseMigratesToTargetSchema() {
 		// Given / When
 		List<String> tables = applicationTables();
@@ -51,7 +55,7 @@ class BackendDataSchemaIntegrationTest {
 				select count(*)
 				from flyway_schema_history
 				where type = 'SQL' and success
-				""").query(Integer.class).single()).isOne();
+				""").query(Integer.class).single()).isEqualTo(2);
 		assertThat(jdbcClient.sql("""
 				select count(*)
 				from flyway_schema_history
@@ -163,6 +167,118 @@ class BackendDataSchemaIntegrationTest {
 				.update())
 				.isInstanceOf(DataIntegrityViolationException.class)
 				.hasMessageContaining("ck_index_generations_cleanup_origin");
+	}
+
+	@Test
+	@DisplayName("Schema отклоняет дробную cadence, ACTIVE с нулевой epoch и FAILED без попытки")
+	void liveIngestionSchemaRejectsInvalidBoundaryStates() {
+		Instant windowFrom = Instant.parse("2026-07-20T00:00:00Z");
+		Instant fractionalWindowFrom = windowFrom.plusMillis(100);
+		Instant recordedAt = Instant.parse("2026-07-21T01:00:00Z");
+		String sourceName = "GDELT_SCHEMA_BOUNDARY";
+
+		jdbcClient.sql("""
+				insert into ingestion_source_state (
+				    source_name,
+				    continuity_baseline,
+				    latest_observed_update_time,
+				    first_run_policy,
+				    initialized_at,
+				    updated_at
+				)
+				values (
+				    :sourceName,
+				    :windowFrom,
+				    :latestObserved,
+				    'RECENT_WINDOW',
+				    :recordedAt,
+				    :recordedAt
+				)
+				""")
+				.param("sourceName", sourceName)
+				.param("windowFrom", Timestamp.from(windowFrom))
+				.param("latestObserved", Timestamp.from(windowFrom.plus(Duration.ofHours(1))))
+				.param("recordedAt", Timestamp.from(recordedAt))
+				.update();
+
+		assertThatThrownBy(() -> jdbcClient.sql("""
+					insert into ingestion_cycle_state (
+					    source_name,
+					    status,
+					    owner_token,
+					    fencing_epoch,
+					    lease_expires_at,
+					    last_started_at
+					)
+					values (
+					    :sourceName,
+					    'ACTIVE',
+					    :ownerToken,
+					    0,
+					    :leaseExpiresAt,
+					    :lastStartedAt
+					)
+					""")
+				.param("sourceName", sourceName)
+				.param("ownerToken", UUID.randomUUID())
+				.param("leaseExpiresAt", Timestamp.from(recordedAt.plus(Duration.ofHours(1))))
+				.param("lastStartedAt", Timestamp.from(recordedAt))
+				.update())
+				.isInstanceOf(DataIntegrityViolationException.class)
+				.hasMessageContaining("ck_ingestion_cycle_state_ownership");
+
+		assertThatThrownBy(() -> jdbcClient.sql("""
+					insert into ingestion_recent_recovery_plan (
+					    source_name,
+					    generation,
+					    window_from,
+					    window_to,
+					    source_frontier,
+					    catalog_status
+					)
+					values (
+					    :sourceName,
+					    1,
+					    :windowFrom,
+					    :windowTo,
+					    :sourceFrontier,
+					    'PENDING'
+					)
+					""")
+				.param("sourceName", sourceName)
+				.param("windowFrom", Timestamp.from(fractionalWindowFrom))
+				.param("windowTo", Timestamp.from(fractionalWindowFrom.plus(Duration.ofHours(24))))
+				.param("sourceFrontier", Timestamp.from(fractionalWindowFrom))
+				.update())
+				.isInstanceOf(DataIntegrityViolationException.class)
+				.hasMessageContaining("ck_ingestion_recent_recovery_plan_window");
+
+		assertThatThrownBy(() -> jdbcClient.sql("""
+					insert into ingestion_receipt_audit_state (
+					    source_name,
+					    status,
+					    due_at,
+					    automatic_retry_limit,
+					    failed_at,
+					    last_error_code,
+					    last_error_retryable
+					)
+					values (
+					    :sourceName,
+					    'FAILED',
+					    :dueAt,
+					    3,
+					    :failedAt,
+					    'AUDIT_FAILED',
+					    false
+					)
+					""")
+				.param("sourceName", sourceName)
+				.param("dueAt", Timestamp.from(recordedAt))
+				.param("failedAt", Timestamp.from(recordedAt))
+				.update())
+				.isInstanceOf(DataIntegrityViolationException.class)
+				.hasMessageContaining("ck_ingestion_receipt_audit_ownership");
 	}
 
 	private List<String> applicationTables() {

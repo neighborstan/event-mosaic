@@ -15,6 +15,9 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltCsvSchemaException;
 import com.neighbor.eventmosaic.gdelt.api.GdeltEvent;
 import com.neighbor.eventmosaic.gdelt.api.GdeltMention;
 import com.neighbor.eventmosaic.gdelt.api.GdeltRecordConsumer;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationLeaseSnapshot;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -24,6 +27,7 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -34,6 +38,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -1133,6 +1138,38 @@ class GdeltCsvReaderTest {
 		} finally {
 			Thread.interrupted();
 		}
+	}
+
+	@Test
+	@DisplayName("Потеря владения останавливает уже буферизованную следующую запись")
+	void lostOwnershipStopsBeforeBufferedRecord() {
+		AtomicBoolean ownershipCurrent = new AtomicBoolean(true);
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(
+				Duration.ofSeconds(5),
+				nanoTime::get)
+				.withLeaseGuard(
+						() -> ownershipCurrent.get()
+								? OperationLeaseSnapshot.current(Duration.ofSeconds(5))
+								: OperationLeaseSnapshot.lost(),
+						Duration.ZERO);
+		Reader source = new StringReader(String.join(
+				"\n",
+				minimalEventLine("1"),
+				minimalEventLine("2")));
+		List<Long> delivered = new ArrayList<>();
+
+		assertThatExceptionOfType(OperationOwnershipLostException.class)
+				.isThrownBy(() -> eventReader.readCsv(
+						source,
+						csvRecord -> {
+							delivered.add(csvRecord.value().globalEventId());
+							ownershipCurrent.set(false);
+							nanoTime.set(Duration.ofSeconds(1).toNanos());
+						},
+						budget));
+
+		assertThat(delivered).containsExactly(1L);
 	}
 
 	@Test

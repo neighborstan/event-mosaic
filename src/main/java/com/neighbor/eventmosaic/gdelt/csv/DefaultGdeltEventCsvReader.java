@@ -6,6 +6,7 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltCsvProgressListener;
 import com.neighbor.eventmosaic.gdelt.api.GdeltEvent;
 import com.neighbor.eventmosaic.gdelt.api.GdeltEventCsvReader;
 import com.neighbor.eventmosaic.gdelt.api.GdeltRecordConsumer;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.nio.file.Path;
 import org.springframework.stereotype.Component;
 
@@ -37,5 +38,24 @@ final class DefaultGdeltEventCsvReader extends GdeltCsvReaderSupport<GdeltEvent>
 			GdeltCsvProgressListener progressListener
 	) {
 		return readCsv(csvPath, consumer, progressListener);
+	}
+
+	@Override
+	public GdeltCsvReadSummary read(
+			Path csvPath,
+			GdeltRecordConsumer<GdeltEvent> consumer,
+			OperationBudget budget
+	) {
+		return readCsv(csvPath, consumer, budget);
+	}
+
+	@Override
+	public GdeltCsvReadSummary read(
+			Path csvPath,
+			GdeltRecordConsumer<GdeltEvent> consumer,
+			GdeltCsvProgressListener progressListener,
+			OperationBudget budget
+	) {
+		return readCsv(csvPath, consumer, progressListener, budget);
 	}
 }

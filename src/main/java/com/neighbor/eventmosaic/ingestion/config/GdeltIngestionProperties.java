@@ -2,6 +2,8 @@ package com.neighbor.eventmosaic.ingestion.config;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import java.net.URI;
@@ -22,6 +24,7 @@ import org.springframework.validation.annotation.Validated;
  * @param http ограничения и timeout внешнего HTTP
  * @param zip ограничения безопасной распаковки
  * @param continuity lease и first-run policy
+ * @param automatic настройки автоматического запуска и ограниченной фоновой работы
  * @param oneShotEnabled явное включение однократного trigger
  */
 @Validated
@@ -32,6 +35,7 @@ public record GdeltIngestionProperties(
 		@DefaultValue @Valid @NotNull Http http,
 		@DefaultValue @Valid @NotNull Zip zip,
 		@DefaultValue @Valid @NotNull Continuity continuity,
+		@DefaultValue @Valid @NotNull Automatic automatic,
 		@DefaultValue("false") boolean oneShotEnabled
 ) {
 
@@ -42,6 +46,7 @@ public record GdeltIngestionProperties(
 		Objects.requireNonNull(http, "http must not be null");
 		Objects.requireNonNull(zip, "zip must not be null");
 		Objects.requireNonNull(continuity, "continuity must not be null");
+		Objects.requireNonNull(automatic, "automatic must not be null");
 	}
 
 	/**
@@ -112,11 +117,86 @@ public record GdeltIngestionProperties(
 			if (firstRunPolicy == FirstRunPolicy.FIXED && firstRunStartAt == null) {
 				throw new IllegalArgumentException("firstRunStartAt is required for FIXED firstRunPolicy");
 			}
-			if (firstRunPolicy == FirstRunPolicy.LATEST && firstRunStartAt != null) {
-				throw new IllegalArgumentException("firstRunStartAt must be absent for LATEST firstRunPolicy");
+			if (firstRunPolicy != FirstRunPolicy.FIXED && firstRunStartAt != null) {
+				throw new IllegalArgumentException(
+						"firstRunStartAt is allowed only for FIXED firstRunPolicy");
 			}
 			if (firstRunStartAt != null && !GdeltSourceContract.isUpdateBoundary(firstRunStartAt)) {
 				throw new IllegalArgumentException("firstRunStartAt must align to a 15-minute UTC boundary");
+			}
+		}
+	}
+
+	/**
+	 * Настройки одного последовательного автоматического worker и ограниченной
+	 * фоновой работы ingestion.
+	 *
+	 * @param enabled разрешен ли автоматический запуск в обычном web-процессе
+	 * @param pollDelay задержка от terminal завершения до следующего запуска
+	 * @param cycleLease срок глобального владения одним ingestion cycle
+	 * @param shutdownGrace максимальное ожидание cooperative остановки worker
+	 * @param schedulerStaleBase базовый порог устаревшего scheduler
+	 * @param sourceOutageThreshold порог недоступности источника
+	 * @param dueWorkLimit максимум локальной due work за один cycle
+	 * @param receiptAudit настройки ограниченной проверки terminal receipts
+	 */
+	public record Automatic(
+			@DefaultValue("false") boolean enabled,
+			@DefaultValue("1m") @NotNull Duration pollDelay,
+			@DefaultValue("15m") @NotNull Duration cycleLease,
+			@DefaultValue("30s") @NotNull Duration shutdownGrace,
+			@DefaultValue("5m") @NotNull Duration schedulerStaleBase,
+			@DefaultValue("30m") @NotNull Duration sourceOutageThreshold,
+			@DefaultValue("256") @Min(1) @Max(1024) int dueWorkLimit,
+			@DefaultValue @Valid @NotNull ReceiptAudit receiptAudit
+	) {
+
+		/** Проверяет локальные положительные границы без зависимости от Spring. */
+		public Automatic {
+			requirePositive(pollDelay, "pollDelay");
+			requirePositive(cycleLease, "cycleLease");
+			requirePositive(shutdownGrace, "shutdownGrace");
+			requirePositive(schedulerStaleBase, "schedulerStaleBase");
+			requirePositive(sourceOutageThreshold, "sourceOutageThreshold");
+			if (dueWorkLimit < 1 || dueWorkLimit > 1024) {
+				throw new IllegalArgumentException("dueWorkLimit must be between 1 and 1024");
+			}
+			Objects.requireNonNull(receiptAudit, "receiptAudit must not be null");
+		}
+
+		/**
+		 * Вычисляет порог stale так, чтобы долгий штатный cycle не считался
+		 * остановившимся scheduler.
+		 *
+		 * @param operationDeadline общая deadline одного cycle
+		 * @return большее из базового порога и двух poll delay плюс deadline
+		 */
+		public Duration effectiveSchedulerStaleThreshold(Duration operationDeadline) {
+			requirePositive(operationDeadline, "operationDeadline");
+			Duration cycleAllowance = pollDelay.multipliedBy(2).plus(operationDeadline);
+			return schedulerStaleBase.compareTo(cycleAllowance) >= 0
+					? schedulerStaleBase
+					: cycleAllowance;
+		}
+
+	}
+
+	/**
+	 * Настройки небольшой периодической проверки уже сохраненных receipts.
+	 *
+	 * @param interval минимальный интервал между проверками
+	 * @param batchSize максимум receipts в одной проверке
+	 */
+	public record ReceiptAudit(
+			@DefaultValue("15m") @NotNull Duration interval,
+			@DefaultValue("2") @Positive int batchSize
+	) {
+
+		/** Проверяет положительные границы независимо от Spring binding. */
+		public ReceiptAudit {
+			requirePositive(interval, "interval");
+			if (batchSize <= 0) {
+				throw new IllegalArgumentException("batchSize must be positive");
 			}
 		}
 	}

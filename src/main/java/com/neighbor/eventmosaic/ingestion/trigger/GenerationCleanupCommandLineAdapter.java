@@ -1,11 +1,9 @@
 package com.neighbor.eventmosaic.ingestion.trigger;
 
-import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupCommandLine;
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService;
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService.GenerationCleanupCommand;
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService.GenerationCleanupPlan;
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService.GenerationCleanupResult;
-import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.config.GenerationCleanupCommandProperties;
 import java.io.IOException;
 import java.io.InputStream;
@@ -18,7 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
@@ -31,9 +29,7 @@ import tools.jackson.databind.ObjectMapper;
  * подменяет будущий защищенный асинхронный Operator API.
  */
 @Component
-@ConditionalOnProperty(
-		prefix = GenerationCleanupCommandLine.PROPERTY_PREFIX,
-		name = "mode")
+@Conditional(IngestionRuntimeModeCondition.GenerationCleanup.class)
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class GenerationCleanupCommandLineAdapter implements ApplicationRunner {
 
@@ -42,35 +38,23 @@ public class GenerationCleanupCommandLineAdapter implements ApplicationRunner {
 
 	private final GenerationCleanupService cleanupService;
 	private final GenerationCleanupCommandProperties properties;
-	private final GdeltIngestionProperties ingestionProperties;
 	private final ObjectMapper objectMapper;
 
 	/** Создает local fallback из cleanup service, настроек запуска и JSON mapper. */
 	public GenerationCleanupCommandLineAdapter(
 			GenerationCleanupService cleanupService,
 			GenerationCleanupCommandProperties properties,
-			GdeltIngestionProperties ingestionProperties,
 			ObjectMapper objectMapper
 	) {
 		this.cleanupService = Objects.requireNonNull(
 				cleanupService, "cleanupService must not be null");
 		this.properties = Objects.requireNonNull(properties, "properties must not be null");
-		this.ingestionProperties = Objects.requireNonNull(
-				ingestionProperties, "ingestionProperties must not be null");
 		this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
 	}
 
 	@Override
 	public void run(ApplicationArguments arguments) {
 		Objects.requireNonNull(arguments, "arguments must not be null");
-		if (!GenerationCleanupCommandLine.isRequested(arguments.getSourceArgs())) {
-			throw new IllegalArgumentException(
-					"generation cleanup mode must be supplied as a command-line option");
-		}
-		if (ingestionProperties.oneShotEnabled()) {
-			throw new IllegalArgumentException(
-					"generation cleanup cannot run with ingestion one-shot enabled");
-		}
 		if (properties.mode() == null) {
 			throw new IllegalArgumentException("generation cleanup mode is required");
 		}

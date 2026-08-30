@@ -3,15 +3,11 @@ package com.neighbor.eventmosaic.indexing;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
-import co.elastic.clients.elasticsearch.ElasticsearchClient;
-import co.elastic.clients.elasticsearch.core.OpenPointInTimeRequest;
-import co.elastic.clients.elasticsearch.indices.ElasticsearchIndicesClient;
-import co.elastic.clients.elasticsearch.indices.GetIndexRequest;
 import co.elastic.clients.elasticsearch.indices.GetIndexResponse;
 import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptQuery;
@@ -38,17 +34,16 @@ class ElasticsearchIndexLifecycleGatewayMetricsTest {
 	@Test
 	@DisplayName("Ошибка проверки exact target один раз завершает receipt до чтения документов")
 	void measuresReceiptPreCheckFailureOnce() throws IOException {
-		ElasticsearchClient client = mock(ElasticsearchClient.class);
-		ElasticsearchIndicesClient indices = mock(ElasticsearchIndicesClient.class);
+		ElasticsearchRequestExecutor requestExecutor =
+				mock(ElasticsearchRequestExecutor.class);
 		SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-		when(client.indices()).thenReturn(indices);
-		when(indices.get(any(GetIndexRequest.class)))
-				.thenReturn(GetIndexResponse.of(response -> response.indices(Map.of())));
+		doReturn(GetIndexResponse.of(response -> response.indices(Map.of())))
+				.when(requestExecutor).execute(any());
 		ElasticsearchIndexLifecycleGateway gateway =
 				new ElasticsearchIndexLifecycleGateway(
-						client,
-						new ElasticsearchIndexTemplateInstaller(client),
-						new IndexingMetrics(meterRegistry));
+						new ElasticsearchIndexTemplateInstaller(requestExecutor),
+						new IndexingMetrics(meterRegistry),
+						requestExecutor);
 		ArchiveIdentityDigest digest = ArchiveIdentityDigest.accumulator().finish();
 		ArchiveReceiptQuery query = new ArchiveReceiptQuery(
 				GdeltIndexKind.EVENT,
@@ -71,6 +66,6 @@ class ElasticsearchIndexLifecycleGatewayMetricsTest {
 		assertThat(timer).isNotNull();
 		assertThat(timer.count()).isEqualTo(1);
 		assertThat(meterRegistry.find(RECEIPT_DURATION_METER).timers()).hasSize(1);
-		verify(client, never()).openPointInTime(any(OpenPointInTimeRequest.class));
+		verify(requestExecutor, times(1)).execute(any());
 	}
 }

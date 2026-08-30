@@ -14,6 +14,7 @@ import com.neighbor.eventmosaic.ingestion.error.IngestionInterruption;
 import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.StagingStorageException;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.FileAlreadyExistsException;
@@ -101,7 +102,7 @@ public class ZipArchiveStager {
 				OperationBudget.start(Duration.ofDays(1)));
 	}
 
-	/** Извлекает CSV в пределах общего monotonic cycle budget. */
+	/** Извлекает CSV в пределах общей границы времени и владения циклом. */
 	public StagedArchive stage(
 			ArchiveAttempt attempt,
 			DownloadedArchive downloadedArchive,
@@ -109,7 +110,7 @@ public class ZipArchiveStager {
 			OperationBudget budget
 	) {
 		IngestionInterruption.throwIfRequested();
-		throwIfExpired(budget);
+		ensureAvailable(budget);
 		try {
 			StagingPathGuard.prepareDirectory(
 					paths.root(),
@@ -119,11 +120,14 @@ public class ZipArchiveStager {
 			IngestionInterruption.throwIfRequested(exception);
 			throw new StagingStorageException(IngestionErrorCode.FILESYSTEM_IO_FAILURE, exception);
 		}
+		ensureAvailable(budget);
 		if (!Files.isRegularFile(downloadedArchive.path(), LinkOption.NOFOLLOW_LINKS)) {
 			throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 		}
 		try {
+			ensureAvailable(budget);
 			Files.deleteIfExists(paths.csvPartPath());
+			ensureAvailable(budget);
 			if (Files.exists(paths.csvPath(), LinkOption.NOFOLLOW_LINKS)) {
 				verifyExistingCsv(
 						attempt.archive(),
@@ -134,7 +138,7 @@ public class ZipArchiveStager {
 			}
 			extractExpectedCsv(attempt, downloadedArchive.path(), paths, budget);
 			IngestionInterruption.throwIfRequested();
-			if (!publishAtomically(paths.csvPartPath(), paths.csvPath())) {
+			if (!publishAtomically(paths.csvPartPath(), paths.csvPath(), budget)) {
 				verifyExistingCsv(
 						attempt.archive(),
 						downloadedArchive.path(),
@@ -159,7 +163,7 @@ public class ZipArchiveStager {
 	 * записи во staging.
 	 *
 	 * @param state durable STAGED archive
-	 * @param budget monotonic budget проверки
+	 * @param budget общая граница времени и проверка владения циклом
 	 */
 	public void verifyReplaySource(
 			IngestionArchiveState state,
@@ -174,12 +178,13 @@ public class ZipArchiveStager {
 		DiscoveredArchive archive = state.archive();
 		StagedArchive staged = state.stagedArchive();
 		try {
-			throwIfExpired(budget);
+			ensureAvailable(budget);
 			if (!Files.isRegularFile(staged.archivePath(), LinkOption.NOFOLLOW_LINKS)
-					|| !Files.isRegularFile(staged.csvPath(), LinkOption.NOFOLLOW_LINKS)) {
+					|| !isRegularFile(staged.csvPath(), budget)) {
 				throw new StagingStorageException(
 						IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
+			ensureAvailable(budget);
 			long actualSize = Files.size(staged.archivePath());
 			String actualMd5 = Md5Checksum.calculate(staged.archivePath(), budget);
 			if (actualSize != archive.expectedSizeBytes()
@@ -209,7 +214,10 @@ public class ZipArchiveStager {
 			StagingPaths paths,
 			OperationBudget budget
 	) throws IOException {
-		try (OutputStream output = Files.newOutputStream(paths.csvPartPath(), StandardOpenOption.CREATE_NEW)) {
+		ensureAvailable(budget);
+		try (OutputStream output = Files.newOutputStream(
+				paths.csvPartPath(),
+				StandardOpenOption.CREATE_NEW)) {
 			inspectExpectedCsv(
 					attempt.archive(),
 					archivePath,
@@ -230,10 +238,11 @@ public class ZipArchiveStager {
 		int entryCount = 0;
 		long totalBytes = 0;
 		MessageDigest digest = Md5Checksum.newDigest();
+		ensureAvailable(budget);
 		try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(archivePath))) {
 			while (true) {
 				IngestionInterruption.throwIfRequested();
-				throwIfExpired(budget);
+				ensureLoopAvailable(budget);
 				ZipEntry entry = zip.getNextEntry();
 				if (entry == null) {
 					break;
@@ -241,11 +250,12 @@ public class ZipArchiveStager {
 				entryCount++;
 				validateEntry(entryCount, entry, expectedName, dataRoot);
 				totalBytes = copyEntry(zip, output, digest, totalBytes, budget);
+				ensureLoopAvailable(budget);
 				zip.closeEntry();
 			}
 		}
 		IngestionInterruption.throwIfRequested();
-		throwIfExpired(budget);
+		ensureAvailable(budget);
 		if (entryCount != 1) {
 			throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_CONTENT_MISMATCH);
 		}
@@ -278,9 +288,9 @@ public class ZipArchiveStager {
 		byte[] buffer = new byte[BUFFER_SIZE];
 		while (true) {
 			IngestionInterruption.throwIfRequested();
-			throwIfExpired(budget);
+			ensureLoopAvailable(budget);
 			int read = zip.read(buffer);
-			throwIfExpired(budget);
+			ensureLoopAvailable(budget);
 			if (read == -1) {
 				return totalBytes;
 			}
@@ -289,6 +299,7 @@ public class ZipArchiveStager {
 			if (entryBytes > maxEntryBytes || totalBytes > maxTotalBytes) {
 				throw new ArchiveContentViolationException(IngestionErrorCode.ZIP_LIMIT_EXCEEDED);
 			}
+			ensureLoopAvailable(budget);
 			output.write(buffer, 0, read);
 			digest.update(buffer, 0, read);
 		}
@@ -317,10 +328,11 @@ public class ZipArchiveStager {
 			OperationBudget budget
 	) {
 		try {
-			throwIfExpired(budget);
+			ensureAvailable(budget);
 			if (!Files.isRegularFile(csvPath, LinkOption.NOFOLLOW_LINKS)) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
+			ensureAvailable(budget);
 			long existingSize = Files.size(csvPath);
 			if (existingSize > maxEntryBytes) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
@@ -353,11 +365,17 @@ public class ZipArchiveStager {
 		return new StagedArchive(archive.path(), csvPath, archive.sizeBytes(), archive.md5());
 	}
 
-	private static boolean publishAtomically(Path partPath, Path finalPath) {
+	private static boolean publishAtomically(
+			Path partPath,
+			Path finalPath,
+			OperationBudget budget
+	) {
 		try {
+			ensureAvailable(budget);
 			if (!Files.isRegularFile(partPath, LinkOption.NOFOLLOW_LINKS)) {
 				throw new StagingStorageException(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT);
 			}
+			ensureAvailable(budget);
 			Files.createLink(finalPath, partPath);
 			return true;
 		} catch (UnsupportedOperationException exception) {
@@ -376,8 +394,23 @@ public class ZipArchiveStager {
 		TemporaryArtifactCleaner.delete(path, metrics, LOGGER);
 	}
 
-	private static void throwIfExpired(OperationBudget budget) {
-		if (!budget.hasRemaining()) {
+	private static boolean isRegularFile(Path path, OperationBudget budget) {
+		ensureAvailable(budget);
+		return Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS);
+	}
+
+	private static void ensureAvailable(OperationBudget budget) {
+		try {
+			budget.requireAvailable();
+		} catch (OperationDeadlineReachedException _) {
+			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void ensureLoopAvailable(OperationBudget budget) {
+		try {
+			budget.requireLoopAvailable();
+		} catch (OperationDeadlineReachedException _) {
 			throw new OperationDeadlineExceededException();
 		}
 	}

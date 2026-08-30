@@ -24,10 +24,6 @@ public class EventMosaicApplication {
 	public static void main(String[] args) {
 		boolean partitionRebuildCommand = PartitionRebuildCommandLine.isRequested(args);
 		boolean generationCleanupCommand = GenerationCleanupCommandLine.isRequested(args);
-		if (partitionRebuildCommand && generationCleanupCommand) {
-			throw new IllegalArgumentException(
-					"Only one maintenance command can run in one process");
-		}
 		boolean maintenanceCommand = partitionRebuildCommand || generationCleanupCommand;
 		SpringApplication application = createApplication(maintenanceCommand);
 		ConfigurableApplicationContext context = application.run(args);

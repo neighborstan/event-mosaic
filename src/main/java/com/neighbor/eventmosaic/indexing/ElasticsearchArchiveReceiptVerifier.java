@@ -1,6 +1,5 @@
 package com.neighbor.eventmosaic.indexing;
 
-import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch._types.ShardStatistics;
 import co.elastic.clients.elasticsearch._types.SortOrder;
@@ -15,6 +14,7 @@ import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
@@ -29,43 +29,63 @@ final class ElasticsearchArchiveReceiptVerifier {
 	private static final String PROCESSING_FINGERPRINT_FIELD = "processingFingerprint";
 	private static final String PIT_KEEP_ALIVE = "1m";
 
-	private final ElasticsearchClient client;
+	private final ElasticsearchRequestExecutor requestExecutor;
 
-	ElasticsearchArchiveReceiptVerifier(ElasticsearchClient client) {
-		this.client = Objects.requireNonNull(client, "client must not be null");
+	ElasticsearchArchiveReceiptVerifier(ElasticsearchRequestExecutor requestExecutor) {
+		this.requestExecutor = Objects.requireNonNull(
+				requestExecutor, "requestExecutor must not be null");
 	}
 
 	ArchiveReceiptVerification verify(ArchiveReceiptQuery query) throws IOException {
-		OpenPointInTimeResponse opened = client.openPointInTime(request -> request
+		return verify(query, ElasticsearchRequestContext.standalone());
+	}
+
+	ArchiveReceiptVerification verify(
+			ArchiveReceiptQuery query,
+			OperationBudget budget
+	) throws IOException {
+		return verify(query, ElasticsearchRequestContext.guarded(budget));
+	}
+
+	ArchiveReceiptVerification verify(
+			ArchiveReceiptQuery query,
+			ElasticsearchRequestContext context
+	) throws IOException {
+		OpenPointInTimeResponse opened = context.execute(
+				requestExecutor,
+				client -> client.openPointInTime(request -> request
 				.index(query.target().indexName())
 				.keepAlive(time -> time.time(PIT_KEEP_ALIVE))
 				.allowPartialSearchResults(false)
-				.ignoreUnavailable(false));
+				.ignoreUnavailable(false)));
 		PitCursor pit = new PitCursor(requirePitId(opened.id()));
 		Throwable primaryFailure = null;
 		try {
 			requireComplete(opened.shards());
-			return scan(query, pit);
+			return scan(query, pit, context);
 		}
 		catch (IOException | RuntimeException exception) {
 			primaryFailure = exception;
 			throw exception;
 		}
 		finally {
-			closePit(pit.id, primaryFailure);
+			closePit(pit.id, primaryFailure, context);
 		}
 	}
 
 	private ArchiveReceiptVerification scan(
 			ArchiveReceiptQuery query,
-			PitCursor pit
+			PitCursor pit,
+			ElasticsearchRequestContext context
 	) throws IOException {
 		List<FieldValue> searchAfter = List.of();
 		long actualCount = 0;
 		ArchiveIdentityDigest.Accumulator digest = ArchiveIdentityDigest.accumulator();
 		while (true) {
 			SearchRequest request = searchRequest(query, pit.id, searchAfter);
-			SearchResponse<Void> response = client.search(request);
+			SearchResponse<Void> response = context.execute(
+					requestExecutor,
+					client -> client.search(request));
 			requireComplete(response);
 			if (response.pitId() != null && !response.pitId().isBlank()) {
 				pit.id = response.pitId();
@@ -121,9 +141,15 @@ final class ElasticsearchArchiveReceiptVerifier {
 		return builder.build();
 	}
 
-	private void closePit(String pitId, Throwable primaryFailure) throws IOException {
+	private void closePit(
+			String pitId,
+			Throwable primaryFailure,
+			ElasticsearchRequestContext context
+	) throws IOException {
 		try {
-			var response = client.closePointInTime(request -> request.id(pitId));
+			var response = context.execute(
+					requestExecutor,
+					client -> client.closePointInTime(request -> request.id(pitId)));
 			if (!response.succeeded()) {
 				throw new IndexingAccessException(IndexingErrorCode.INDEXING_UNAVAILABLE);
 			}

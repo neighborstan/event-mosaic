@@ -10,6 +10,9 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltCsvRecord;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvRecordErrorCode;
 import com.neighbor.eventmosaic.gdelt.api.GdeltCsvSchemaException;
 import com.neighbor.eventmosaic.gdelt.api.GdeltRecordConsumer;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
@@ -19,6 +22,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -56,7 +60,11 @@ abstract class GdeltCsvReaderSupport<T> {
 			Path csvPath,
 			GdeltRecordConsumer<T> consumer
 	) {
-		return readCsv(csvPath, consumer, GdeltCsvProgressListener.ignoring());
+		return readCsv(
+				csvPath,
+				consumer,
+				GdeltCsvProgressListener.ignoring(),
+				standaloneBudget());
 	}
 
 	/**
@@ -67,8 +75,31 @@ abstract class GdeltCsvReaderSupport<T> {
 			GdeltRecordConsumer<T> consumer,
 			GdeltCsvProgressListener progressListener
 	) {
+		return readCsv(csvPath, consumer, progressListener, standaloneBudget());
+	}
+
+	/**
+	 * Открывает файл и читает его в пределах общей границы времени операции.
+	 */
+	protected final GdeltCsvReadSummary readCsv(
+			Path csvPath,
+			GdeltRecordConsumer<T> consumer,
+			OperationBudget budget
+	) {
+		return readCsv(csvPath, consumer, GdeltCsvProgressListener.ignoring(), budget);
+	}
+
+	/**
+	 * Открывает файл и повторно проверяет владение во время потокового чтения.
+	 */
+	protected final GdeltCsvReadSummary readCsv(
+			Path csvPath,
+			GdeltRecordConsumer<T> consumer,
+			GdeltCsvProgressListener progressListener,
+			OperationBudget budget
+	) {
 		Objects.requireNonNull(csvPath, "csvPath must not be null");
-		return readCsv(() -> strictUtf8Reader(csvPath), consumer, progressListener);
+		return readCsv(() -> strictUtf8Reader(csvPath), consumer, progressListener, budget);
 	}
 
 	/**
@@ -79,7 +110,11 @@ abstract class GdeltCsvReaderSupport<T> {
 			Reader source,
 			GdeltRecordConsumer<T> consumer
 	) {
-		return readCsv(source, consumer, GdeltCsvProgressListener.ignoring());
+		return readCsv(
+				source,
+				consumer,
+				GdeltCsvProgressListener.ignoring(),
+				standaloneBudget());
 	}
 
 	/**
@@ -90,24 +125,46 @@ abstract class GdeltCsvReaderSupport<T> {
 			GdeltRecordConsumer<T> consumer,
 			GdeltCsvProgressListener progressListener
 	) {
+		return readCsv(source, consumer, progressListener, standaloneBudget());
+	}
+
+	/** Узкая точка для проверки общего ограничения времени в unit tests. */
+	final GdeltCsvReadSummary readCsv(
+			Reader source,
+			GdeltRecordConsumer<T> consumer,
+			OperationBudget budget
+	) {
+		return readCsv(source, consumer, GdeltCsvProgressListener.ignoring(), budget);
+	}
+
+	/** Узкая точка для проверки ограничения времени и отклоненных строк. */
+	final GdeltCsvReadSummary readCsv(
+			Reader source,
+			GdeltRecordConsumer<T> consumer,
+			GdeltCsvProgressListener progressListener,
+			OperationBudget budget
+	) {
 		Objects.requireNonNull(source, "source must not be null");
-		return readCsv(() -> source, consumer, progressListener);
+		return readCsv(() -> source, consumer, progressListener, budget);
 	}
 
 	private GdeltCsvReadSummary readCsv(
 			ReaderOpener sourceOpener,
 			GdeltRecordConsumer<T> consumer,
-			GdeltCsvProgressListener progressListener
+			GdeltCsvProgressListener progressListener,
+			OperationBudget budget
 	) {
 		Objects.requireNonNull(consumer, "consumer must not be null");
 		Objects.requireNonNull(progressListener, "progressListener must not be null");
+		Objects.requireNonNull(budget, "budget must not be null");
 		GdeltCsvCounters counters = new GdeltCsvCounters();
 		try {
 			GdeltCsvReadSummary summary = readSource(
 					sourceOpener,
 					consumer,
 					progressListener,
-					counters);
+					counters,
+					budget);
 			publish(counters, GdeltCsvFileOutcome.COMPLETED);
 			return summary;
 		} catch (DownstreamCallbackFailure failure) {
@@ -150,13 +207,18 @@ abstract class GdeltCsvReaderSupport<T> {
 			ReaderOpener sourceOpener,
 			GdeltRecordConsumer<T> consumer,
 			GdeltCsvProgressListener progressListener,
-			GdeltCsvCounters counters
+			GdeltCsvCounters counters,
+			OperationBudget budget
 	) throws IOException {
+		budget.requireAvailable();
 		try (Reader source = sourceOpener.open()) {
-			GdeltTsvRecordReader records = new GdeltTsvRecordReader(source, maxRecordChars);
+			GdeltTsvRecordReader records = new GdeltTsvRecordReader(
+					source,
+					maxRecordChars,
+					budget);
 			GdeltTsvRecord csvRecord;
 			while ((csvRecord = records.readRecord()) != null) {
-				processRecord(csvRecord, consumer, progressListener, counters);
+				processRecord(csvRecord, consumer, progressListener, counters, budget);
 			}
 			if (!counters.hasShapeCompatibleRecords()) {
 				throw new GdeltCsvSchemaException(GdeltCsvErrorCode.CSV_SCHEMA_MISMATCH);
@@ -169,25 +231,35 @@ abstract class GdeltCsvReaderSupport<T> {
 			GdeltTsvRecord csvRecord,
 			GdeltRecordConsumer<T> consumer,
 			GdeltCsvProgressListener progressListener,
-			GdeltCsvCounters counters
+			GdeltCsvCounters counters,
+			OperationBudget budget
 	) {
 		if (csvRecord.fields().length != expectedFieldCount) {
 			counters.rejected(
 					csvRecord.lineNumber(),
 					GdeltCsvRecordErrorCode.FIELD_COUNT_MISMATCH);
-			reportRejectionProgress(progressListener, counters.invalidRecords());
+			reportRejectionProgress(
+					progressListener,
+					counters.invalidRecords(),
+					budget);
 			return;
 		}
 		counters.shapeCompatible();
 		GdeltCsvMappingResult<T> mapped = mapper.map(csvRecord.fields());
 		if (!mapped.accepted()) {
 			counters.rejected(csvRecord.lineNumber(), mapped.rejectionReason());
-			reportRejectionProgress(progressListener, counters.invalidRecords());
+			reportRejectionProgress(
+					progressListener,
+					counters.invalidRecords(),
+					budget);
 			return;
 		}
 		counters.accepted();
+		budget.requireLoopAvailable();
 		try {
 			consumer.accept(new GdeltCsvRecord<>(csvRecord.lineNumber(), mapped.value()));
+		} catch (OperationDeadlineReachedException | OperationOwnershipLostException signal) {
+			throw signal;
 		} catch (RuntimeException exception) {
 			throw new DownstreamCallbackFailure(exception);
 		}
@@ -195,10 +267,14 @@ abstract class GdeltCsvReaderSupport<T> {
 
 	private static void reportRejectionProgress(
 			GdeltCsvProgressListener progressListener,
-			long invalidRecords
+			long invalidRecords,
+			OperationBudget budget
 	) {
+		budget.requireLoopAvailable();
 		try {
 			progressListener.onInvalidRecords(invalidRecords);
+		} catch (OperationDeadlineReachedException | OperationOwnershipLostException signal) {
+			throw signal;
 		} catch (RuntimeException exception) {
 			throw new DownstreamCallbackFailure(exception);
 		}
@@ -210,6 +286,10 @@ abstract class GdeltCsvReaderSupport<T> {
 				StandardCharsets.UTF_8.newDecoder()
 						.onMalformedInput(CodingErrorAction.REPORT)
 						.onUnmappableCharacter(CodingErrorAction.REPORT));
+	}
+
+	private static OperationBudget standaloneBudget() {
+		return OperationBudget.start(Duration.ofDays(1));
 	}
 
 	private void publish(GdeltCsvCounters counters, GdeltCsvFileOutcome outcome) {

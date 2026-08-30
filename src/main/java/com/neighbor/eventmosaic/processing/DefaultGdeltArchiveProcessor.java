@@ -42,6 +42,8 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import io.micrometer.core.instrument.Timer;
 import java.util.ArrayList;
 import java.util.List;
@@ -115,7 +117,8 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 								(consumer, sourceProgressListener) -> eventReader.read(
 										request.csvPath(),
 										consumer,
-										sourceProgressListener),
+										sourceProgressListener,
+										request.operationBudget()),
 								sourceRecord -> eventMapper.map(sourceRecord, request),
 								bulkSize,
 								maxBulkBytes);
@@ -129,7 +132,8 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 								(consumer, sourceProgressListener) -> mentionReader.read(
 										request.csvPath(),
 										consumer,
-										sourceProgressListener),
+										sourceProgressListener,
+										request.operationBudget()),
 								sourceRecord -> mentionMapper.map(sourceRecord, request),
 								bulkSize,
 								maxBulkBytes);
@@ -190,6 +194,9 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			metrics.archiveOutcome(request.kind(), result.outcome());
 			return result;
 		}
+		catch (OperationOwnershipLostException signal) {
+			throw signal;
+		}
 		catch (OwnershipLostSignal signal) {
 			reportSuppressedDiagnostic(signal, diagnosticListener);
 			ArchiveProcessingResult result = ArchiveProcessingResult.ownershipLost(
@@ -198,7 +205,8 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 			metrics.archiveOutcome(request.kind(), result.outcome());
 			return result;
 		}
-		catch (DeadlineExceededSignal _) {
+		catch (OperationDeadlineReachedException signal) {
+			reportSuppressedDiagnostic(signal, diagnosticListener);
 			return expectedFailure(
 					request.kind(),
 					accumulator.progress(),
@@ -439,7 +447,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void accept(DocumentMappingResult<D> mapping) {
-			ensureRemaining(operationBudget);
+			ensureLoopRemaining(operationBudget);
 			deliveredRecords = Math.incrementExact(deliveredRecords);
 			if (!mapping.accepted()) {
 				mappingRejectedRecords = Math.incrementExact(mappingRejectedRecords);
@@ -475,7 +483,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 		}
 
 		private void sourceInvalidProgress(long invalidRecords) {
-			ensureRemaining(operationBudget);
+			ensureLoopRemaining(operationBudget);
 			if (invalidRecords < sourceInvalidRecords) {
 				throw new IllegalStateException(
 						"source invalid progress must be monotonic");
@@ -513,7 +521,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 						indexKind,
 						indexTarget,
 						writeMode,
-						documents));
+						documents), operationBudget);
 			}
 			catch (IndexTargetUnavailableException
 					| EventIdentityConflictException
@@ -543,7 +551,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 
 		private void refreshIndex() {
 			ensureRemaining(operationBudget);
-			indexWriter.refresh(indexKind, indexTarget);
+			indexWriter.refresh(indexKind, indexTarget, operationBudget);
 		}
 
 		private ArchiveReceiptVerification verifyReceipt() {
@@ -556,7 +564,7 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 					processingFingerprint,
 					succeededOperations,
 					expected,
-					receiptPageSize));
+					receiptPageSize), operationBudget);
 			receiptDocuments = receipt.actualDocumentCount();
 			checkpoint();
 			if (!receipt.matched()) {
@@ -595,9 +603,11 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 	}
 
 	private static void ensureRemaining(OperationBudget budget) {
-		if (!budget.hasRemaining()) {
-			throw new DeadlineExceededSignal();
-		}
+		budget.requireAvailable();
+	}
+
+	private static void ensureLoopRemaining(OperationBudget budget) {
+		budget.requireLoopAvailable();
 	}
 
 	/**
@@ -609,16 +619,6 @@ final class DefaultGdeltArchiveProcessor implements GdeltArchiveProcessor {
 
 		private OwnershipLostSignal() {
 			super(null, null, true, false);
-		}
-	}
-
-	/** Внутренний control-flow signal исчерпанной operation deadline. */
-	private static final class DeadlineExceededSignal extends RuntimeException {
-
-		private static final long serialVersionUID = 1L;
-
-		private DeadlineExceededSignal() {
-			super(null, null, false, false);
 		}
 	}
 

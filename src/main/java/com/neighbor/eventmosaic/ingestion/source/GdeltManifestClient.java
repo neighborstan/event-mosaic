@@ -12,6 +12,10 @@ import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededExcepti
 import com.neighbor.eventmosaic.ingestion.error.RemoteResponseRejectedException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
+import com.neighbor.eventmosaic.shared.time.OperationEffectiveTimeout;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
+import com.neighbor.eventmosaic.shared.time.OperationTimeoutOrigin;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -21,8 +25,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.time.Clock;
+import java.time.Duration;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -99,56 +103,67 @@ public class GdeltManifestClient {
 		return fetchLatestManifest(OperationBudget.start(Duration.ofDays(1)));
 	}
 
-	/** Загружает manifest в пределах общего monotonic cycle budget. */
+	/** Загружает manifest в пределах общей монотонной границы времени цикла. */
 	public String fetchLatestManifest(OperationBudget budget) {
 		IngestionInterruption.throwIfRequested();
-		Duration effectiveTimeout = requireRemaining(budget);
-		boolean cycleLimited = effectiveTimeout.compareTo(requestTimeout) < 0;
-		long deadlineNanos = GdeltHttpBodyDeadline.deadlineAfter(effectiveTimeout);
+		OperationEffectiveTimeout effectiveTimeout = effectiveTimeout(budget);
+		long deadlineNanos = GdeltHttpBodyDeadline.deadlineAfter(
+				effectiveTimeout.timeout());
 		HttpRequest request = HttpRequest.newBuilder(manifestUri)
-				.timeout(effectiveTimeout)
+				.timeout(effectiveTimeout.timeout())
 				.GET()
 				.build();
 		try {
-			HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-			try (InputStream body = response.body();
-					GdeltHttpBodyDeadline deadline = GdeltHttpBodyDeadline.start(body, deadlineNanos)) {
-				if (response.statusCode() != 200) {
-					int status = response.statusCode();
-					if (GdeltHttpStatusPolicy.isTransient(status)) {
-						throw new RemoteSourceAccessException(
-								IngestionErrorCode.MANIFEST_HTTP_ERROR,
-								IngestionErrorContext.forHttpStatus(status),
-								retryAfterParser.parse(response.headers()));
+			HttpResponse<InputStream> response = httpClient.send(
+					request,
+					HttpResponse.BodyHandlers.ofInputStream());
+			try (InputStream body = response.body()) {
+				ensureAvailableAfterExternalResult(budget);
+				try (GdeltHttpBodyDeadline deadline = GdeltHttpBodyDeadline.start(
+						body,
+						deadlineNanos)) {
+					if (response.statusCode() != 200) {
+						int status = response.statusCode();
+						if (GdeltHttpStatusPolicy.isTransient(status)) {
+							throw new RemoteSourceAccessException(
+									IngestionErrorCode.MANIFEST_HTTP_ERROR,
+									IngestionErrorContext.forHttpStatus(status),
+									retryAfterParser.parse(response.headers()));
+						}
+						throw new RemoteResponseRejectedException(
+								IngestionErrorCode.MANIFEST_HTTP_STATUS_REJECTED,
+								IngestionErrorContext.forHttpStatus(status));
 					}
-					throw new RemoteResponseRejectedException(
-							IngestionErrorCode.MANIFEST_HTTP_STATUS_REJECTED,
-							IngestionErrorContext.forHttpStatus(status));
+					long contentLength = response.headers()
+							.firstValueAsLong("Content-Length")
+							.orElse(-1);
+					if (contentLength > maxManifestBytes) {
+						throw new RemoteResponseRejectedException(
+								IngestionErrorCode.MANIFEST_SIZE_LIMIT_EXCEEDED);
+					}
+					byte[] manifest = readWithinDeadline(
+							body,
+							deadline,
+							budget,
+							effectiveTimeout);
+					if (deadline.expired()) {
+						throwIfGuardLimitedTimeout(budget, effectiveTimeout);
+						throw new RemoteSourceAccessException(
+								IngestionErrorCode.MANIFEST_TIMEOUT);
+					}
+					IngestionInterruption.throwIfRequested();
+					return new String(manifest, StandardCharsets.UTF_8);
 				}
-				long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
-				if (contentLength > maxManifestBytes) {
-					throw new RemoteResponseRejectedException(
-							IngestionErrorCode.MANIFEST_SIZE_LIMIT_EXCEEDED);
-				}
-				byte[] manifest = readWithinDeadline(body, deadline, budget, cycleLimited);
-				if (deadline.expired()) {
-					throwIfCycleLimited(cycleLimited);
-					throwIfExpired(budget);
-					throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_TIMEOUT);
-				}
-				IngestionInterruption.throwIfRequested();
-				return new String(manifest, StandardCharsets.UTF_8);
 			}
 		} catch (InterruptedException exception) {
 			Thread.currentThread().interrupt();
 			throw new IngestionInterruptedException(exception);
 		} catch (HttpTimeoutException exception) {
-			throwIfCycleLimited(cycleLimited);
-			throwIfExpired(budget);
+			throwIfGuardLimitedTimeout(budget, effectiveTimeout);
 			throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_TIMEOUT, exception);
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
-			throwIfExpired(budget);
+			ensureAvailable(budget);
 			throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_HTTP_ERROR, exception);
 		}
 	}
@@ -157,17 +172,17 @@ public class GdeltManifestClient {
 			InputStream body,
 			GdeltHttpBodyDeadline deadline,
 			OperationBudget budget,
-			boolean cycleLimited
+			OperationEffectiveTimeout effectiveTimeout
 	) throws IOException {
 		try {
 			return readBounded(body, budget);
 		} catch (IOException exception) {
 			IngestionInterruption.throwIfRequested(exception);
-			throwIfExpired(budget);
 			if (deadline.expired()) {
-				throwIfCycleLimited(cycleLimited);
+				throwIfGuardLimitedTimeout(budget, effectiveTimeout);
 				throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_TIMEOUT);
 			}
+			ensureAvailable(budget);
 			throw exception;
 		}
 	}
@@ -178,9 +193,9 @@ public class GdeltManifestClient {
 		long total = 0;
 		while (true) {
 			IngestionInterruption.throwIfRequested();
-			throwIfExpired(budget);
+			ensureLoopAvailable(budget);
 			int read = inputStream.read(buffer);
-			throwIfExpired(budget);
+			ensureLoopAvailable(budget);
 			if (read == -1) {
 				break;
 			}
@@ -194,24 +209,53 @@ public class GdeltManifestClient {
 		return output.toByteArray();
 	}
 
-	private Duration requireRemaining(OperationBudget budget) {
-		Duration timeout = budget.cap(requestTimeout);
-		if (timeout.isZero()) {
-			throw new OperationDeadlineExceededException();
-		}
-		return timeout;
-	}
-
-	private static void throwIfExpired(OperationBudget budget) {
-		if (!budget.hasRemaining()) {
+	private OperationEffectiveTimeout effectiveTimeout(OperationBudget budget) {
+		try {
+			return budget.effectiveTimeout(requestTimeout);
+		} catch (OperationDeadlineReachedException _) {
 			throw new OperationDeadlineExceededException();
 		}
 	}
 
-	private static void throwIfCycleLimited(boolean cycleLimited) {
-		if (cycleLimited) {
+	private static void ensureAvailable(OperationBudget budget) {
+		requireAvailable(budget);
+	}
+
+	private static Duration requireAvailable(OperationBudget budget) {
+		try {
+			return budget.requireAvailable();
+		} catch (OperationDeadlineReachedException _) {
 			throw new OperationDeadlineExceededException();
 		}
 	}
 
+	private static void ensureAvailableAfterExternalResult(OperationBudget budget) {
+		try {
+			budget.requireAvailableAfterExternalResult();
+		}
+		catch (OperationDeadlineReachedException _) {
+			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void ensureLoopAvailable(OperationBudget budget) {
+		try {
+			budget.requireLoopAvailable();
+		} catch (OperationDeadlineReachedException _) {
+			throw new OperationDeadlineExceededException();
+		}
+	}
+
+	private static void throwIfGuardLimitedTimeout(
+			OperationBudget budget,
+			OperationEffectiveTimeout effectiveTimeout
+	) {
+		OperationTimeoutOrigin origin = budget.resolveTimeoutOrigin(effectiveTimeout);
+		if (origin == OperationTimeoutOrigin.OPERATION_DEADLINE) {
+			throw new OperationDeadlineExceededException();
+		}
+		if (origin == OperationTimeoutOrigin.LEASE_SAFETY) {
+			throw new OperationOwnershipLostException();
+		}
+	}
 }

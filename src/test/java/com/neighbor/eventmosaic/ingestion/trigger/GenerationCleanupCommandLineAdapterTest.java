@@ -8,7 +8,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationStatus;
 import com.neighbor.eventmosaic.indexing.api.IndexMaintenancePhase;
@@ -20,13 +19,10 @@ import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService.Generatio
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService.GenerationCleanupResult;
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService.GenerationWriteOutcome;
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService.ReplaySourcePlan;
-import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
-import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.config.GenerationCleanupCommandProperties;
 import com.neighbor.eventmosaic.ingestion.config.GenerationCleanupCommandProperties.Mode;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
@@ -129,43 +125,6 @@ class GenerationCleanupCommandLineAdapterTest {
 	}
 
 	@Test
-	@DisplayName("Скрытая настройка окружения не запускает очистку поколения")
-	void modeMustBeSuppliedAsCommandLineOption() {
-		GenerationCleanupCommandLineAdapter adapter = adapter(
-				new GenerationCleanupCommandProperties(
-						Mode.INSPECT_CLEANUP,
-						"p20260727",
-						GENERATION_UUID,
-						temporaryDirectory.resolve("plan.json"),
-						null,
-						null));
-
-		assertThatThrownBy(() -> adapter.run(new DefaultApplicationArguments(new String[0])))
-				.isInstanceOf(IllegalArgumentException.class)
-				.hasMessage("generation cleanup mode must be supplied as a command-line option");
-		verifyNoInteractions(cleanupService);
-	}
-
-	@Test
-	@DisplayName("Очистка поколения не совмещается с ingestion one-shot")
-	void cleanupRejectsConcurrentIngestionOneShot() {
-		GenerationCleanupCommandLineAdapter adapter = adapter(
-				new GenerationCleanupCommandProperties(
-						Mode.INSPECT_CLEANUP,
-						"p20260727",
-						GENERATION_UUID,
-						temporaryDirectory.resolve("plan.json"),
-						null,
-						null),
-				ingestionProperties(true));
-
-		assertThatThrownBy(() -> adapter.run(arguments(Mode.INSPECT_CLEANUP)))
-				.isInstanceOf(IllegalArgumentException.class)
-				.hasMessage("generation cleanup cannot run with ingestion one-shot enabled");
-		verifyNoInteractions(cleanupService);
-	}
-
-	@Test
 	@DisplayName("Незавершенная очистка возвращает ошибку процесса")
 	void deferredCleanupFailsCommand() throws Exception {
 		Path planFile = temporaryDirectory.resolve("deferred-plan.json");
@@ -196,40 +155,15 @@ class GenerationCleanupCommandLineAdapterTest {
 	private GenerationCleanupCommandLineAdapter adapter(
 			GenerationCleanupCommandProperties properties
 	) {
-		return adapter(properties, ingestionProperties(false));
-	}
-
-	private GenerationCleanupCommandLineAdapter adapter(
-			GenerationCleanupCommandProperties properties,
-			GdeltIngestionProperties ingestionProperties
-	) {
 		return new GenerationCleanupCommandLineAdapter(
 				cleanupService,
 				properties,
-				ingestionProperties,
 				objectMapper);
 	}
 
 	private DefaultApplicationArguments arguments(Mode mode) {
 		return new DefaultApplicationArguments(
 				"--" + GenerationCleanupCommandLine.PROPERTY_PREFIX + ".mode=" + mode);
-	}
-
-	private GdeltIngestionProperties ingestionProperties(boolean oneShotEnabled) {
-		return new GdeltIngestionProperties(
-				GdeltSourceContract.OFFICIAL_DOWNLOAD_BASE_URI,
-				temporaryDirectory,
-				new GdeltIngestionProperties.Http(
-						65536,
-						1024 * 1024,
-						Duration.ofSeconds(1),
-						Duration.ofSeconds(5)),
-				new GdeltIngestionProperties.Zip(4, 1024 * 1024, 1024 * 1024),
-				new GdeltIngestionProperties.Continuity(
-						Duration.ofMinutes(15),
-						FirstRunPolicy.LATEST,
-						null),
-				oneShotEnabled);
 	}
 
 	private GenerationCleanupPlan plan() {

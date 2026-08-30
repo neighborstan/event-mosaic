@@ -39,6 +39,8 @@ import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
 import com.neighbor.eventmosaic.shared.error.SafeExceptionProjection;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.function.Function;
@@ -137,9 +139,14 @@ public class IngestionRunService {
 	AcquisitionCycleResult runOneShot(OperationBudget budget) {
 		return observeAcquisition(
 				() -> executeOneShot(budget),
-				result -> result.sourcePollDeferred()
-						? IngestionOperationMetricOutcome.RETRY_DEFERRED
-						: IngestionOperationMetricOutcome.COMPLETED);
+				result -> {
+					if (result.sourcePollOwnershipLost()) {
+						return IngestionOperationMetricOutcome.OWNERSHIP_LOST;
+					}
+					return result.sourcePollDeferred()
+							? IngestionOperationMetricOutcome.RETRY_DEFERRED
+							: IngestionOperationMetricOutcome.COMPLETED;
+				});
 	}
 
 	private <T> T observeAcquisition(
@@ -160,6 +167,10 @@ public class IngestionRunService {
 		}
 		catch (OperationDeadlineExceededException exception) {
 			outcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
+			throw exception;
+		}
+		catch (OperationOwnershipLostException exception) {
+			outcome = IngestionOperationMetricOutcome.OWNERSHIP_LOST;
 			throw exception;
 		}
 		catch (IngestionInterruptedException exception) {
@@ -194,6 +205,8 @@ public class IngestionRunService {
 				| OperationDeadlineExceededException
 				| IngestionInterruptedException exception) {
 			logExpectedCycleFailure(exception);
+			throw exception;
+		} catch (OperationOwnershipLostException exception) {
 			throw exception;
 		} catch (RuntimeException exception) {
 			metrics.error(IngestionErrorCode.INTERNAL_ERROR);
@@ -235,22 +248,30 @@ public class IngestionRunService {
 		try {
 			update = discoverAndRegister(budget, true);
 			requireRemaining(budget);
-			sourcePollLedger.markSucceeded(
+			AttemptTransitionResult sourcePollTransition = sourcePollLedger.markSucceeded(
 					GdeltSourceContract.SOURCE_NAME,
 					pollAttempt.token());
+			if (sourcePollTransition != AttemptTransitionResult.APPLIED) {
+				return new AcquisitionCycleResult(Optional.empty(), false, true);
+			}
+			requireRemaining(budget);
 		}
 		catch (ApplicationException exception) {
 			if (exception instanceof IngestionFailureContract failure) {
-				persistSourcePollFailure(pollAttempt, failure, exception);
+				persistSourcePollFailure(pollAttempt, failure, exception, budget);
 			}
 			throw exception;
 		}
+		catch (OperationOwnershipLostException exception) {
+			throw exception;
+		}
 		catch (RuntimeException exception) {
-			persistSourcePollInternalFailure(pollAttempt, exception);
+			persistSourcePollInternalFailure(pollAttempt, exception, budget);
 			throw exception;
 		}
 		return new AcquisitionCycleResult(
 				Optional.of(processRegisteredUpdate(update, budget, true)),
+				false,
 				false);
 	}
 
@@ -332,6 +353,7 @@ public class IngestionRunService {
 		requireRemaining(budget);
 		Optional<IngestionArchiveState> existing = archiveLedger.findByIdempotencyKey(
 				archive.idempotencyKey());
+		requireRemaining(budget);
 		if (existing.isPresent()
 				&& existing.orElseThrow().status() == IngestionArchiveStatus.STAGED) {
 			metrics.archiveOutcome(archive.archiveType(), ArchiveOutcome.SKIPPED);
@@ -358,6 +380,7 @@ public class IngestionRunService {
 			DownloadedArchive downloaded = boundedAdapters
 					? archiveDownloader.download(attempt, paths, budget)
 					: archiveDownloader.download(attempt, paths);
+			requireRemaining(budget);
 			downloadCompleted = true;
 			metrics.downloadOutcome(
 					archive.archiveType(),
@@ -366,11 +389,12 @@ public class IngestionRunService {
 			StagedArchive staged = boundedAdapters
 					? archiveStager.stage(attempt, downloaded, paths, budget)
 					: archiveStager.stage(attempt, downloaded, paths);
+			requireRemaining(budget);
 			if (ownershipLost(
 					archive,
 					attempt,
 					archiveLedger.markStaged(archive.idempotencyKey(), attempt.token(), staged))) {
-				return;
+				throw new OperationOwnershipLostException();
 			}
 			metrics.archiveOutcome(archive.archiveType(), ArchiveOutcome.STAGED);
 			LOGGER.atInfo()
@@ -386,10 +410,17 @@ public class IngestionRunService {
 				| StagingStorageException
 				| OperationDeadlineExceededException
 				| IngestionInterruptedException exception) {
-			handleExpectedArchiveFailure(archive, attempt, exception, !downloadCompleted);
+			handleExpectedArchiveFailure(
+					archive,
+					attempt,
+					exception,
+					!downloadCompleted,
+					budget);
+		} catch (OperationOwnershipLostException exception) {
+			throw exception;
 		} catch (RuntimeException exception) {
 			IngestionFailure failure = IngestionFailure.internalError();
-			persistUnexpectedFailure(archive, attempt, failure, exception);
+			persistUnexpectedFailure(archive, attempt, failure, exception, budget);
 			throw new UnexpectedArchiveFailure(archive, attempt, exception);
 		}
 	}
@@ -397,22 +428,29 @@ public class IngestionRunService {
 	private void persistSourcePollFailure(
 			SourcePollAttempt attempt,
 			IngestionFailureContract failure,
-			ApplicationException exception
+			ApplicationException exception,
+			OperationBudget budget
 	) {
+		requireTerminalOwnership(budget);
 		try {
+			AttemptTransitionResult transition;
 			if (failure.retryAfter().isZero()) {
-				sourcePollLedger.markFailed(
+				transition = sourcePollLedger.markFailed(
 						GdeltSourceContract.SOURCE_NAME,
 						attempt.token(),
 						failure.failure());
 			}
 			else {
-				sourcePollLedger.markFailed(
+				transition = sourcePollLedger.markFailed(
 						GdeltSourceContract.SOURCE_NAME,
 						attempt.token(),
 						failure.failure(),
 						failure.retryAfter());
 			}
+			throwIfOwnershipLost(transition);
+		}
+		catch (OperationOwnershipLostException ownershipLost) {
+			throw ownershipLost;
 		}
 		catch (RuntimeException persistenceFailure) {
 			exception.addSuppressed(persistenceFailure);
@@ -421,13 +459,19 @@ public class IngestionRunService {
 
 	private void persistSourcePollInternalFailure(
 			SourcePollAttempt attempt,
-			RuntimeException exception
+			RuntimeException exception,
+			OperationBudget budget
 	) {
+		requireTerminalOwnership(budget);
 		try {
-			sourcePollLedger.markFailed(
+			AttemptTransitionResult transition = sourcePollLedger.markFailed(
 					GdeltSourceContract.SOURCE_NAME,
 					attempt.token(),
 					IngestionFailure.internalError());
+			throwIfOwnershipLost(transition);
+		}
+		catch (OperationOwnershipLostException ownershipLost) {
+			throw ownershipLost;
 		}
 		catch (RuntimeException persistenceFailure) {
 			exception.addSuppressed(persistenceFailure);
@@ -435,24 +479,34 @@ public class IngestionRunService {
 	}
 
 	private static void requireRemaining(OperationBudget budget) {
-		if (!budget.hasRemaining()) {
+		try {
+			budget.requireAvailable();
+		}
+		catch (OperationDeadlineReachedException _) {
 			throw new OperationDeadlineExceededException();
 		}
+	}
+
+	private static void requireTerminalOwnership(OperationBudget budget) {
+		budget.requireOwnershipForTerminalTransition();
 	}
 
 	private <T extends ApplicationException & IngestionFailureContract> void handleExpectedArchiveFailure(
 			DiscoveredArchive archive,
 			ArchiveAttempt attempt,
 			T exception,
-			boolean downloadFailed
+			boolean downloadFailed,
+			OperationBudget budget
 	) {
 		IngestionFailure failure = exception.failure();
-		AttemptTransitionResult transition = persistExpectedFailure(archive, attempt, exception, failure);
+		AttemptTransitionResult transition = persistExpectedFailure(
+				archive,
+				attempt,
+				exception,
+				failure,
+				budget);
 		if (ownershipLost(archive, attempt, transition)) {
-			if (exception.abortsCycle()) {
-				throw exception;
-			}
-			return;
+			throw new OperationOwnershipLostException();
 		}
 		metrics.archiveOutcome(archive.archiveType(), ArchiveOutcome.FAILED);
 		if (downloadFailed) {
@@ -478,21 +532,27 @@ public class IngestionRunService {
 			DiscoveredArchive archive,
 			ArchiveAttempt attempt,
 			T exception,
-			IngestionFailure failure
+			IngestionFailure failure,
+			OperationBudget budget
 	) {
+		requireTerminalOwnership(budget);
 		try {
+			AttemptTransitionResult transition;
 			if (!exception.retryAfter().isZero()) {
-				return archiveLedger.markFailed(
+				transition = archiveLedger.markFailed(
 						archive.idempotencyKey(),
 						attempt.token(),
 						failure,
 						exception.retryAfter());
 			}
-			return archiveLedger.markFailed(
-					archive.idempotencyKey(),
-					attempt.token(),
-					failure
-			);
+			else {
+				transition = archiveLedger.markFailed(
+						archive.idempotencyKey(),
+						attempt.token(),
+						failure
+				);
+			}
+			return transition;
 		} catch (RuntimeException persistenceFailure) {
 			persistenceFailure.addSuppressed(exception);
 			throw new UnexpectedArchiveFailure(
@@ -525,8 +585,10 @@ public class IngestionRunService {
 			DiscoveredArchive archive,
 			ArchiveAttempt attempt,
 			IngestionFailure failure,
-			RuntimeException exception
+			RuntimeException exception,
+			OperationBudget budget
 	) {
+		requireTerminalOwnership(budget);
 		try {
 			AttemptTransitionResult transition = archiveLedger.markFailed(
 					archive.idempotencyKey(),
@@ -537,9 +599,18 @@ public class IngestionRunService {
 				metrics.archiveOutcome(archive.archiveType(), ArchiveOutcome.FAILED);
 			} else {
 				metrics.archiveOutcome(archive.archiveType(), ArchiveOutcome.OWNERSHIP_LOST);
+				throw new OperationOwnershipLostException();
 			}
+		} catch (OperationOwnershipLostException ownershipLost) {
+			throw ownershipLost;
 		} catch (RuntimeException persistenceFailure) {
 			exception.addSuppressed(persistenceFailure);
+		}
+	}
+
+	private static void throwIfOwnershipLost(AttemptTransitionResult transition) {
+		if (transition == AttemptTransitionResult.OWNERSHIP_LOST) {
+			throw new OperationOwnershipLostException();
 		}
 	}
 

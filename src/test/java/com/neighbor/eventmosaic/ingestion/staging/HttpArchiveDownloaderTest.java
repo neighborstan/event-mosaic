@@ -3,6 +3,9 @@ package com.neighbor.eventmosaic.ingestion.staging;
 import static com.neighbor.eventmosaic.ingestion.GdeltTestFixtures.archive;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveAttempt;
@@ -18,13 +21,20 @@ import com.neighbor.eventmosaic.ingestion.error.TransferredArtifactIntegrityExce
 import com.neighbor.eventmosaic.ingestion.source.ArchiveDownloadUriResolver;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationLeaseSnapshot;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpHeaders;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -33,9 +43,11 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
@@ -214,6 +226,190 @@ class HttpArchiveDownloaderTest {
 	}
 
 	@Test
+	@DisplayName("Потерянное владение запрещает работу с файлами и HTTP-запрос")
+	void lostOwnershipPreventsFilesystemAndRequest() {
+		AtomicInteger requests = new AtomicInteger();
+		server.createContext("/archive.zip", exchange -> {
+			requests.incrementAndGet();
+			respond(exchange, 200, new byte[]{1}, true);
+		});
+		ArchiveAttempt attempt = attempt(1, md5(new byte[]{1}));
+		StagingPaths paths = new StagingLayout(tempDir).pathsFor(attempt);
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(5))
+				.withLeaseGuard(OperationLeaseSnapshot::lost, Duration.ZERO);
+
+		assertThatExceptionOfType(OperationOwnershipLostException.class)
+				.isThrownBy(() -> downloader(1024).download(attempt, paths, budget));
+
+		assertThat(requests).hasValue(0);
+		assertThat(paths.archivePath().getParent()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Поздний HTTP-ответ после потери владения не публикует архив")
+	void rejectsResponseReturnedAfterOwnershipLoss() {
+		AtomicBoolean ownershipCurrent = new AtomicBoolean(true);
+		AtomicInteger requests = new AtomicInteger();
+		byte[] body = "late archive".getBytes(StandardCharsets.UTF_8);
+		server.createContext("/archive.zip", exchange -> {
+			requests.incrementAndGet();
+			ownershipCurrent.set(false);
+			respond(exchange, 200, body, true);
+		});
+		ArchiveAttempt attempt = attempt(body.length, md5(body));
+		StagingPaths paths = new StagingLayout(tempDir).pathsFor(attempt);
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(5))
+				.withLeaseGuard(
+						() -> ownershipCurrent.get()
+								? OperationLeaseSnapshot.current(Duration.ofSeconds(5))
+								: OperationLeaseSnapshot.lost(),
+						Duration.ZERO);
+
+		assertThatExceptionOfType(OperationOwnershipLostException.class)
+				.isThrownBy(() -> downloader(1024).download(attempt, paths, budget));
+
+		assertThat(requests).hasValue(1);
+		assertThat(paths.archivePath()).doesNotExist();
+		assertThat(paths.archivePartPath()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Смена владельца во время чтения архива останавливает поток и удаляет временный файл")
+	@SuppressWarnings("unchecked")
+	void ownershipLossDuringBodyReadStopsIoAndCleansTemporaryArchive() throws Exception {
+		HttpClient streamingClient = mock(HttpClient.class);
+		HttpResponse<InputStream> response = mock(HttpResponse.class);
+		ArchiveAttempt attempt = attempt(2, md5(new byte[]{1, 2}));
+		StagingPaths paths = new StagingLayout(tempDir).pathsFor(attempt);
+		AtomicBoolean ownershipCurrent = new AtomicBoolean(true);
+		AtomicBoolean bodyClosed = new AtomicBoolean();
+		AtomicInteger reads = new AtomicInteger();
+		AtomicLong nanoTime = new AtomicLong();
+		InputStream body = new InputStream() {
+			@Override
+			public int read() {
+				throw new AssertionError("Downloader must use bounded buffered reads");
+			}
+
+			@Override
+			public int read(byte[] target, int offset, int length) {
+				int readNumber = reads.incrementAndGet();
+				if (readNumber > 1) {
+					throw new AssertionError("No body read may start after ownership loss");
+				}
+				if (!Files.exists(paths.archivePartPath())) {
+					throw new AssertionError("Temporary archive must exist before the body read");
+				}
+				target[offset] = 1;
+				ownershipCurrent.set(false);
+				nanoTime.set(Duration.ofSeconds(1).toNanos());
+				return 1;
+			}
+
+			@Override
+			public void close() {
+				bodyClosed.set(true);
+			}
+		};
+		when(response.statusCode()).thenReturn(200);
+		when(response.headers()).thenReturn(HttpHeaders.of(Map.of(), (name, value) -> true));
+		when(response.body()).thenReturn(body);
+		when(streamingClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+				.thenReturn(response);
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(5), nanoTime::get)
+				.withLeaseGuard(
+						() -> ownershipCurrent.get()
+								? OperationLeaseSnapshot.current(Duration.ofSeconds(5))
+								: OperationLeaseSnapshot.lost(),
+						Duration.ZERO);
+		HttpArchiveDownloader downloader = new HttpArchiveDownloader(
+				streamingClient,
+				Duration.ofSeconds(5),
+				1024,
+				new IngestionMetrics(new SimpleMeterRegistry()),
+				archiveName -> URI.create("http://127.0.0.1/archive.zip"));
+
+		assertThatExceptionOfType(OperationOwnershipLostException.class)
+				.isThrownBy(() -> downloader.download(attempt, paths, budget));
+
+		assertThat(reads).hasValue(1);
+		assertThat(bodyClosed).isTrue();
+		assertThat(paths.archivePath()).doesNotExist();
+		assertThat(paths.archivePartPath()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Одновременная deadline и takeover позднего ответа дают ownership loss")
+	void ownershipLossWinsWhenDeadlineAlsoExpiresBeforeResponse() {
+		AtomicBoolean ownershipCurrent = new AtomicBoolean(true);
+		AtomicLong nanoTime = new AtomicLong();
+		byte[] body = "late archive".getBytes(StandardCharsets.UTF_8);
+		server.createContext("/archive.zip", exchange -> {
+			ownershipCurrent.set(false);
+			nanoTime.set(Duration.ofSeconds(5).toNanos());
+			respond(exchange, 200, body, true);
+		});
+		ArchiveAttempt attempt = attempt(body.length, md5(body));
+		StagingPaths paths = new StagingLayout(tempDir).pathsFor(attempt);
+		OperationBudget budget = OperationBudget
+				.start(Duration.ofSeconds(5), nanoTime::get)
+				.withLeaseGuard(
+						() -> ownershipCurrent.get()
+								? OperationLeaseSnapshot.current(Duration.ofSeconds(5))
+								: OperationLeaseSnapshot.lost(),
+						Duration.ZERO);
+
+		assertThatExceptionOfType(OperationOwnershipLostException.class)
+				.isThrownBy(() -> downloader(1024).download(attempt, paths, budget));
+
+		assertThat(paths.archivePath()).doesNotExist();
+		assertThat(paths.archivePartPath()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Отклоненный после takeover ответ архива закрывает свое тело")
+	@SuppressWarnings("unchecked")
+	void rejectedLateArchiveResponseClosesBody() throws Exception {
+		HttpClient delayedClient = mock(HttpClient.class);
+		HttpResponse<InputStream> response = mock(HttpResponse.class);
+		AtomicBoolean closed = new AtomicBoolean();
+		InputStream body = new ByteArrayInputStream(new byte[]{1}) {
+			@Override
+			public void close() throws IOException {
+				closed.set(true);
+				super.close();
+			}
+		};
+		AtomicBoolean ownershipCurrent = new AtomicBoolean(true);
+		when(response.body()).thenReturn(body);
+		when(delayedClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+				.thenAnswer(_ -> {
+					ownershipCurrent.set(false);
+					return response;
+				});
+		ArchiveAttempt attempt = attempt(1, md5(new byte[]{1}));
+		StagingPaths paths = new StagingLayout(tempDir).pathsFor(attempt);
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(5))
+				.withLeaseGuard(
+						() -> ownershipCurrent.get()
+								? OperationLeaseSnapshot.current(Duration.ofSeconds(5))
+								: OperationLeaseSnapshot.lost(),
+						Duration.ZERO);
+		HttpArchiveDownloader downloader = new HttpArchiveDownloader(
+				delayedClient,
+				Duration.ofSeconds(5),
+				1024,
+				new IngestionMetrics(new SimpleMeterRegistry()),
+				archiveName -> URI.create("http://127.0.0.1/archive.zip"));
+
+		assertThatExceptionOfType(OperationOwnershipLostException.class)
+				.isThrownBy(() -> downloader.download(attempt, paths, budget));
+
+		assertThat(closed).isTrue();
+		assertThat(paths.archivePath()).doesNotExist();
+	}
+
+	@Test
 	@DisplayName("Deadline прерывает чтение незавершенного streaming archive")
 	void deadlineStopsIncompleteStreamingArchive() {
 		CountDownLatch releaseBody = new CountDownLatch(1);
@@ -241,6 +437,27 @@ class HttpArchiveDownloaderTest {
 		} finally {
 			releaseBody.countDown();
 		}
+	}
+
+	@Test
+	@DisplayName("Deadline после создания временного архива удаляет owned part")
+	void deadlineAfterPartCreationCleansOwnedTemporaryArchive() {
+		byte[] body = "archive body".getBytes(StandardCharsets.UTF_8);
+		server.createContext("/archive.zip", exchange -> respond(exchange, 200, body, true));
+		ArchiveAttempt attempt = attempt(body.length, md5(body));
+		StagingPaths paths = new StagingLayout(tempDir).pathsFor(attempt);
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(
+				Duration.ofNanos(1),
+				() -> Files.exists(paths.archivePartPath())
+						? nanoTime.incrementAndGet()
+						: 0L);
+
+		assertThatExceptionOfType(OperationDeadlineExceededException.class)
+				.isThrownBy(() -> downloader(1024).download(attempt, paths, budget));
+
+		assertThat(paths.archivePath()).doesNotExist();
+		assertThat(paths.archivePartPath()).doesNotExist();
 	}
 
 	@Test

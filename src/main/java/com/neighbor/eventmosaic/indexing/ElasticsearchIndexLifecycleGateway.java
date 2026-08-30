@@ -1,6 +1,5 @@
 package com.neighbor.eventmosaic.indexing;
 
-import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.CommonStatsFlag;
 import co.elastic.clients.elasticsearch._types.ShardStatistics;
@@ -28,6 +27,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -46,27 +46,37 @@ final class ElasticsearchIndexLifecycleGateway
 	private static final String INDEX_NOT_FOUND = "index_not_found_exception";
 	private static final String INDEX_ALREADY_EXISTS = "resource_already_exists_exception";
 
-	private final ElasticsearchClient client;
 	private final ElasticsearchIndexTemplateInstaller templateInstaller;
 	private final IndexingMetrics metrics;
 	private final ElasticsearchArchiveReceiptVerifier receiptVerifier;
+	private final ElasticsearchRequestExecutor requestExecutor;
 
 	ElasticsearchIndexLifecycleGateway(
-			ElasticsearchClient client,
 			ElasticsearchIndexTemplateInstaller templateInstaller,
-			IndexingMetrics metrics
+			IndexingMetrics metrics,
+			ElasticsearchRequestExecutor requestExecutor
 	) {
-		this.client = Objects.requireNonNull(client, "client must not be null");
 		this.templateInstaller = Objects.requireNonNull(
 				templateInstaller, "templateInstaller must not be null");
 		this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
-		this.receiptVerifier = new ElasticsearchArchiveReceiptVerifier(client);
+		this.requestExecutor = Objects.requireNonNull(
+				requestExecutor, "requestExecutor must not be null");
+		this.receiptVerifier = new ElasticsearchArchiveReceiptVerifier(requestExecutor);
 	}
 
 	@Override
 	public void installTemplates() {
+		installTemplates(ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public void installTemplates(OperationBudget budget) {
+		installTemplates(ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private void installTemplates(ElasticsearchRequestContext context) {
 		try {
-			templateInstaller.install();
+			templateInstaller.install(context);
 		}
 		catch (IOException exception) {
 			throw ioFailure(exception);
@@ -76,13 +86,29 @@ final class ElasticsearchIndexLifecycleGateway
 	@Override
 	public Optional<ObservedElasticsearchIndex> findExactIndex(String indexName)
 			throws IOException {
+		return findExactIndex(indexName, ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public Optional<ObservedElasticsearchIndex> findExactIndex(
+			String indexName,
+			OperationBudget budget
+	) throws IOException {
+		return findExactIndex(indexName, ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private Optional<ObservedElasticsearchIndex> findExactIndex(
+			String indexName,
+			ElasticsearchRequestContext context
+	) throws IOException {
 		requireExactName(indexName);
 		try {
-			IndexState state = client.indices()
-					.get(request -> request
+			IndexState state = context.execute(
+					requestExecutor,
+					client -> client.indices().get(request -> request
 							.index(indexName)
 							.allowNoIndices(true)
-							.ignoreUnavailable(true))
+							.ignoreUnavailable(true)))
 					.get(indexName);
 			if (state == null) {
 				return Optional.empty();
@@ -103,8 +129,15 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public Optional<ObservedIndex> observeExactIndex(String indexName) {
+		return observeExactIndex(indexName, ElasticsearchRequestContext.standalone());
+	}
+
+	private Optional<ObservedIndex> observeExactIndex(
+			String indexName,
+			ElasticsearchRequestContext context
+	) {
 		try {
-			return findExactIndex(indexName).map(index -> new ObservedIndex(
+			return findExactIndex(indexName, context).map(index -> new ObservedIndex(
 					index.indexName(),
 					index.indexUuid(),
 					index.writeBlocked()));
@@ -121,21 +154,32 @@ final class ElasticsearchIndexLifecycleGateway
 	public Optional<ExactIndexAliasMembership> observeAllAliasesForExactIndex(
 			String indexName
 	) {
+		return observeAllAliasesForExactIndex(
+				indexName,
+				ElasticsearchRequestContext.standalone());
+	}
+
+	private Optional<ExactIndexAliasMembership> observeAllAliasesForExactIndex(
+			String indexName,
+			ElasticsearchRequestContext context
+	) {
 		requireExactName(indexName);
-		Optional<ObservedIndex> before = observeExactIndex(indexName);
+		Optional<ObservedIndex> before = observeExactIndex(indexName, context);
 		if (before.isEmpty()) {
 			return Optional.empty();
 		}
 		try {
-			GetAliasResponse response = client.indices().getAlias(request -> request
-					.index(indexName)
-					.allowNoIndices(false)
-					.ignoreUnavailable(false));
+			GetAliasResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().getAlias(request -> request
+							.index(indexName)
+							.allowNoIndices(false)
+							.ignoreUnavailable(false)));
 			var aliases = response.aliases().get(indexName);
 			if (aliases == null) {
 				throw protocolFailure();
 			}
-			Optional<ObservedIndex> after = observeExactIndex(indexName);
+			Optional<ObservedIndex> after = observeExactIndex(indexName, context);
 			if (after.isEmpty()) {
 				return Optional.empty();
 			}
@@ -152,7 +196,7 @@ final class ElasticsearchIndexLifecycleGateway
 		}
 		catch (ElasticsearchException exception) {
 			if (hasType(exception, INDEX_NOT_FOUND)
-					&& observeExactIndex(indexName).isEmpty()) {
+					&& observeExactIndex(indexName, context).isEmpty()) {
 				return Optional.empty();
 			}
 			throw classify(exception);
@@ -161,12 +205,21 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public long exactIndexStoreBytes(ExactIndexTarget target) {
+		return exactIndexStoreBytes(target, ElasticsearchRequestContext.standalone());
+	}
+
+	private long exactIndexStoreBytes(
+			ExactIndexTarget target,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(target, "target must not be null");
-		requireObservedIdentity(target);
+		requireObservedIdentity(target, context);
 		try {
-			IndicesStatsResponse response = client.indices().stats(request -> request
-					.index(target.indexName())
-					.metric(CommonStatsFlag.Store));
+			IndicesStatsResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().stats(request -> request
+							.index(target.indexName())
+							.metric(CommonStatsFlag.Store)));
 			var stats = response.indices().get(target.indexName());
 			if (response.shards().failed().longValue() > 0
 					|| stats == null
@@ -188,10 +241,23 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public void createExactIndex(String indexName) {
+		createExactIndex(indexName, ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public void createExactIndex(String indexName, OperationBudget budget) {
+		createExactIndex(indexName, ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private void createExactIndex(
+			String indexName,
+			ElasticsearchRequestContext context
+	) {
 		requireExactName(indexName);
 		try {
-			CreateIndexResponse response = client.indices()
-					.create(request -> request.index(indexName));
+			CreateIndexResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().create(request -> request.index(indexName)));
 			if (!response.acknowledged() || !response.shardsAcknowledged()) {
 				throw new IndexingAccessException(IndexingErrorCode.INDEXING_UNAVAILABLE);
 			}
@@ -212,15 +278,28 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public IndexAliasMembership readStableAliases() throws IOException {
+		return readStableAliases(ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public IndexAliasMembership readStableAliases(OperationBudget budget)
+			throws IOException {
+		return readStableAliases(ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private IndexAliasMembership readStableAliases(
+			ElasticsearchRequestContext context
+	) throws IOException {
 		return new IndexAliasMembership(
-				readAlias(GdeltIndexKind.EVENT.readAlias()),
-				readAlias(GdeltIndexKind.MENTION.readAlias()));
+				readAlias(GdeltIndexKind.EVENT.readAlias(), context),
+				readAlias(GdeltIndexKind.MENTION.readAlias(), context));
 	}
 
 	@Override
 	public AliasMembership readAliases() {
 		try {
-			IndexAliasMembership membership = readStableAliases();
+			IndexAliasMembership membership = readStableAliases(
+					ElasticsearchRequestContext.standalone());
 			return new AliasMembership(
 					membership.eventIndices(),
 					membership.mentionIndices());
@@ -233,12 +312,17 @@ final class ElasticsearchIndexLifecycleGateway
 		}
 	}
 
-	private Set<String> readAlias(String aliasName) throws IOException {
+	private Set<String> readAlias(
+			String aliasName,
+			ElasticsearchRequestContext context
+	) throws IOException {
 		try {
-			GetAliasResponse response = client.indices().getAlias(request -> request
-					.name(aliasName)
-					.allowNoIndices(true)
-					.ignoreUnavailable(true));
+			GetAliasResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().getAlias(request -> request
+							.name(aliasName)
+							.allowNoIndices(true)
+							.ignoreUnavailable(true)));
 			Set<String> indices = new HashSet<>();
 			response.aliases().forEach((indexName, aliases) -> {
 				if (aliases.aliases().containsKey(aliasName)) {
@@ -262,6 +346,37 @@ final class ElasticsearchIndexLifecycleGateway
 			String mentionIndexName,
 			boolean addMention
 	) {
+		addStableAliases(
+				eventIndexName,
+				addEvent,
+				mentionIndexName,
+				addMention,
+				ElasticsearchRequestContext.standalone());
+	}
+
+	@Override
+	public void addStableAliases(
+			String eventIndexName,
+			boolean addEvent,
+			String mentionIndexName,
+			boolean addMention,
+			OperationBudget budget
+	) {
+		addStableAliases(
+				eventIndexName,
+				addEvent,
+				mentionIndexName,
+				addMention,
+				ElasticsearchRequestContext.guarded(budget));
+	}
+
+	private void addStableAliases(
+			String eventIndexName,
+			boolean addEvent,
+			String mentionIndexName,
+			boolean addMention,
+			ElasticsearchRequestContext context
+	) {
 		requireExactName(eventIndexName);
 		requireExactName(mentionIndexName);
 		if (!addEvent && !addMention) {
@@ -279,7 +394,9 @@ final class ElasticsearchIndexLifecycleGateway
 					.alias(GdeltIndexKind.MENTION.readAlias())));
 		}
 		try {
-			UpdateAliasesResponse response = client.indices().updateAliases(request.build());
+			UpdateAliasesResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().updateAliases(request.build()));
 			if (!response.acknowledged()) {
 				throw unavailable();
 			}
@@ -294,17 +411,28 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public void addWriteBlock(List<ExactIndexTarget> targets) {
+		addWriteBlock(targets, ElasticsearchRequestContext.standalone());
+	}
+
+	private void addWriteBlock(
+			List<ExactIndexTarget> targets,
+			ElasticsearchRequestContext context
+	) {
 		List<ExactIndexTarget> exactTargets = requireTargets(targets);
 		if (exactTargets.isEmpty()) {
 			return;
 		}
-		exactTargets.forEach(this::requireObservedIdentity);
+		exactTargets.forEach(target -> requireObservedIdentity(target, context));
 		try {
-			AddBlockResponse response = client.indices().addBlock(request -> request
-					.index(exactTargets.stream().map(ExactIndexTarget::indexName).toList())
-					.block(IndicesBlockOptions.Write)
-					.allowNoIndices(false)
-					.ignoreUnavailable(false));
+			AddBlockResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().addBlock(request -> request
+							.index(exactTargets.stream()
+									.map(ExactIndexTarget::indexName)
+									.toList())
+							.block(IndicesBlockOptions.Write)
+							.allowNoIndices(false)
+							.ignoreUnavailable(false)));
 			if (!response.acknowledged()
 					|| !response.shardsAcknowledged()
 					|| response.indices().size() != exactTargets.size()
@@ -317,7 +445,7 @@ final class ElasticsearchIndexLifecycleGateway
 				throw unavailable();
 			}
 			exactTargets.forEach(target -> {
-				ObservedIndex observed = requireObservedIdentity(target);
+				ObservedIndex observed = requireObservedIdentity(target, context);
 				if (!observed.writeBlocked()) {
 					throw unavailable();
 				}
@@ -333,10 +461,19 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public void removeWriteBlock(List<ExactIndexTarget> targets) {
+		removeWriteBlock(targets, ElasticsearchRequestContext.standalone());
+	}
+
+	private void removeWriteBlock(
+			List<ExactIndexTarget> targets,
+			ElasticsearchRequestContext context
+	) {
 		List<ExactIndexTarget> exactTargets = requireTargets(targets);
 		List<ExactIndexTarget> blocked = new ArrayList<>();
 		for (ExactIndexTarget target : exactTargets) {
-			Optional<ObservedIndex> observed = observeExactIndex(target.indexName());
+			Optional<ObservedIndex> observed = observeExactIndex(
+					target.indexName(),
+					context);
 			if (observed.isEmpty()) {
 				continue;
 			}
@@ -349,11 +486,15 @@ final class ElasticsearchIndexLifecycleGateway
 		}
 		if (!blocked.isEmpty()) {
 			try {
-				RemoveBlockResponse response = client.indices().removeBlock(request -> request
-						.index(blocked.stream().map(ExactIndexTarget::indexName).toList())
-						.block(IndicesBlockOptions.Write)
-						.allowNoIndices(false)
-						.ignoreUnavailable(false));
+				RemoveBlockResponse response = context.execute(
+						requestExecutor,
+						client -> client.indices().removeBlock(request -> request
+								.index(blocked.stream()
+										.map(ExactIndexTarget::indexName)
+										.toList())
+								.block(IndicesBlockOptions.Write)
+								.allowNoIndices(false)
+								.ignoreUnavailable(false)));
 				if (!response.acknowledged()
 						|| response.indices().size() != blocked.size()
 						|| response.indices().stream().anyMatch(status ->
@@ -375,7 +516,9 @@ final class ElasticsearchIndexLifecycleGateway
 			}
 		}
 		for (ExactIndexTarget target : exactTargets) {
-			Optional<ObservedIndex> observed = observeExactIndex(target.indexName());
+			Optional<ObservedIndex> observed = observeExactIndex(
+					target.indexName(),
+					context);
 			if (observed.isPresent()
 					&& (!target.indexUuid().equals(observed.orElseThrow().indexUuid())
 						|| observed.orElseThrow().writeBlocked())) {
@@ -386,14 +529,21 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public void cutoverAliases(AliasCutover cutover) {
+		cutoverAliases(cutover, ElasticsearchRequestContext.standalone());
+	}
+
+	private void cutoverAliases(
+			AliasCutover cutover,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(cutover, "cutover must not be null");
 		List.of(cutover.newEvent(), cutover.newMention())
-				.forEach(this::requireObservedIdentity);
+				.forEach(target -> requireObservedIdentity(target, context));
 		if (cutover.oldEvent() != null) {
-			requireObservedIdentity(cutover.oldEvent());
+			requireObservedIdentity(cutover.oldEvent(), context);
 		}
 		if (cutover.oldMention() != null) {
-			requireObservedIdentity(cutover.oldMention());
+			requireObservedIdentity(cutover.oldMention(), context);
 		}
 		UpdateAliasesRequest.Builder request = new UpdateAliasesRequest.Builder();
 		if (cutover.oldEvent() != null) {
@@ -415,7 +565,9 @@ final class ElasticsearchIndexLifecycleGateway
 				.index(cutover.newMention().indexName())
 				.alias(GdeltIndexKind.MENTION.readAlias())));
 		try {
-			UpdateAliasesResponse response = client.indices().updateAliases(request.build());
+			UpdateAliasesResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().updateAliases(request.build()));
 			if (!response.acknowledged()) {
 				throw unavailable();
 			}
@@ -430,27 +582,38 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public void deleteExactIndex(ExactIndexTarget target) {
+		deleteExactIndex(target, ElasticsearchRequestContext.standalone());
+	}
+
+	private void deleteExactIndex(
+			ExactIndexTarget target,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(target, "target must not be null");
 		requireExactName(target.indexName());
 		ExactIndexAliasMembership observed = observeAllAliasesForExactIndex(
-				target.indexName()).orElseThrow(
+				target.indexName(),
+				context).orElseThrow(
 					ElasticsearchIndexLifecycleGateway::protocolFailure);
 		if (!target.indexUuid().equals(observed.indexUuid())
 				|| !observed.aliases().isEmpty()) {
 			throw protocolFailure();
 		}
 		ExactIndexAliasMembership confirmed = observeAllAliasesForExactIndex(
-				target.indexName()).orElseThrow(
+				target.indexName(),
+				context).orElseThrow(
 					ElasticsearchIndexLifecycleGateway::protocolFailure);
 		if (!target.indexUuid().equals(confirmed.indexUuid())
 				|| !confirmed.aliases().isEmpty()) {
 			throw protocolFailure();
 		}
 		try {
-			DeleteIndexResponse response = client.indices().delete(request -> request
-					.index(target.indexName())
-					.allowNoIndices(false)
-					.ignoreUnavailable(false));
+			DeleteIndexResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().delete(request -> request
+							.index(target.indexName())
+							.allowNoIndices(false)
+							.ignoreUnavailable(false)));
 			if (!response.acknowledged()) {
 				throw unavailable();
 			}
@@ -465,9 +628,15 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public long minimumAvailableDiskBytes() {
+		return minimumAvailableDiskBytes(ElasticsearchRequestContext.standalone());
+	}
+
+	private long minimumAvailableDiskBytes(ElasticsearchRequestContext context) {
 		try {
-			NodesStatsResponse response = client.nodes().stats(request -> request
-					.metric(NodeStatsMetric.Fs));
+			NodesStatsResponse response = context.execute(
+					requestExecutor,
+					client -> client.nodes().stats(request -> request
+							.metric(NodeStatsMetric.Fs)));
 			if (response.nodeStats() == null
 					|| response.nodeStats().failed() > 0
 					|| response.nodes().isEmpty()) {
@@ -496,14 +665,24 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public void refreshExact(GdeltIndexKind kind, ExactIndexTarget target) {
+		refreshExact(kind, target, ElasticsearchRequestContext.standalone());
+	}
+
+	private void refreshExact(
+			GdeltIndexKind kind,
+			ExactIndexTarget target,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(kind, "kind must not be null");
 		if (!kind.accepts(target)) {
 			throw new IllegalArgumentException("target must match kind");
 		}
-		requireObservedIdentity(target);
+		requireObservedIdentity(target, context);
 		try {
-			RefreshResponse response = client.indices().refresh(request -> request
-					.index(target.indexName()));
+			RefreshResponse response = context.execute(
+					requestExecutor,
+					client -> client.indices().refresh(request -> request
+							.index(target.indexName())));
 			requireSuccessfulShards(response.shards());
 		}
 		catch (IOException exception) {
@@ -516,12 +695,19 @@ final class ElasticsearchIndexLifecycleGateway
 
 	@Override
 	public ArchiveReceiptVerification verifyReceipt(ArchiveReceiptQuery query) {
+		return verifyReceipt(query, ElasticsearchRequestContext.standalone());
+	}
+
+	private ArchiveReceiptVerification verifyReceipt(
+			ArchiveReceiptQuery query,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(query, "query must not be null");
 		Timer.Sample timer = metrics.startReceiptTimer();
 		IndexingReceiptMetricOutcome metricOutcome =
 				IndexingReceiptMetricOutcome.NON_RETRYABLE_FAILURE;
 		try {
-			ArchiveReceiptVerification result = verifyReceiptOnce(query);
+			ArchiveReceiptVerification result = verifyReceiptOnce(query, context);
 			metricOutcome = IndexingMetrics.receiptOutcome(result.status());
 			return result;
 		}
@@ -534,10 +720,13 @@ final class ElasticsearchIndexLifecycleGateway
 		}
 	}
 
-	private ArchiveReceiptVerification verifyReceiptOnce(ArchiveReceiptQuery query) {
-		requireObservedIdentity(query.target());
+	private ArchiveReceiptVerification verifyReceiptOnce(
+			ArchiveReceiptQuery query,
+			ElasticsearchRequestContext context
+	) {
+		requireObservedIdentity(query.target(), context);
 		try {
-			return receiptVerifier.verify(query);
+			return receiptVerifier.verify(query, context);
 		}
 		catch (IOException exception) {
 			throw ioFailure(exception);
@@ -570,9 +759,14 @@ final class ElasticsearchIndexLifecycleGateway
 		return exception.error() != null && type.equals(exception.error().type());
 	}
 
-	private ObservedIndex requireObservedIdentity(ExactIndexTarget target) {
+	private ObservedIndex requireObservedIdentity(
+			ExactIndexTarget target,
+			ElasticsearchRequestContext context
+	) {
 		Objects.requireNonNull(target, "target must not be null");
-		Optional<ObservedIndex> observed = observeExactIndex(target.indexName());
+		Optional<ObservedIndex> observed = observeExactIndex(
+				target.indexName(),
+				context);
 		if (observed.isEmpty()
 				|| !target.indexUuid().equals(observed.orElseThrow().indexUuid())) {
 			throw protocolFailure();

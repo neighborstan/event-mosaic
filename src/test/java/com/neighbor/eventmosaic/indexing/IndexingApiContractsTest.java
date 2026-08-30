@@ -13,6 +13,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexTargetUnavailableReason;
 import com.neighbor.eventmosaic.shared.error.NonRetryableException;
 import com.neighbor.eventmosaic.shared.error.RetryableException;
 import java.io.IOException;
+import java.time.Duration;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -28,6 +29,7 @@ class IndexingApiContractsTest {
 
 		assertThat(properties.bulkSize()).isEqualTo(500);
 		assertThat(properties.maxBulkBytes()).isEqualTo(5L * 1024 * 1024);
+		assertThat(properties.requestTimeout()).isEqualTo(Duration.ofMinutes(2));
 		assertThatIllegalArgumentException()
 				.isThrownBy(() -> new IndexingProperties(
 						0,
@@ -42,6 +44,11 @@ class IndexingApiContractsTest {
 				.isThrownBy(() -> new IndexingProperties(
 						500,
 						IndexingProperties.MAX_BULK_BYTES + 1));
+		assertThatIllegalArgumentException()
+				.isThrownBy(() -> new IndexingProperties(
+						500,
+						IndexingProperties.DEFAULT_MAX_BULK_BYTES,
+						Duration.ZERO));
 	}
 
 	@Test

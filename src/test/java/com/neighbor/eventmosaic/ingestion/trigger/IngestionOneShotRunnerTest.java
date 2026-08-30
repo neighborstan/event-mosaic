@@ -7,9 +7,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
+import com.neighbor.eventmosaic.ingestion.IngestionCycleCoordinator;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOutcome;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.DefaultApplicationArguments;
@@ -20,9 +22,9 @@ import org.springframework.context.annotation.Import;
 @DisplayName("Однократный запуск загрузки")
 class IngestionOneShotRunnerTest {
 
-	private final GdeltPipelineService pipelineService = mock(GdeltPipelineService.class);
+	private final IngestionCycleCoordinator coordinator = mock(IngestionCycleCoordinator.class);
 	private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-			.withBean(GdeltPipelineService.class, () -> pipelineService)
+			.withBean(IngestionCycleCoordinator.class, () -> coordinator)
 			.withUserConfiguration(RunnerConfiguration.class);
 
 	@Test
@@ -30,7 +32,7 @@ class IngestionOneShotRunnerTest {
 	void isAbsentAndDoesNotCallSourceByDefault() {
 		contextRunner.run(context -> {
 			assertThat(context).doesNotHaveBean(IngestionOneShotRunner.class);
-			verifyNoInteractions(pipelineService);
+			verifyNoInteractions(coordinator);
 		});
 	}
 
@@ -44,7 +46,7 @@ class IngestionOneShotRunnerTest {
 
 					runner.run(new DefaultApplicationArguments(new String[0]));
 
-					verify(pipelineService).runOneShot();
+					verify(coordinator).runCycle();
 				});
 	}
 
@@ -52,8 +54,8 @@ class IngestionOneShotRunnerTest {
 	@DisplayName("Runner заменяет неожиданную ошибку безопасной причиной остановки")
 	void sanitizesUnexpectedFailureAtApplicationBoundary() {
 		IllegalStateException unsafe = new IllegalStateException("secret runtime detail");
-		when(pipelineService.runOneShot()).thenThrow(unsafe);
-		IngestionOneShotRunner runner = new IngestionOneShotRunner(pipelineService);
+		when(coordinator.runCycle()).thenThrow(unsafe);
+		IngestionOneShotRunner runner = new IngestionOneShotRunner(coordinator);
 		DefaultApplicationArguments arguments = new DefaultApplicationArguments(new String[0]);
 
 		assertThatThrownBy(() -> runner.run(arguments))
@@ -68,8 +70,8 @@ class IngestionOneShotRunnerTest {
 	@Test
 	@DisplayName("Runner сохраняет безопасный код cooperative interruption")
 	void preservesCooperativeInterruptionCode() {
-		when(pipelineService.runOneShot()).thenThrow(new IngestionInterruptedException());
-		IngestionOneShotRunner runner = new IngestionOneShotRunner(pipelineService);
+		when(coordinator.runCycle()).thenThrow(new IngestionInterruptedException());
+		IngestionOneShotRunner runner = new IngestionOneShotRunner(coordinator);
 		DefaultApplicationArguments arguments = new DefaultApplicationArguments(new String[0]);
 
 		assertThatThrownBy(() -> runner.run(arguments))
@@ -78,6 +80,31 @@ class IngestionOneShotRunnerTest {
 						+ ": "
 						+ IngestionErrorCode.OPERATION_INTERRUPTED.safeMessage())
 				.hasNoCause();
+	}
+
+	@Test
+	@DisplayName("Runner сохраняет отдельный безопасный исход потери global ownership")
+	void preservesGlobalOwnershipLossOutcome() {
+		when(coordinator.runCycle()).thenThrow(new OperationOwnershipLostException());
+		IngestionOneShotRunner runner = new IngestionOneShotRunner(coordinator);
+		DefaultApplicationArguments arguments = new DefaultApplicationArguments(new String[0]);
+
+		assertThatThrownBy(() -> runner.run(arguments))
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessage(IngestionCycleOutcome.OWNERSHIP_LOST.name()
+						+ ": Ingestion cycle ownership was lost")
+				.hasNoCause();
+	}
+
+	@Test
+	@DisplayName("Занятый global cycle остается различимым успешным one-shot outcome")
+	void activeGlobalCycleIsHandledWithoutPipelineBypass() {
+		when(coordinator.runCycle()).thenReturn(IngestionCycleOutcome.SKIPPED_ACTIVE_CYCLE);
+		IngestionOneShotRunner runner = new IngestionOneShotRunner(coordinator);
+
+		runner.run(new DefaultApplicationArguments(new String[0]));
+
+		verify(coordinator).runCycle();
 	}
 
 	@Configuration(proxyBeanMethods = false)

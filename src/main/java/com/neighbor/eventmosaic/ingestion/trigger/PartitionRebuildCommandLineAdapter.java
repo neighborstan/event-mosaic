@@ -1,11 +1,9 @@
 package com.neighbor.eventmosaic.ingestion.trigger;
 
-import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildCommandLine;
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService;
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionRebuildCommand;
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionRebuildPlan;
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionRebuildResult;
-import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.config.PartitionRebuildCommandProperties;
 import java.io.IOException;
 import java.io.InputStream;
@@ -18,7 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
@@ -30,9 +28,7 @@ import tools.jackson.databind.ObjectMapper;
  * подтверждения читает этот же файл и запускает перестроение.
  */
 @Component
-@ConditionalOnProperty(
-		prefix = PartitionRebuildCommandLine.PROPERTY_PREFIX,
-		name = "mode")
+@Conditional(IngestionRuntimeModeCondition.PartitionRebuild.class)
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class PartitionRebuildCommandLineAdapter implements ApplicationRunner {
 
@@ -41,7 +37,6 @@ public class PartitionRebuildCommandLineAdapter implements ApplicationRunner {
 
 	private final PartitionRebuildService rebuildService;
 	private final PartitionRebuildCommandProperties properties;
-	private final GdeltIngestionProperties ingestionProperties;
 	private final ObjectMapper objectMapper;
 
 	/**
@@ -51,28 +46,17 @@ public class PartitionRebuildCommandLineAdapter implements ApplicationRunner {
 	public PartitionRebuildCommandLineAdapter(
 			PartitionRebuildService rebuildService,
 			PartitionRebuildCommandProperties properties,
-			GdeltIngestionProperties ingestionProperties,
 			ObjectMapper objectMapper
 	) {
 		this.rebuildService = Objects.requireNonNull(
 				rebuildService, "rebuildService must not be null");
 		this.properties = Objects.requireNonNull(properties, "properties must not be null");
-		this.ingestionProperties = Objects.requireNonNull(
-				ingestionProperties, "ingestionProperties must not be null");
 		this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
 	}
 
 	@Override
 	public void run(ApplicationArguments arguments) {
 		Objects.requireNonNull(arguments, "arguments must not be null");
-		if (!PartitionRebuildCommandLine.isRequested(arguments.getSourceArgs())) {
-			throw new IllegalArgumentException(
-					"partition rebuild mode must be supplied as a command-line option");
-		}
-		if (ingestionProperties.oneShotEnabled()) {
-			throw new IllegalArgumentException(
-					"partition rebuild cannot run with ingestion one-shot enabled");
-		}
 		if (properties.mode() == null) {
 			throw new IllegalArgumentException("partition rebuild mode is required");
 		}

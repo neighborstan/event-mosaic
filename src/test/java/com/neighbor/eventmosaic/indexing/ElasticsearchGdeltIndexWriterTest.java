@@ -4,22 +4,18 @@ import static com.neighbor.eventmosaic.indexing.api.GdeltIndexKind.EVENT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
-import co.elastic.clients.elasticsearch.core.BulkRequest;
-import co.elastic.clients.elasticsearch.core.OpenPointInTimeRequest;
 import co.elastic.clients.elasticsearch.core.OpenPointInTimeResponse;
-import co.elastic.clients.elasticsearch.indices.CreateIndexRequest;
-import co.elastic.clients.elasticsearch.indices.ElasticsearchIndicesClient;
-import co.elastic.clients.elasticsearch.indices.GetIndexRequest;
 import co.elastic.clients.elasticsearch.indices.GetIndexResponse;
-import co.elastic.clients.elasticsearch.indices.PutIndexTemplateRequest;
 import co.elastic.clients.elasticsearch.indices.PutIndexTemplateResponse;
-import co.elastic.clients.elasticsearch.indices.RefreshRequest;
 import co.elastic.clients.elasticsearch.indices.RefreshResponse;
 import co.elastic.clients.json.jackson.Jackson3JsonpMapper;
 import co.elastic.clients.util.BinaryData;
@@ -59,26 +55,25 @@ class ElasticsearchGdeltIndexWriterTest {
 			ArchiveIdentityDigest.accumulator().finish();
 
 	private final ElasticsearchClient client = mock(ElasticsearchClient.class);
-	private final ElasticsearchIndicesClient indices = mock(ElasticsearchIndicesClient.class);
+	private final ElasticsearchRequestExecutor requestExecutor =
+			mock(ElasticsearchRequestExecutor.class);
 
 	@Test
 	@DisplayName("Подготовка read model устанавливает templates без fixed indices")
 	void installsTemplatesWithoutCreatingFixedIndices() throws IOException {
-		when(client.indices()).thenReturn(indices);
-		when(indices.putIndexTemplate(any(PutIndexTemplateRequest.class)))
-				.thenReturn(PutIndexTemplateResponse.of(response -> response.acknowledged(true)));
+		doReturn(PutIndexTemplateResponse.of(response -> response.acknowledged(true)))
+				.when(requestExecutor).execute(any());
 
 		writer().prepareReadModel();
 
-		verify(indices, never()).create(any(CreateIndexRequest.class));
+		verify(requestExecutor, times(2)).execute(any());
 	}
 
 	@Test
 	@DisplayName("Не подтвержденная установка template остаётся retryable unknown outcome")
 	void treatsUnacknowledgedTemplateInstallationAsRetryable() throws IOException {
-		when(client.indices()).thenReturn(indices);
-		when(indices.putIndexTemplate(any(PutIndexTemplateRequest.class)))
-				.thenReturn(PutIndexTemplateResponse.of(response -> response.acknowledged(false)));
+		doReturn(PutIndexTemplateResponse.of(response -> response.acknowledged(false)))
+				.when(requestExecutor).execute(any());
 
 		assertThatExceptionOfType(IndexingAccessException.class)
 				.isThrownBy(writer()::prepareReadModel)
@@ -92,12 +87,10 @@ class ElasticsearchGdeltIndexWriterTest {
 	@Test
 	@DisplayName("I/O failure при установленном flag становится interruption")
 	void classifiesIoFailureWithInterruptFlagAsInterruption() throws IOException {
-		when(client.indices()).thenReturn(indices);
-		when(indices.putIndexTemplate(any(PutIndexTemplateRequest.class)))
-				.thenAnswer(invocation -> {
+		doAnswer(invocation -> {
 					Thread.currentThread().interrupt();
 					throw new IOException("remote details must stay local");
-				});
+				}).when(requestExecutor).execute(any());
 
 		try {
 			assertThatExceptionOfType(IndexingInterruptedException.class)
@@ -119,16 +112,15 @@ class ElasticsearchGdeltIndexWriterTest {
 	@DisplayName("Failed shard не может подтвердить receipt даже при совпавшем count")
 	void rejectsPartialReceiptCount() throws IOException {
 		SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-		when(client.indices()).thenReturn(indices);
-		when(indices.get(any(GetIndexRequest.class)))
-				.thenReturn(targetState(TARGET.indexUuid(), false));
-		when(client.openPointInTime(any(OpenPointInTimeRequest.class)))
-				.thenReturn(OpenPointInTimeResponse.of(response -> response
+		doReturn(
+				targetState(TARGET.indexUuid(), false),
+				OpenPointInTimeResponse.of(response -> response
 						.id("receipt-pit")
 						.shards(shards -> shards
 								.total(2)
 								.successful(1)
-								.failed(1))));
+								.failed(1))))
+				.when(requestExecutor).execute(any());
 		ElasticsearchGdeltIndexWriter indexWriter = writer(
 				new IndexingProperties(
 						100,
@@ -163,9 +155,8 @@ class ElasticsearchGdeltIndexWriterTest {
 	@DisplayName("Отсутствующий exact target один раз завершает receipt до чтения документов")
 	void measuresReceiptPreCheckFailureOnce() throws IOException {
 		SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-		when(client.indices()).thenReturn(indices);
-		when(indices.get(any(GetIndexRequest.class)))
-				.thenReturn(GetIndexResponse.of(response -> response.indices(Map.of())));
+		doReturn(GetIndexResponse.of(response -> response.indices(Map.of())))
+				.when(requestExecutor).execute(any());
 		ElasticsearchGdeltIndexWriter indexWriter = writer(
 				new IndexingProperties(
 						100,
@@ -197,15 +188,14 @@ class ElasticsearchGdeltIndexWriterTest {
 	@Test
 	@DisplayName("Failed shard при refresh остаётся retryable unknown outcome")
 	void rejectsPartialRefresh() throws IOException {
-		when(client.indices()).thenReturn(indices);
-		when(indices.get(any(GetIndexRequest.class)))
-				.thenReturn(targetState(TARGET.indexUuid(), false));
-		when(indices.refresh(any(RefreshRequest.class)))
-				.thenReturn(RefreshResponse.of(response -> response
+		doReturn(
+				targetState(TARGET.indexUuid(), false),
+				RefreshResponse.of(response -> response
 						.shards(shards -> shards
 								.total(2)
 								.successful(1)
-								.failed(1))));
+								.failed(1))))
+				.when(requestExecutor).execute(any());
 		ElasticsearchGdeltIndexWriter indexWriter = writer();
 
 		assertThatExceptionOfType(IndexingAccessException.class)
@@ -257,7 +247,7 @@ class ElasticsearchGdeltIndexWriterTest {
 							.isEqualTo(IndexingErrorCode.INDEXING_REQUEST_REJECTED);
 					assertThat(exception.retryable()).isFalse();
 				});
-		verify(client, never()).bulk(any(BulkRequest.class));
+		verify(requestExecutor, never()).execute(any());
 		Timer timer = meterRegistry.find(BULK_DURATION_METER)
 				.tag("kind", "event")
 				.tag("outcome", "non_retryable_failure")
@@ -287,15 +277,14 @@ class ElasticsearchGdeltIndexWriterTest {
 		assertThatExceptionOfType(IndexingProtocolException.class)
 				.isThrownBy(() -> indexWriter.write(command))
 				.satisfies(exception -> assertThat(exception.retryable()).isFalse());
-		verify(client, never()).bulk(any(BulkRequest.class));
+		verify(requestExecutor, never()).execute(any());
 	}
 
 	@Test
 	@DisplayName("Другой UUID exact имени отклоняется как потеря ownership")
 	void rejectsReplacedExactTarget() throws IOException {
-		when(client.indices()).thenReturn(indices);
-		when(indices.get(any(GetIndexRequest.class)))
-				.thenReturn(targetState("replacement-index-uuid", false));
+		doReturn(targetState("replacement-index-uuid", false))
+				.when(requestExecutor).execute(any());
 
 		assertThatExceptionOfType(IndexTargetUnavailableException.class)
 				.isThrownBy(() -> writer().refresh(EVENT, TARGET))
@@ -308,15 +297,14 @@ class ElasticsearchGdeltIndexWriterTest {
 					assertThat(exception.getMessage())
 							.doesNotContain(TARGET.indexName(), TARGET.indexUuid());
 				});
-		verify(indices, never()).refresh(any(RefreshRequest.class));
+		verify(requestExecutor, times(1)).execute(any());
 	}
 
 	@Test
 	@DisplayName("Write block exact target отклоняется как typed maintenance outcome")
 	void rejectsWriteBlockedExactTarget() throws IOException {
-		when(client.indices()).thenReturn(indices);
-		when(indices.get(any(GetIndexRequest.class)))
-				.thenReturn(targetState(TARGET.indexUuid(), true));
+		doReturn(targetState(TARGET.indexUuid(), true))
+				.when(requestExecutor).execute(any());
 
 		assertThatExceptionOfType(IndexTargetUnavailableException.class)
 				.isThrownBy(() -> writer().refresh(EVENT, TARGET))
@@ -326,22 +314,20 @@ class ElasticsearchGdeltIndexWriterTest {
 					assertThat(exception.errorCode())
 							.isEqualTo(IndexingErrorCode.INDEX_TARGET_WRITE_BLOCKED);
 				});
-		verify(indices, never()).refresh(any(RefreshRequest.class));
+		verify(requestExecutor, times(1)).execute(any());
 	}
 
 	@Test
 	@DisplayName("Missing exact target отклоняется без попытки auto-create")
 	void rejectsMissingExactTargetWithoutCreatingIndex() throws IOException {
-		when(client.indices()).thenReturn(indices);
-		when(indices.get(any(GetIndexRequest.class)))
-				.thenReturn(GetIndexResponse.of(response -> response.indices(Map.of())));
+		doReturn(GetIndexResponse.of(response -> response.indices(Map.of())))
+				.when(requestExecutor).execute(any());
 
 		assertThatExceptionOfType(IndexTargetUnavailableException.class)
 				.isThrownBy(() -> writer().refresh(EVENT, TARGET))
 				.satisfies(exception -> assertThat(exception.reason())
 						.isEqualTo(IndexTargetUnavailableReason.MISSING));
-		verify(indices, never()).create(any(CreateIndexRequest.class));
-		verify(indices, never()).refresh(any(RefreshRequest.class));
+		verify(requestExecutor, times(1)).execute(any());
 	}
 
 	private ElasticsearchGdeltIndexWriter writer() {
@@ -360,9 +346,10 @@ class ElasticsearchGdeltIndexWriterTest {
 	) {
 		return new ElasticsearchGdeltIndexWriter(
 				client,
-				new ElasticsearchIndexTemplateInstaller(client),
+				new ElasticsearchIndexTemplateInstaller(requestExecutor),
 				properties,
-				new IndexingMetrics(meterRegistry));
+				new IndexingMetrics(meterRegistry),
+				requestExecutor);
 	}
 
 	private static Jackson3JsonpMapper jsonpMapper() {

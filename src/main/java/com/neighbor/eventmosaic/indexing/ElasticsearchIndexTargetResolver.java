@@ -4,6 +4,7 @@ import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import com.neighbor.eventmosaic.indexing.api.ActiveIndexTargets;
 import com.neighbor.eventmosaic.indexing.api.ExactIndexTarget;
 import com.neighbor.eventmosaic.indexing.api.IndexGeneration;
+import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationStatus;
 import com.neighbor.eventmosaic.indexing.api.IndexLifecycleLedger;
 import com.neighbor.eventmosaic.indexing.api.IndexLifecycleTransitionResult;
@@ -12,6 +13,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexMaintenancePhase;
 import com.neighbor.eventmosaic.indexing.api.IndexMaintenanceType;
 import com.neighbor.eventmosaic.indexing.api.IndexPartitionGenerationResolution;
 import com.neighbor.eventmosaic.indexing.api.IndexPartitionGenerationResolver;
+import com.neighbor.eventmosaic.indexing.api.IndexPartitionDefinition;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetResolution;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetResolutionStatus;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetResolver;
@@ -19,6 +21,7 @@ import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexingInterruptedException;
 import com.neighbor.eventmosaic.indexing.api.IndexingProtocolException;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.DayOfWeek;
@@ -31,6 +34,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 
@@ -68,12 +72,30 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 
 	@Override
 	public IndexTargetResolution resolve(Instant sourceUpdateTime) {
+		return resolve(sourceUpdateTime, new LifecycleCalls(null));
+	}
+
+	@Override
+	public IndexTargetResolution resolve(
+			Instant sourceUpdateTime,
+			OperationBudget budget
+	) {
+		return resolve(
+				sourceUpdateTime,
+				new LifecycleCalls(Objects.requireNonNull(
+						budget, "budget must not be null")));
+	}
+
+	private IndexTargetResolution resolve(
+			Instant sourceUpdateTime,
+			LifecycleCalls calls
+	) {
 		Objects.requireNonNull(sourceUpdateTime, "sourceUpdateTime must not be null");
 		IndexPartitionGenerationResolution firstGeneration = partitionResolver.resolve(
 				sourceUpdateTime,
 				1);
 		String partitionKey = firstGeneration.partition().partitionKey();
-		lifecycleLedger.registerPartition(firstGeneration.partition());
+		calls.registerPartition(firstGeneration.partition());
 
 		try {
 			Optional<IndexMaintenanceOperation> open =
@@ -83,17 +105,18 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 				if (open.isPresent()) {
 					return outcome(IndexTargetResolutionStatus.MAINTENANCE_DEFERRED);
 				}
-				return verifyActive(active.orElseThrow());
+				return verifyActive(active.orElseThrow(), calls);
 			}
 
-			elasticsearch.installTemplates();
+			calls.installTemplates();
 			MaintenanceAcquisition acquisition = acquireInitialOperation(
 					sourceUpdateTime,
-					partitionKey);
+					partitionKey,
+					calls);
 			if (acquisition.outcome() != null) {
 				return acquisition.outcome();
 			}
-			return runInitialPromotion(acquisition.operation());
+			return runInitialPromotion(acquisition.operation(), calls);
 		}
 		catch (IOException exception) {
 			throw ioFailure(exception);
@@ -111,7 +134,8 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 
 	private MaintenanceAcquisition acquireInitialOperation(
 			Instant sourceUpdateTime,
-			String partitionKey
+			String partitionKey,
+			LifecycleCalls calls
 	) throws IOException {
 		Optional<IndexMaintenanceOperation> open = lifecycleLedger.findRecoverableOperation(
 				partitionKey);
@@ -126,7 +150,7 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 						IndexTargetResolutionStatus.MAINTENANCE_DEFERRED);
 			}
 			Optional<IndexMaintenanceOperation> reclaimed =
-					lifecycleLedger.reclaimExpiredMaintenance(partitionKey, OWNERSHIP_LEASE);
+					calls.reclaimExpiredMaintenance(partitionKey, OWNERSHIP_LEASE);
 			if (reclaimed.isEmpty()) {
 				return MaintenanceAcquisition.outcome(
 						IndexTargetResolutionStatus.OWNERSHIP_LOST);
@@ -142,7 +166,7 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 		IndexPartitionGenerationResolution generation = partitionResolver.resolve(
 				sourceUpdateTime,
 				generationNumber);
-		Optional<IndexMaintenanceOperation> started = lifecycleLedger.startMaintenance(
+		Optional<IndexMaintenanceOperation> started = calls.startMaintenance(
 				partitionKey,
 				IndexMaintenanceType.INITIAL_PROMOTION,
 				generation.names(),
@@ -152,13 +176,16 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 		}
 		Optional<ActiveIndexTargets> active = lifecycleLedger.findActiveTargets(partitionKey);
 		if (active.isPresent()) {
-			return MaintenanceAcquisition.ready(verifyActive(active.orElseThrow()));
+			return MaintenanceAcquisition.ready(verifyActive(active.orElseThrow(), calls));
 		}
 		return MaintenanceAcquisition.outcome(
 				IndexTargetResolutionStatus.MAINTENANCE_DEFERRED);
 	}
 
-	private IndexTargetResolution runInitialPromotion(IndexMaintenanceOperation initial)
+	private IndexTargetResolution runInitialPromotion(
+			IndexMaintenanceOperation initial,
+			LifecycleCalls calls
+	)
 			throws IOException {
 		IndexMaintenanceOperation operation = initial;
 		while (true) {
@@ -166,21 +193,23 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 				case PLANNED -> {
 					Optional<IndexMaintenanceOperation> advanced = advance(
 							operation,
-							IndexMaintenancePhase.BUILDING);
+							IndexMaintenancePhase.BUILDING,
+							calls);
 					if (advanced.isEmpty()) {
 						return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 					}
 					operation = advanced.orElseThrow();
 				}
 				case BUILDING -> {
-					BuildingPair pair = ensureBuildingPair(operation);
+					BuildingPair pair = ensureBuildingPair(operation, calls);
 					if (pair.outcome() != null) {
 						return pair.outcome();
 					}
 					operation = pair.operation();
 					Optional<IndexMaintenanceOperation> advanced = advance(
 							operation,
-							IndexMaintenancePhase.VERIFIED);
+							IndexMaintenancePhase.VERIFIED,
+							calls);
 					if (advanced.isEmpty()) {
 						return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 					}
@@ -189,7 +218,8 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 				case VERIFIED -> {
 					Optional<IndexMaintenanceOperation> advanced = advance(
 							operation,
-							IndexMaintenancePhase.CUTOVER_REQUESTED);
+							IndexMaintenancePhase.CUTOVER_REQUESTED,
+							calls);
 					if (advanced.isEmpty()) {
 						return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 					}
@@ -200,21 +230,26 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 					if (building == null || !hasRecordedPair(building)) {
 						return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 					}
-					IndexTargetResolution identityOutcome = verifyRecordedBuildingPair(building);
+					IndexTargetResolution identityOutcome = verifyRecordedBuildingPair(
+							building,
+							calls);
 					if (identityOutcome != null) {
 						return identityOutcome;
 					}
-					IndexTargetResolution aliasOutcome = reconcileInitialAliases(building);
+					IndexTargetResolution aliasOutcome = reconcileInitialAliases(
+							building,
+							calls);
 					if (aliasOutcome != null) {
 						return aliasOutcome;
 					}
-					identityOutcome = verifyRecordedBuildingPair(building);
+					identityOutcome = verifyRecordedBuildingPair(building, calls);
 					if (identityOutcome != null) {
 						return identityOutcome;
 					}
 					Optional<IndexMaintenanceOperation> advanced = advance(
 							operation,
-							IndexMaintenancePhase.CUTOVER_OBSERVED);
+							IndexMaintenancePhase.CUTOVER_OBSERVED,
+							calls);
 					if (advanced.isEmpty()) {
 						return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 					}
@@ -222,7 +257,7 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 				}
 				case CUTOVER_OBSERVED -> {
 					IndexLifecycleTransitionResult completed =
-							lifecycleLedger.completeInitialActivation(
+							calls.completeInitialActivation(
 									operation.partitionKey(),
 									operation.token(),
 									operation.partitionVersion(),
@@ -235,7 +270,7 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 					if (active.isEmpty()) {
 						return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 					}
-					return verifyActive(active.orElseThrow());
+					return verifyActive(active.orElseThrow(), calls);
 				}
 				default -> {
 					return outcome(IndexTargetResolutionStatus.MAINTENANCE_DEFERRED);
@@ -244,14 +279,17 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 		}
 	}
 
-	private BuildingPair ensureBuildingPair(IndexMaintenanceOperation operation)
+	private BuildingPair ensureBuildingPair(
+			IndexMaintenanceOperation operation,
+			LifecycleCalls calls
+	)
 			throws IOException {
 		Optional<IndexGeneration> candidate = findBuildingGeneration(operation);
 		if (candidate.isEmpty()) {
 			return BuildingPair.outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 		}
 		IndexGeneration generation = candidate.orElseThrow();
-		ObservedPair observed = observeOrCreatePair(generation);
+		ObservedPair observed = observeOrCreatePair(generation, calls);
 		if (observed.outcome() != null) {
 			return BuildingPair.readyOutcome(observed.outcome());
 		}
@@ -260,7 +298,7 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 		if (alreadyRecorded) {
 			return BuildingPair.owned(operation);
 		}
-		IndexLifecycleTransitionResult recorded = lifecycleLedger.recordGenerationUuids(
+		IndexLifecycleTransitionResult recorded = calls.recordGenerationUuids(
 				operation.partitionKey(),
 				operation.token(),
 				operation.partitionVersion(),
@@ -273,31 +311,40 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 		return BuildingPair.owned(withOperationVersion(operation));
 	}
 
-	private ObservedPair observeOrCreatePair(IndexGeneration generation) throws IOException {
+	private ObservedPair observeOrCreatePair(
+			IndexGeneration generation,
+			LifecycleCalls calls
+	) throws IOException {
 		ObservedIndexResult event = observeOrCreate(
 				generation.names().eventIndexName(),
-				generation.eventIndexUuid());
+				generation.eventIndexUuid(),
+				calls);
 		if (event.outcome() != null) {
 			return ObservedPair.readyOutcome(event.outcome());
 		}
 		ObservedIndexResult mention = observeOrCreate(
 				generation.names().mentionIndexName(),
-				generation.mentionIndexUuid());
+				generation.mentionIndexUuid(),
+				calls);
 		if (mention.outcome() != null) {
 			return ObservedPair.readyOutcome(mention.outcome());
 		}
 		return ObservedPair.observed(event.index(), mention.index());
 	}
 
-	private ObservedIndexResult observeOrCreate(String indexName, String recordedUuid)
+	private ObservedIndexResult observeOrCreate(
+			String indexName,
+			String recordedUuid,
+			LifecycleCalls calls
+	)
 			throws IOException {
-		Optional<ObservedElasticsearchIndex> found = elasticsearch.findExactIndex(indexName);
+		Optional<ObservedElasticsearchIndex> found = calls.findExactIndex(indexName);
 		if (found.isEmpty()) {
 			if (recordedUuid != null) {
 				return ObservedIndexResult.outcome(IndexTargetResolutionStatus.MISSING);
 			}
-			elasticsearch.createExactIndex(indexName);
-			found = elasticsearch.findExactIndex(indexName);
+			calls.createExactIndex(indexName);
+			found = calls.findExactIndex(indexName);
 			if (found.isEmpty()) {
 				return ObservedIndexResult.outcome(IndexTargetResolutionStatus.MISSING);
 			}
@@ -312,10 +359,13 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 		return ObservedIndexResult.observed(index);
 	}
 
-	private IndexTargetResolution reconcileInitialAliases(IndexGeneration generation)
+	private IndexTargetResolution reconcileInitialAliases(
+			IndexGeneration generation,
+			LifecycleCalls calls
+	)
 			throws IOException {
 		for (int attempt = 0; attempt < 2; attempt++) {
-			AliasPairState state = inspectAliasPair(generation, elasticsearch.readStableAliases());
+			AliasPairState state = inspectAliasPair(generation, calls.readStableAliases());
 			if (state.unexpected()) {
 				return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 			}
@@ -323,7 +373,7 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 				return null;
 			}
 			try {
-				elasticsearch.addStableAliases(
+				calls.addStableAliases(
 						generation.names().eventIndexName(),
 						!state.eventPresent(),
 						generation.names().mentionIndexName(),
@@ -332,7 +382,7 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 			catch (IOException | IndexingAccessException unknownOutcome) {
 				AliasPairState observed = inspectAliasPair(
 						generation,
-						elasticsearch.readStableAliases());
+						calls.readStableAliases());
 				if (observed.unexpected()) {
 					return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 				}
@@ -346,7 +396,7 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 		}
 		AliasPairState finalState = inspectAliasPair(
 				generation,
-				elasticsearch.readStableAliases());
+				calls.readStableAliases());
 		if (finalState.unexpected()) {
 			return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 		}
@@ -391,42 +441,53 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 		return new AliasPairState(eventPresent, mentionPresent, unexpected);
 	}
 
-	private IndexTargetResolution verifyRecordedBuildingPair(IndexGeneration generation)
+	private IndexTargetResolution verifyRecordedBuildingPair(
+			IndexGeneration generation,
+			LifecycleCalls calls
+	)
 			throws IOException {
 		ObservedIndexResult event = observeOrCreate(
 				generation.names().eventIndexName(),
-				generation.eventIndexUuid());
+				generation.eventIndexUuid(),
+				calls);
 		if (event.outcome() != null) {
 			return event.outcome();
 		}
 		ObservedIndexResult mention = observeOrCreate(
 				generation.names().mentionIndexName(),
-				generation.mentionIndexUuid());
+				generation.mentionIndexUuid(),
+				calls);
 		return mention.outcome();
 	}
 
-	private IndexTargetResolution verifyActive(ActiveIndexTargets active) throws IOException {
+	private IndexTargetResolution verifyActive(
+			ActiveIndexTargets active,
+			LifecycleCalls calls
+	) throws IOException {
 		AliasPairState aliases = inspectAliasPair(
 				active.partitionKey(),
 				active.event().indexName(),
 				active.mention().indexName(),
-				elasticsearch.readStableAliases());
+				calls.readStableAliases());
 		if (aliases.unexpected()) {
 			return outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST);
 		}
 		if (!aliases.complete()) {
 			return outcome(IndexTargetResolutionStatus.MISSING);
 		}
-		IndexTargetResolution event = verifyExactTarget(active.event());
+		IndexTargetResolution event = verifyExactTarget(active.event(), calls);
 		if (event != null) {
 			return event;
 		}
-		IndexTargetResolution mention = verifyExactTarget(active.mention());
+		IndexTargetResolution mention = verifyExactTarget(active.mention(), calls);
 		return mention == null ? IndexTargetResolution.ready(active) : mention;
 	}
 
-	private IndexTargetResolution verifyExactTarget(ExactIndexTarget target) throws IOException {
-		Optional<ObservedElasticsearchIndex> observed = elasticsearch.findExactIndex(
+	private IndexTargetResolution verifyExactTarget(
+			ExactIndexTarget target,
+			LifecycleCalls calls
+	) throws IOException {
+		Optional<ObservedElasticsearchIndex> observed = calls.findExactIndex(
 				target.indexName());
 		if (observed.isEmpty()
 				|| !target.indexUuid().equals(observed.orElseThrow().indexUuid())) {
@@ -439,9 +500,10 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 
 	private Optional<IndexMaintenanceOperation> advance(
 			IndexMaintenanceOperation operation,
-			IndexMaintenancePhase nextPhase
+			IndexMaintenancePhase nextPhase,
+			LifecycleCalls calls
 	) {
-		IndexLifecycleTransitionResult result = lifecycleLedger.advancePhase(
+		IndexLifecycleTransitionResult result = calls.advancePhase(
 				operation.partitionKey(),
 				operation.token(),
 				operation.partitionVersion(),
@@ -538,6 +600,156 @@ final class ElasticsearchIndexTargetResolver implements IndexTargetResolver {
 
 	private static boolean hasType(ElasticsearchException exception, String type) {
 		return exception.error() != null && type.equals(exception.error().type());
+	}
+
+	/** Проводит один и тот же cycle budget через всю lifecycle-цепочку. */
+	private final class LifecycleCalls {
+
+		private final OperationBudget budget;
+
+		private LifecycleCalls(OperationBudget budget) {
+			this.budget = budget;
+		}
+
+		private void registerPartition(
+				IndexPartitionDefinition partition
+		) {
+			requireMutationAllowed();
+			lifecycleLedger.registerPartition(partition);
+		}
+
+		private Optional<IndexMaintenanceOperation> reclaimExpiredMaintenance(
+				String partitionKey,
+				Duration leaseDuration
+		) {
+			requireMutationAllowed();
+			return lifecycleLedger.reclaimExpiredMaintenance(partitionKey, leaseDuration);
+		}
+
+		private Optional<IndexMaintenanceOperation> startMaintenance(
+				String partitionKey,
+				IndexMaintenanceType type,
+				IndexGenerationNames targetNames,
+				Duration leaseDuration
+		) {
+			requireMutationAllowed();
+			return lifecycleLedger.startMaintenance(
+					partitionKey,
+					type,
+					targetNames,
+					leaseDuration);
+		}
+
+		private IndexLifecycleTransitionResult recordGenerationUuids(
+				String partitionKey,
+				UUID operationToken,
+				long expectedPartitionVersion,
+				long expectedOperationVersion,
+				String eventIndexUuid,
+				String mentionIndexUuid
+		) {
+			requireMutationAllowed();
+			return lifecycleLedger.recordGenerationUuids(
+					partitionKey,
+					operationToken,
+					expectedPartitionVersion,
+					expectedOperationVersion,
+					eventIndexUuid,
+					mentionIndexUuid);
+		}
+
+		private IndexLifecycleTransitionResult advancePhase(
+				String partitionKey,
+				UUID operationToken,
+				long expectedPartitionVersion,
+				long expectedOperationVersion,
+				IndexMaintenancePhase expectedPhase,
+				IndexMaintenancePhase nextPhase
+		) {
+			requireMutationAllowed();
+			return lifecycleLedger.advancePhase(
+					partitionKey,
+					operationToken,
+					expectedPartitionVersion,
+					expectedOperationVersion,
+					expectedPhase,
+					nextPhase);
+		}
+
+		private IndexLifecycleTransitionResult completeInitialActivation(
+				String partitionKey,
+				UUID operationToken,
+				long expectedPartitionVersion,
+				long expectedOperationVersion
+		) {
+			requireMutationAllowed();
+			return lifecycleLedger.completeInitialActivation(
+					partitionKey,
+					operationToken,
+					expectedPartitionVersion,
+					expectedOperationVersion);
+		}
+
+		private void requireMutationAllowed() {
+			if (budget != null) {
+				budget.requireAvailable();
+			}
+		}
+
+		private void installTemplates() throws IOException {
+			if (budget == null) {
+				elasticsearch.installTemplates();
+			}
+			else {
+				elasticsearch.installTemplates(budget);
+			}
+		}
+
+		private Optional<ObservedElasticsearchIndex> findExactIndex(
+				String indexName
+		) throws IOException {
+			return budget == null
+					? elasticsearch.findExactIndex(indexName)
+					: elasticsearch.findExactIndex(indexName, budget);
+		}
+
+		private void createExactIndex(String indexName) throws IOException {
+			if (budget == null) {
+				elasticsearch.createExactIndex(indexName);
+			}
+			else {
+				elasticsearch.createExactIndex(indexName, budget);
+			}
+		}
+
+		private IndexAliasMembership readStableAliases() throws IOException {
+			return budget == null
+					? elasticsearch.readStableAliases()
+					: elasticsearch.readStableAliases(budget);
+		}
+
+		private void addStableAliases(
+				String eventIndexName,
+				boolean addEvent,
+				String mentionIndexName,
+				boolean addMention
+		) throws IOException {
+			if (budget == null) {
+				elasticsearch.addStableAliases(
+						eventIndexName,
+						addEvent,
+						mentionIndexName,
+						addMention);
+			}
+			else {
+				elasticsearch.addStableAliases(
+						eventIndexName,
+						addEvent,
+						mentionIndexName,
+						addMention,
+						budget);
+			}
+		}
 	}
 
 	private record MaintenanceAcquisition(

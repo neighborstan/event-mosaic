@@ -22,6 +22,8 @@ import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededExcepti
 import com.neighbor.eventmosaic.ingestion.error.StagingStorageException;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationLeaseSnapshot;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -96,6 +98,59 @@ class ZipArchiveStagerTest {
 						budget));
 
 		assertThat(fixture.paths().csvPath().getParent()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Потерянное владение запрещает начало подготовки ZIP")
+	void lostOwnershipPreventsZipStaging() {
+		Fixture fixture = fixture();
+		DownloadedArchive downloaded = new DownloadedArchive(
+				fixture.paths().archivePath(),
+				1,
+				fixture.attempt().archive().expectedMd5(),
+				false);
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(5))
+				.withLeaseGuard(OperationLeaseSnapshot::lost, Duration.ZERO);
+
+		assertThatExceptionOfType(OperationOwnershipLostException.class)
+				.isThrownBy(() -> stager(4, 1024, 1024).stage(
+						fixture.attempt(),
+						downloaded,
+						fixture.paths(),
+						budget));
+
+		assertThat(fixture.paths().csvPath().getParent()).doesNotExist();
+	}
+
+	@Test
+	@DisplayName("Потеря владения после создания временного CSV удаляет owned part")
+	void ownershipLossAfterPartCreationCleansOwnedTemporaryCsv() throws IOException {
+		Fixture fixture = fixture(tempDir.resolve("lost-after-part"));
+		writeZip(
+				fixture.paths().archivePath(),
+				List.of(new Entry(fixture.expectedCsvName(), "row\n".repeat(4096))));
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget
+				.start(
+						Duration.ofMinutes(1),
+						() -> Files.exists(fixture.paths().csvPartPath())
+								? nanoTime.incrementAndGet()
+								: 0L)
+				.withLeaseGuard(
+						() -> Files.exists(fixture.paths().csvPartPath())
+								? OperationLeaseSnapshot.lost()
+								: OperationLeaseSnapshot.current(Duration.ofNanos(2)),
+						Duration.ZERO);
+
+		assertThatExceptionOfType(OperationOwnershipLostException.class)
+				.isThrownBy(() -> stager(4, 1024 * 1024, 1024 * 1024).stage(
+						fixture.attempt(),
+						downloaded(fixture.paths().archivePath()),
+						fixture.paths(),
+						budget));
+
+		assertThat(fixture.paths().csvPath()).doesNotExist();
+		assertThat(fixture.paths().csvPartPath()).doesNotExist();
 	}
 
 	@Test

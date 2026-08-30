@@ -41,6 +41,8 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingProgressListener
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationLeaseSnapshot;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -151,6 +153,35 @@ class DefaultGdeltArchiveProcessorTest {
 	}
 
 	@Test
+	@DisplayName("Потерянное global-владение не открывает CSV и останавливает cycle")
+	void lostOwnershipPreventsCsvAndBulk() {
+		FakeIndexWriter writer = new FakeIndexWriter(2);
+		AtomicInteger delivered = new AtomicInteger();
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(5))
+				.withLeaseGuard(OperationLeaseSnapshot::lost, Duration.ZERO);
+		ArchiveProcessingRequest base = ProcessingTestFixtures.mentionRequest();
+		ArchiveProcessingRequest request = new ArchiveProcessingRequest(
+				base.kind(),
+				base.sourceUpdateTime(),
+				base.sourceArchiveKey(),
+				base.processingFingerprint(),
+				base.indexTargets(),
+				base.csvPath(),
+				base.receiptPageSize(),
+				budget);
+
+		assertThatThrownBy(() -> processor(
+				writer,
+				validMentions(1),
+				delivered).process(
+						request,
+						ArchiveProcessingProgressListener.continuing()))
+				.isInstanceOf(OperationOwnershipLostException.class);
+		assertThat(delivered).hasValue(0);
+		assertThat(writer.commands).isEmpty();
+	}
+
+	@Test
 	@DisplayName("Deadline во время CSV сохраняет partial progress и не отправляет новый bulk")
 	void deadlineDuringCsvPreservesPartialProgress() {
 		FakeIndexWriter writer = new FakeIndexWriter(2);
@@ -190,9 +221,10 @@ class DefaultGdeltArchiveProcessorTest {
 	void keepsExactFullBatchForTerminalRefresh() {
 		FakeIndexWriter writer = new FakeIndexWriter(2);
 		DefaultGdeltArchiveProcessor processor = processor(writer, validMentions(2), null);
+		ArchiveProcessingRequest request = ProcessingTestFixtures.mentionRequest();
 
 		ArchiveProcessingResult result = processor.process(
-				ProcessingTestFixtures.mentionRequest(),
+				request,
 				ArchiveProcessingProgressListener.continuing());
 
 		assertThat(result.outcome()).isEqualTo(ArchiveProcessingOutcome.COMPLETED);
@@ -218,6 +250,11 @@ class DefaultGdeltArchiveProcessorTest {
 				.isEqualTo(ProcessingTestFixtures.ACTIVE_TARGETS.mention());
 		assertThat(writer.estimatedTargets)
 				.containsOnly(ProcessingTestFixtures.ACTIVE_TARGETS.mention());
+		assertThat(writer.requestBudgets)
+				.containsExactly(
+						request.operationBudget(),
+						request.operationBudget(),
+						request.operationBudget());
 		assertThat(result.progress()).isEqualTo(
 				new ArchiveProcessingProgress(2, 0, 0, 2, 2, 0, 2, null));
 	}
@@ -906,6 +943,7 @@ class DefaultGdeltArchiveProcessorTest {
 		private final List<GdeltIndexKind> refreshedKinds = new ArrayList<>();
 		private final List<ExactIndexTarget> refreshedTargets = new ArrayList<>();
 		private final List<ExactIndexTarget> estimatedTargets = new ArrayList<>();
+		private final List<OperationBudget> requestBudgets = new ArrayList<>();
 
 		private BulkIndexResult nextResult;
 		private RuntimeException writeFailure;
@@ -975,12 +1013,31 @@ class DefaultGdeltArchiveProcessorTest {
 		}
 
 		@Override
+		public BulkIndexResult write(
+				BulkIndexCommand<? extends GdeltIndexedDocument> command,
+				OperationBudget budget
+		) {
+			requestBudgets.add(budget);
+			return write(command);
+		}
+
+		@Override
 		public void refresh(GdeltIndexKind kind, ExactIndexTarget target) {
 			refreshedKinds.add(kind);
 			refreshedTargets.add(target);
 			if (refreshFailure != null) {
 				throw refreshFailure;
 			}
+		}
+
+		@Override
+		public void refresh(
+				GdeltIndexKind kind,
+				ExactIndexTarget target,
+				OperationBudget budget
+		) {
+			requestBudgets.add(budget);
+			refresh(kind, target);
 		}
 
 		@Override
@@ -1007,6 +1064,15 @@ class DefaultGdeltArchiveProcessorTest {
 									.finish()
 							: query.expectedDigest(),
 					receiptStatus);
+		}
+
+		@Override
+		public ArchiveReceiptVerification verifyReceipt(
+				ArchiveReceiptQuery query,
+				OperationBudget budget
+		) {
+			requestBudgets.add(budget);
+			return verifyReceipt(query);
 		}
 	}
 }

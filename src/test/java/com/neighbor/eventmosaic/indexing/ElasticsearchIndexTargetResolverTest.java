@@ -1,8 +1,10 @@
 package com.neighbor.eventmosaic.indexing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -25,6 +27,9 @@ import com.neighbor.eventmosaic.indexing.api.IndexPartitionDefinition;
 import com.neighbor.eventmosaic.indexing.api.IndexingAccessException;
 import com.neighbor.eventmosaic.indexing.api.IndexingErrorCode;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetResolutionStatus;
+import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationLeaseSnapshot;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
@@ -35,6 +40,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -59,6 +65,33 @@ class ElasticsearchIndexTargetResolverTest {
 			ledger,
 			elasticsearch,
 			clock);
+
+	@Test
+	@DisplayName("Потеря владения перед первой записью не меняет ledger и не обращается к Elasticsearch")
+	void guardedResolveStopsBeforeFirstDurableMutation() {
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(12), () -> 0L)
+				.withLeaseGuard(OperationLeaseSnapshot::lost, Duration.ZERO);
+
+		assertThatThrownBy(() -> resolver.resolve(SOURCE_TIME, budget))
+				.isInstanceOf(OperationOwnershipLostException.class);
+
+		verifyNoInteractions(ledger, elasticsearch);
+	}
+
+	@Test
+	@DisplayName("Автономный запуск регистрирует раздел без общего бюджета цикла")
+	void standaloneResolveKeepsDurableMutationWithoutCycleBudget() {
+		stubRegisteredPartition();
+		when(ledger.findRecoverableOperation(PARTITION_KEY)).thenReturn(Optional.of(operation()));
+		when(ledger.findActiveTargets(PARTITION_KEY)).thenReturn(Optional.of(activeTargets()));
+
+		var result = resolver.resolve(SOURCE_TIME);
+
+		assertThat(result.status())
+				.isEqualTo(IndexTargetResolutionStatus.MAINTENANCE_DEFERRED);
+		verify(ledger).registerPartition(partition());
+		verifyNoInteractions(elasticsearch);
+	}
 
 	@Test
 	@DisplayName("Open maintenance barrier не выдает существующую ACTIVE pair writer")
@@ -140,6 +173,29 @@ class ElasticsearchIndexTargetResolverTest {
 	}
 
 	@Test
+	@DisplayName("ACTIVE target проводит один cycle budget через все Elasticsearch проверки")
+	void guardedResolvePassesBudgetToEveryElasticsearchRequest() throws IOException {
+		stubRegisteredPartition();
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(12), () -> 0L);
+		when(ledger.findRecoverableOperation(PARTITION_KEY)).thenReturn(Optional.empty());
+		when(ledger.findActiveTargets(PARTITION_KEY)).thenReturn(Optional.of(activeTargets()));
+		when(elasticsearch.readStableAliases(same(budget))).thenReturn(
+				new IndexAliasMembership(Set.of(EVENT_INDEX), Set.of(MENTION_INDEX)));
+		when(elasticsearch.findExactIndex(eq(EVENT_INDEX), same(budget)))
+				.thenReturn(Optional.of(eventObserved()));
+		when(elasticsearch.findExactIndex(eq(MENTION_INDEX), same(budget)))
+				.thenReturn(Optional.of(mentionObserved()));
+
+		var result = resolver.resolve(SOURCE_TIME, budget);
+
+		assertThat(result.status()).isEqualTo(IndexTargetResolutionStatus.READY);
+		verify(elasticsearch).readStableAliases(same(budget));
+		verify(elasticsearch).findExactIndex(eq(EVENT_INDEX), same(budget));
+		verify(elasticsearch).findExactIndex(eq(MENTION_INDEX), same(budget));
+		verify(elasticsearch, never()).readStableAliases();
+	}
+
+	@Test
 	@DisplayName("Observed write block возвращает typed outcome вместо READY")
 	void returnsWriteBlockedForBlockedActiveTarget() throws IOException {
 		stubRegisteredPartition();
@@ -158,9 +214,15 @@ class ElasticsearchIndexTargetResolverTest {
 	}
 
 	@Test
-	@DisplayName("Initial promotion создает pair после templates и дополняет partial alias")
-	void createsPairAfterTemplatesAndCompletesPartialAliasMembership() throws IOException {
+	@DisplayName("Первое создание проверяет владение перед каждой долговечной записью")
+	void guardedInitialPromotionChecksEveryDurableMutation() throws IOException {
 		stubRegisteredPartition();
+		AtomicInteger leaseChecks = new AtomicInteger();
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(12), () -> 0L)
+				.withLeaseGuard(() -> {
+					leaseChecks.incrementAndGet();
+					return OperationLeaseSnapshot.current(Duration.ofMinutes(15));
+				}, Duration.ZERO);
 		IndexMaintenanceOperation operation = operation();
 		IndexGeneration unrecorded = building(null, null);
 		IndexGeneration recorded = building(EVENT_UUID, MENTION_UUID);
@@ -202,33 +264,115 @@ class ElasticsearchIndexTargetResolverTest {
 				eq(operation.partitionVersion()),
 				any(Long.class)))
 				.thenReturn(IndexLifecycleTransitionResult.APPLIED);
-		when(elasticsearch.findExactIndex(EVENT_INDEX))
+		when(elasticsearch.findExactIndex(eq(EVENT_INDEX), same(budget)))
 				.thenReturn(Optional.empty())
 				.thenReturn(Optional.of(eventObserved()))
 				.thenReturn(Optional.of(eventObserved()))
 				.thenReturn(Optional.of(eventObserved()));
-		when(elasticsearch.findExactIndex(MENTION_INDEX))
+		when(elasticsearch.findExactIndex(eq(MENTION_INDEX), same(budget)))
 				.thenReturn(Optional.empty())
 				.thenReturn(Optional.of(mentionObserved()))
 				.thenReturn(Optional.of(mentionObserved()))
 				.thenReturn(Optional.of(mentionObserved()));
-		when(elasticsearch.readStableAliases())
+		when(elasticsearch.readStableAliases(same(budget)))
 				.thenReturn(new IndexAliasMembership(Set.of(EVENT_INDEX), Set.of()))
 				.thenReturn(new IndexAliasMembership(Set.of(EVENT_INDEX), Set.of(MENTION_INDEX)))
 				.thenReturn(new IndexAliasMembership(Set.of(EVENT_INDEX), Set.of(MENTION_INDEX)));
 
-		var result = resolver.resolve(SOURCE_TIME);
+		var result = resolver.resolve(SOURCE_TIME, budget);
 
 		assertThat(result.status()).isEqualTo(IndexTargetResolutionStatus.READY);
+		assertThat(leaseChecks).hasValue(8);
 		InOrder creationOrder = inOrder(elasticsearch);
-		creationOrder.verify(elasticsearch).installTemplates();
-		creationOrder.verify(elasticsearch).createExactIndex(EVENT_INDEX);
-		creationOrder.verify(elasticsearch).createExactIndex(MENTION_INDEX);
+		creationOrder.verify(elasticsearch).installTemplates(same(budget));
+		creationOrder.verify(elasticsearch).createExactIndex(eq(EVENT_INDEX), same(budget));
+		creationOrder.verify(elasticsearch).createExactIndex(eq(MENTION_INDEX), same(budget));
 		verify(elasticsearch).addStableAliases(
-				EVENT_INDEX,
-				false,
-				MENTION_INDEX,
-				true);
+				eq(EVENT_INDEX),
+				eq(false),
+				eq(MENTION_INDEX),
+				eq(true),
+				same(budget));
+	}
+
+	@Test
+	@DisplayName("Потеря владения перед сохранением UUID останавливает следующие записи и запросы")
+	void ownershipLossBeforeUuidMutationStopsFollowingCalls() throws IOException {
+		stubRegisteredPartition();
+		AtomicInteger leaseChecks = new AtomicInteger();
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(12), () -> 0L)
+				.withLeaseGuard(() -> leaseChecks.incrementAndGet() == 4
+						? OperationLeaseSnapshot.lost()
+						: OperationLeaseSnapshot.current(Duration.ofMinutes(15)), Duration.ZERO);
+		IndexMaintenanceOperation operation = operation();
+		when(ledger.findRecoverableOperation(PARTITION_KEY)).thenReturn(Optional.empty());
+		when(ledger.findActiveTargets(PARTITION_KEY)).thenReturn(Optional.empty());
+		when(ledger.findGenerations(PARTITION_KEY))
+				.thenReturn(List.of())
+				.thenReturn(List.of(building(null, null)));
+		when(ledger.startMaintenance(
+				eq(PARTITION_KEY),
+				eq(IndexMaintenanceType.INITIAL_PROMOTION),
+				any(IndexGenerationNames.class),
+				any(Duration.class)))
+				.thenReturn(Optional.of(operation));
+		when(ledger.advancePhase(
+				eq(PARTITION_KEY),
+				eq(operation.token()),
+				eq(operation.partitionVersion()),
+				any(Long.class),
+				eq(IndexMaintenancePhase.PLANNED),
+				eq(IndexMaintenancePhase.BUILDING)))
+				.thenReturn(IndexLifecycleTransitionResult.APPLIED);
+		when(elasticsearch.findExactIndex(eq(EVENT_INDEX), same(budget)))
+				.thenReturn(Optional.empty())
+				.thenReturn(Optional.of(eventObserved()));
+		when(elasticsearch.findExactIndex(eq(MENTION_INDEX), same(budget)))
+				.thenReturn(Optional.empty())
+				.thenReturn(Optional.of(mentionObserved()));
+
+		assertThatThrownBy(() -> resolver.resolve(SOURCE_TIME, budget))
+				.isInstanceOf(OperationOwnershipLostException.class);
+
+		assertThat(leaseChecks).hasValue(4);
+		verify(ledger, never()).recordGenerationUuids(
+				any(), any(), any(Long.class), any(Long.class), any(), any());
+		verify(ledger, never()).advancePhase(
+				any(),
+				any(),
+				any(Long.class),
+				any(Long.class),
+				eq(IndexMaintenancePhase.BUILDING),
+				eq(IndexMaintenancePhase.VERIFIED));
+		verify(ledger, never()).completeInitialActivation(
+				any(), any(), any(Long.class), any(Long.class));
+		verify(elasticsearch, never()).readStableAliases(same(budget));
+		verify(elasticsearch, never()).addStableAliases(
+				any(), any(Boolean.class), any(), any(Boolean.class), same(budget));
+	}
+
+	@Test
+	@DisplayName("Потеря владения перед повторным захватом просроченной операции запрещает запись")
+	void ownershipLossBeforeReclaimStopsMaintenanceRecovery() throws IOException {
+		stubRegisteredPartition();
+		AtomicInteger leaseChecks = new AtomicInteger();
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(12), () -> 0L)
+				.withLeaseGuard(() -> leaseChecks.incrementAndGet() == 2
+						? OperationLeaseSnapshot.lost()
+						: OperationLeaseSnapshot.current(Duration.ofMinutes(15)), Duration.ZERO);
+		IndexMaintenanceOperation expired = cutoverRequestedOperation();
+		when(ledger.findRecoverableOperation(PARTITION_KEY)).thenReturn(Optional.of(expired));
+		when(ledger.findActiveTargets(PARTITION_KEY)).thenReturn(Optional.empty());
+
+		assertThatThrownBy(() -> resolver.resolve(SOURCE_TIME, budget))
+				.isInstanceOf(OperationOwnershipLostException.class);
+
+		assertThat(leaseChecks).hasValue(2);
+		verify(ledger, never()).reclaimExpiredMaintenance(any(), any());
+		verify(ledger, never()).findGenerations(any());
+		verify(ledger, never()).startMaintenance(any(), any(), any(), any());
+		verify(elasticsearch, never()).findExactIndex(any(), same(budget));
+		verify(elasticsearch, never()).readStableAliases(same(budget));
 	}
 
 	@Test

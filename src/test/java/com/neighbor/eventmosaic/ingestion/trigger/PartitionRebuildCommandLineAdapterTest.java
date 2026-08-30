@@ -9,7 +9,6 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
-import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.indexing.api.IndexGenerationNames;
 import com.neighbor.eventmosaic.indexing.api.IndexMaintenancePhase;
 import com.neighbor.eventmosaic.indexing.api.IndexRepairCause;
@@ -21,13 +20,10 @@ import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionR
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionRebuildOutcome;
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionRebuildPlan;
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildService.PartitionRebuildResult;
-import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
-import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.config.PartitionRebuildCommandProperties;
 import com.neighbor.eventmosaic.ingestion.config.PartitionRebuildCommandProperties.Mode;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
@@ -121,41 +117,6 @@ class PartitionRebuildCommandLineAdapterTest {
 	}
 
 	@Test
-	@DisplayName("Скрытая настройка окружения не запускает восстановление")
-	void modeMustBeSuppliedAsCommandLineOption() {
-		PartitionRebuildCommandLineAdapter adapter = adapter(
-				new PartitionRebuildCommandProperties(
-						Mode.INSPECT_REBUILD,
-						"p20260727",
-						temporaryDirectory.resolve("plan.json"),
-						null,
-						null));
-
-		assertThatThrownBy(() -> adapter.run(new DefaultApplicationArguments(new String[0])))
-				.isInstanceOf(IllegalArgumentException.class)
-				.hasMessage("partition rebuild mode must be supplied as a command-line option");
-		verifyNoInteractions(rebuildService);
-	}
-
-	@Test
-	@DisplayName("Восстановление не совмещается с ingestion one-shot")
-	void rebuildRejectsConcurrentIngestionOneShot() {
-		PartitionRebuildCommandLineAdapter adapter = adapter(
-				new PartitionRebuildCommandProperties(
-						Mode.INSPECT_REBUILD,
-						"p20260727",
-						temporaryDirectory.resolve("plan.json"),
-						null,
-						null),
-				ingestionProperties(true));
-
-		assertThatThrownBy(() -> adapter.run(arguments(Mode.INSPECT_REBUILD)))
-				.isInstanceOf(IllegalArgumentException.class)
-				.hasMessage("partition rebuild cannot run with ingestion one-shot enabled");
-		verifyNoInteractions(rebuildService);
-	}
-
-	@Test
 	@DisplayName("Незавершенное восстановление возвращает ошибку процесса")
 	void deferredRebuildFailsCommand() throws Exception {
 		Path planFile = temporaryDirectory.resolve("deferred-plan.json");
@@ -183,40 +144,15 @@ class PartitionRebuildCommandLineAdapterTest {
 	private PartitionRebuildCommandLineAdapter adapter(
 			PartitionRebuildCommandProperties properties
 	) {
-		return adapter(properties, ingestionProperties(false));
-	}
-
-	private PartitionRebuildCommandLineAdapter adapter(
-			PartitionRebuildCommandProperties properties,
-			GdeltIngestionProperties ingestionProperties
-	) {
 		return new PartitionRebuildCommandLineAdapter(
 				rebuildService,
 				properties,
-				ingestionProperties,
 				objectMapper);
 	}
 
 	private DefaultApplicationArguments arguments(Mode mode) {
 		return new DefaultApplicationArguments(
 				"--" + PartitionRebuildCommandLine.PROPERTY_PREFIX + ".mode=" + mode);
-	}
-
-	private GdeltIngestionProperties ingestionProperties(boolean oneShotEnabled) {
-		return new GdeltIngestionProperties(
-				GdeltSourceContract.OFFICIAL_DOWNLOAD_BASE_URI,
-				temporaryDirectory,
-				new GdeltIngestionProperties.Http(
-						65536,
-						1024 * 1024,
-						Duration.ofSeconds(1),
-						Duration.ofSeconds(5)),
-				new GdeltIngestionProperties.Zip(4, 1024 * 1024, 1024 * 1024),
-				new GdeltIngestionProperties.Continuity(
-						Duration.ofMinutes(15),
-						FirstRunPolicy.LATEST,
-						null),
-				oneShotEnabled);
 	}
 
 	private PartitionRebuildPlan plan() {

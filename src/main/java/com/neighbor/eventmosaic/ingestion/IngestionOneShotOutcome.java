@@ -9,6 +9,9 @@ public enum IngestionOneShotOutcome {
 	/** Poll или archive пока не достиг durable retryNotBefore либо исчерпан. */
 	RETRY_DEFERRED,
 
+	/** Source poll потерял более глубокий attempt token до downstream I/O. */
+	OWNERSHIP_LOST,
+
 	/** Общий monotonic cycle budget исчерпан. */
 	OPERATION_DEADLINE_EXCEEDED,
 

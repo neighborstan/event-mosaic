@@ -37,6 +37,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveAttemptState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttempt;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingAttemptState;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimResult;
+import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingClaimStatus;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFingerprint;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingLedger;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingReceipt;
@@ -66,18 +67,24 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
+import com.neighbor.eventmosaic.shared.time.OperationLeaseSnapshot;
+import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
@@ -135,7 +142,7 @@ class GdeltPipelineServiceTest {
 				GdeltTestFixtures.backendDataProperties(),
 				metrics,
 				storageMonitor);
-		when(indexTargetResolver.resolve(any())).thenReturn(
+		when(indexTargetResolver.resolve(any(), any(OperationBudget.class))).thenReturn(
 				IndexTargetResolution.ready(ACTIVE_TARGETS));
 		when(fingerprintFactory.create(
 				anyString(),
@@ -166,6 +173,24 @@ class GdeltPipelineServiceTest {
 	}
 
 	@Test
+	@DisplayName("Потеря source poll ownership завершает pipeline без downstream I/O")
+	void sourcePollOwnershipLossFinishesWithoutDownstreamIo() {
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.empty(), false, true));
+
+		assertThat(service.runOneShot()).isEqualTo(IngestionOneShotOutcome.OWNERSHIP_LOST);
+
+		verifyNoInteractions(
+				processingLedger,
+				archiveProcessor,
+				indexWriter,
+				indexTargetResolver);
+		verify(metrics).cycleDuration(
+				anyLong(),
+				eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
+	}
+
+	@Test
 	@DisplayName("Elasticsearch pressure завершает one-shot до resolver, claim и bulk")
 	void elasticsearchPressureStopsBeforeResolverClaimAndBulk() {
 		IngestionRunState runState = runState(false);
@@ -186,7 +211,7 @@ class GdeltPipelineServiceTest {
 	}
 
 	@Test
-	@DisplayName("Deadline после завершенного Event не начинает Mention и не откатывает Event")
+	@DisplayName("Deadline после внешнего результата сохраняет retryable отказ и не начинает Mention")
 	void deadlineAfterCompletedEventDoesNotStartMention() {
 		IngestionRunState runState = runState(true);
 		when(ingestionRunService.runOneShot(any()))
@@ -204,13 +229,90 @@ class GdeltPipelineServiceTest {
 				.isEqualTo(IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED);
 
 		verify(archiveProcessor).process(any(), any(), any());
-		verify(processingLedger).markIndexed(any(), any(), any());
+		verify(processingLedger, never()).markIndexed(any(), any(), any());
+		verify(processingLedger).markFailed(
+				any(),
+				eq(new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
+						ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED.code(),
+						true)),
+				eq(new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress(
+						1, 0, 0, 1, 1, 0, 1, null)),
+				eq(null));
 		verify(processingLedger).register(
 				runState.archives().getFirst().archive().idempotencyKey(),
 				new ArchiveProcessingFingerprint(
 						GdeltTestFixtures.EVENT_MD5,
 						"gdelt-processing-v1",
 						EVENT_FINGERPRINT));
+	}
+
+	@Test
+	@DisplayName("Потеря global ownership после успешного результата не подтверждает индекс")
+	void globalOwnershipLossAfterCompletedResultSkipsIndexedTransition() {
+		IngestionRunState runState = runState(true);
+		AtomicBoolean current = new AtomicBoolean(true);
+		OperationBudget budget = guardedBudget(current);
+		when(ingestionRunService.runOneShot(budget))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		stubPendingRegistrationAndClaims();
+		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
+			ArchiveProcessingRequest request = invocation.getArgument(0);
+			current.set(false);
+			return completed(request.kind(), successfulProgress());
+		});
+
+		assertThatThrownBy(() -> service.runOneShot(budget))
+				.isInstanceOf(OperationOwnershipLostException.class);
+
+		verify(processingLedger, never()).markIndexed(any(), any(), any());
+		verify(processingLedger, never()).markFailed(any(), any(), any(), any());
+		verify(processingLedger, never()).register(
+				runState.archives().getLast().archive().idempotencyKey(),
+				mentionFingerprint());
+	}
+
+	@Test
+	@DisplayName("Потеря global ownership после failure результата не записывает отказ")
+	void globalOwnershipLossAfterFailedResultSkipsFailureTransition() {
+		IngestionRunState runState = runState(false);
+		AtomicBoolean current = new AtomicBoolean(true);
+		OperationBudget budget = guardedBudget(current);
+		when(ingestionRunService.runOneShot(budget))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		stubPendingRegistrationAndClaims();
+		when(archiveProcessor.process(any(), any(), any())).thenAnswer(_ -> {
+			current.set(false);
+			return ArchiveProcessingResult.failed(
+					GdeltArchiveKind.TRANSLATION_EVENTS,
+					successfulProgress(),
+					new ArchiveProcessingFailure(
+							ArchiveProcessingErrorCode.BULK_PARTIAL_FAILURE,
+							true,
+							1L));
+		});
+
+		assertThatThrownBy(() -> service.runOneShot(budget))
+				.isInstanceOf(OperationOwnershipLostException.class);
+
+		verify(processingLedger, never()).markIndexed(any(), any(), any());
+		verify(processingLedger, never()).markFailed(any(), any(), any(), any());
+	}
+
+	@Test
+	@DisplayName("Сигнал потери global ownership из processor не становится generic failure")
+	void processorOwnershipSignalSkipsGenericFailureTransition() {
+		IngestionRunState runState = runState(false);
+		OperationOwnershipLostException ownershipLost =
+				new OperationOwnershipLostException();
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		stubPendingRegistrationAndClaims();
+		when(archiveProcessor.process(any(), any(), any())).thenThrow(ownershipLost);
+
+		assertThatThrownBy(() -> service.runOneShot()).isSameAs(ownershipLost);
+
+		verify(processingLedger, never()).markIndexed(any(), any(), any());
+		verify(processingLedger, never()).markFailed(any(), any(), any(), any());
 	}
 
 	@Test
@@ -244,6 +346,38 @@ class GdeltPipelineServiceTest {
 	}
 
 	@Test
+	@DisplayName("Истекшая deadline во время progress сохраняет partial counters и закрывает attempt")
+	void expiredDeadlineDuringProgressPersistsPartialCounters() {
+		IngestionRunState runState = runState(false);
+		AtomicLong nanoTime = new AtomicLong();
+		OperationBudget budget = OperationBudget.start(Duration.ofSeconds(1), nanoTime::get);
+		when(ingestionRunService.runOneShot(budget))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		stubPendingRegistrationAndClaims();
+		ArchiveProcessingProgress partial = new ArchiveProcessingProgress(
+				2, 0, 1, 1, 1, 0, 0, null);
+		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
+			ArchiveProcessingProgressListener listener = invocation.getArgument(1);
+			nanoTime.set(Duration.ofSeconds(1).toNanos());
+			listener.onProgress(partial);
+			throw new AssertionError("Deadline signal must stop the processor callback");
+		});
+
+		assertThat(service.runOneShot(budget))
+				.isEqualTo(IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED);
+
+		verify(processingLedger).markFailed(
+				any(),
+				eq(new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingFailure(
+						ArchiveProcessingErrorCode.OPERATION_DEADLINE_EXCEEDED.code(),
+						true)),
+				eq(new com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingProgress(
+						2, 0, 1, 1, 1, 0, 0, null)),
+				eq(null));
+		verify(processingLedger, never()).markIndexed(any(), any(), any());
+	}
+
+	@Test
 	@DisplayName("Регистрирует, claim-ит и завершает оба staged архива")
 	void processesBothStagedArchives() {
 		IngestionRunState runState = runState(true);
@@ -271,7 +405,7 @@ class GdeltPipelineServiceTest {
 	void defersProcessingWhilePartitionIsUnderMaintenance() {
 		IngestionRunState runState = runState(false);
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
-		when(indexTargetResolver.resolve(any())).thenReturn(
+		when(indexTargetResolver.resolve(any(), any(OperationBudget.class))).thenReturn(
 				IndexTargetResolution.outcome(
 						IndexTargetResolutionStatus.MAINTENANCE_DEFERRED));
 
@@ -298,7 +432,8 @@ class GdeltPipelineServiceTest {
 					ArchiveProcessingProgress.empty());
 		});
 
-		assertThat(service.runLatestUpdate()).isSameAs(runState);
+		assertThatThrownBy(service::runLatestUpdate)
+				.isInstanceOf(OperationOwnershipLostException.class);
 
 		assertThat(output.getAll())
 				.contains("GDELT archive processing lost ownership with cleanup failure")
@@ -327,6 +462,15 @@ class GdeltPipelineServiceTest {
 	}
 
 	@Test
+	@DisplayName("Замена target после claim завершает цикл потерей владения")
+	void preservesReplacedTargetOutcomeAfterClaim() {
+		assertPostClaimTargetOutcome(
+				IndexTargetUnavailableReason.REPLACED,
+				"OWNERSHIP_LOST",
+				"INDEX_TARGET_REPLACED");
+	}
+
+	@Test
 	@DisplayName("После смены generation обновляет matched receipt и пропускает INDEXED архив")
 	void recordsMatchedReceiptAgainstCurrentGenerationBeforeSkip() {
 		IngestionRunState runState = runState(false);
@@ -343,7 +487,7 @@ class GdeltPipelineServiceTest {
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
 		when(processingLedger.register(archive.archive().idempotencyKey(), fingerprint))
 				.thenReturn(indexedState(archive, fingerprint, storedBinding));
-		when(indexWriter.verifyReceipt(any())).thenReturn(matched);
+		when(indexWriter.verifyReceipt(any(), any(OperationBudget.class))).thenReturn(matched);
 		when(processingLedger.recordReceiptMatch(
 				eq(archive.archive().idempotencyKey()),
 				eq(fingerprint.processingFingerprint()),
@@ -364,10 +508,66 @@ class GdeltPipelineServiceTest {
 				storedBinding,
 				currentBinding,
 				matched);
-		verify(indexWriter).verifyReceipt(org.mockito.ArgumentMatchers.argThat(query ->
-				query.target().equals(ACTIVE_TARGETS.event())));
+		verify(indexWriter).verifyReceipt(
+				org.mockito.ArgumentMatchers.argThat(query ->
+						query.target().equals(ACTIVE_TARGETS.event())),
+				any(OperationBudget.class));
 		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
+	}
+
+	@Test
+	@DisplayName("Потеря global ownership во время receipt read запрещает durable подтверждение")
+	void lostGlobalOwnershipAfterReceiptReadPreventsDurableTransition() {
+		IngestionRunState runState = runState(false);
+		IngestionArchiveState archive = runState.archives().getFirst();
+		ArchiveProcessingFingerprint fingerprint = eventFingerprint();
+		ArchiveProcessingTargetBinding storedBinding = previousTargetBinding(
+				GdeltIndexKind.EVENT);
+		ArchiveReceiptVerification matched = verification(
+				GdeltIndexKind.EVENT,
+				1,
+				1,
+				ArchiveReceiptStatus.MATCHED);
+		AtomicBoolean current = new AtomicBoolean(true);
+		OperationBudget budget = OperationBudget
+				.start(Duration.ofMinutes(1))
+				.withLeaseGuard(
+						() -> current.get()
+								? OperationLeaseSnapshot.current(Duration.ofMinutes(5))
+								: OperationLeaseSnapshot.lost(),
+						Duration.ZERO);
+
+		when(ingestionRunService.runOneShot(budget))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		when(processingLedger.register(archive.archive().idempotencyKey(), fingerprint))
+				.thenReturn(indexedState(archive, fingerprint, storedBinding));
+		when(indexWriter.verifyReceipt(any(), same(budget))).thenAnswer(_ -> {
+			current.set(false);
+			return matched;
+		});
+
+		assertThatThrownBy(() -> service.runOneShot(budget))
+				.isInstanceOf(OperationOwnershipLostException.class);
+
+		verify(processingLedger, never()).recordReceiptMatch(
+				anyString(),
+				anyString(),
+				anyInt(),
+				anyLong(),
+				any(),
+				any(),
+				any());
+		verify(processingLedger, never()).recordReceiptMismatch(
+				anyString(),
+				anyString(),
+				anyInt(),
+				anyLong(),
+				any(),
+				any(),
+				any(),
+				any());
+		verify(processingLedger, never()).claim(anyString(), any(), any());
 	}
 
 	@Test
@@ -387,7 +587,7 @@ class GdeltPipelineServiceTest {
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
 		when(processingLedger.register(archive.archive().idempotencyKey(), fingerprint))
 				.thenReturn(indexedState(archive, fingerprint, storedBinding));
-		when(indexWriter.verifyReceipt(any())).thenReturn(mismatch);
+		when(indexWriter.verifyReceipt(any(), any(OperationBudget.class))).thenReturn(mismatch);
 		when(processingLedger.recordReceiptMismatch(
 				eq(archive.archive().idempotencyKey()),
 				eq(fingerprint.processingFingerprint()),
@@ -399,7 +599,8 @@ class GdeltPipelineServiceTest {
 				any()))
 				.thenReturn(AttemptTransitionResult.OWNERSHIP_LOST);
 
-		service.runLatestUpdate();
+		assertThatThrownBy(service::runLatestUpdate)
+				.isInstanceOf(OperationOwnershipLostException.class);
 
 		verify(processingLedger).recordReceiptMismatch(
 				eq(archive.archive().idempotencyKey()),
@@ -421,7 +622,7 @@ class GdeltPipelineServiceTest {
 	void defersMissingActiveGenerationWithoutAutoCreate() {
 		IngestionRunState runState = runState(false);
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
-		when(indexTargetResolver.resolve(any())).thenReturn(
+		when(indexTargetResolver.resolve(any(), any(OperationBudget.class))).thenReturn(
 				IndexTargetResolution.outcome(IndexTargetResolutionStatus.MISSING));
 
 		service.runLatestUpdate();
@@ -429,37 +630,72 @@ class GdeltPipelineServiceTest {
 		verifyNoInteractions(processingLedger, indexWriter, archiveProcessor);
 	}
 
-	@Test
-	@DisplayName("Потеря ownership при receipt reopen не создаёт новый attempt")
-	void skipsClaimWhenReceiptReopenLosesOwnership() {
-		IngestionRunState runState = runState(false);
-		IngestionArchiveState archive = runState.archives().getFirst();
-		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
-		when(processingLedger.register(anyString(), any()))
-				.thenAnswer(invocation -> indexedState(
-						archive,
-						invocation.getArgument(1)));
-		when(indexWriter.verifyReceipt(any())).thenReturn(
-				verification(
+	@ParameterizedTest(name = "{0}")
+	@MethodSource("ownershipStatusPaths")
+	@DisplayName("Статус потери владения останавливает цикл до следующего архива")
+	void ownershipStatusStopsBeforeNextArchive(OwnershipStatusPath path) {
+		IngestionRunState runState = runState(true);
+		IngestionArchiveState event = runState.archives().getFirst();
+		IngestionArchiveState mention = runState.archives().getLast();
+		String eventKey = event.archive().idempotencyKey();
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+
+		switch (path) {
+			case INDEX_TARGET_RESOLUTION -> when(indexTargetResolver.resolve(
+					any(),
+					any(OperationBudget.class))).thenReturn(
+					IndexTargetResolution.outcome(IndexTargetResolutionStatus.OWNERSHIP_LOST));
+			case PROCESSING_CLAIM -> {
+				when(processingLedger.register(eventKey, eventFingerprint()))
+						.thenReturn(pendingState(eventKey, eventFingerprint()));
+				when(processingLedger.claim(eq(eventKey), any(), any())).thenReturn(
+						ArchiveProcessingClaimResult.outcome(
+								ArchiveProcessingClaimStatus.OWNERSHIP_LOST));
+			}
+			case RECEIPT_TRANSITION -> {
+				ArchiveReceiptVerification mismatch = verification(
 						GdeltIndexKind.EVENT,
 						1,
 						2,
-						ArchiveReceiptStatus.SURPLUS));
-		when(processingLedger.recordReceiptMismatch(
-				anyString(),
-				anyString(),
-				anyInt(),
+						ArchiveReceiptStatus.SURPLUS);
+				when(processingLedger.register(eventKey, eventFingerprint()))
+						.thenReturn(indexedState(event, eventFingerprint()));
+				when(indexWriter.verifyReceipt(any(), any(OperationBudget.class)))
+						.thenReturn(mismatch);
+				when(processingLedger.recordReceiptMismatch(
+						anyString(), anyString(), anyInt(), anyLong(), any(), any(), any(), any()))
+						.thenReturn(AttemptTransitionResult.OWNERSHIP_LOST);
+			}
+			case PROCESSOR_RESULT -> {
+				stubPendingRegistrationAndClaims();
+				when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
+					ArchiveProcessingRequest request = invocation.getArgument(0);
+					return ArchiveProcessingResult.ownershipLost(
+							request.kind(),
+							ArchiveProcessingProgress.empty());
+				});
+			}
+			case INDEXED_TRANSITION -> {
+				stubPendingRegistrationAndClaims();
+				when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
+					ArchiveProcessingRequest request = invocation.getArgument(0);
+					return completed(request.kind(), successfulProgress());
+				});
+				when(processingLedger.markIndexed(any(), any(), any()))
+						.thenReturn(AttemptTransitionResult.OWNERSHIP_LOST);
+			}
+		}
+
+		assertThatThrownBy(service::runOneShot)
+				.isInstanceOf(OperationOwnershipLostException.class);
+
+		verify(processingLedger, never()).register(
+				mention.archive().idempotencyKey(),
+				mentionFingerprint());
+		verify(metrics).cycleDuration(
 				anyLong(),
-				any(),
-				any(),
-				any(),
-				any()))
-				.thenReturn(AttemptTransitionResult.OWNERSHIP_LOST);
-
-		service.runLatestUpdate();
-
-		verify(processingLedger, never()).claim(anyString(), any(), any());
-		verifyNoInteractions(archiveProcessor);
+				eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
 	}
 
 	@Test
@@ -472,7 +708,7 @@ class GdeltPipelineServiceTest {
 				.thenAnswer(invocation -> indexedState(
 						archive,
 						invocation.getArgument(1)));
-		when(indexWriter.verifyReceipt(any())).thenReturn(
+		when(indexWriter.verifyReceipt(any(), any(OperationBudget.class))).thenReturn(
 				verification(
 						GdeltIndexKind.EVENT,
 						1,
@@ -515,7 +751,7 @@ class GdeltPipelineServiceTest {
 		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
 		when(processingLedger.register(archiveKey, eventFingerprint()))
 				.thenReturn(indexedState(archive, eventFingerprint()));
-		when(indexWriter.verifyReceipt(any())).thenReturn(
+		when(indexWriter.verifyReceipt(any(), any(OperationBudget.class))).thenReturn(
 				verification(
 						GdeltIndexKind.EVENT,
 						1,
@@ -582,7 +818,9 @@ class GdeltPipelineServiceTest {
 				.thenAnswer(invocation -> indexedState(
 						archive,
 						invocation.getArgument(1)));
-		when(indexWriter.verifyReceipt(any(ArchiveReceiptQuery.class))).thenThrow(failure);
+		when(indexWriter.verifyReceipt(
+				any(ArchiveReceiptQuery.class),
+				any(OperationBudget.class))).thenThrow(failure);
 
 		assertThatThrownBy(service::runLatestUpdate).isSameAs(failure);
 
@@ -596,23 +834,36 @@ class GdeltPipelineServiceTest {
 	@Test
 	@DisplayName("Исчезновение target во время receipt дает ownership outcome без replay")
 	void treatsMissingTargetDuringReceiptAsOwnershipOutcome() {
-		IngestionRunState runState = runState(false);
-		IngestionArchiveState archive = runState.archives().getFirst();
-		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
-		when(processingLedger.register(anyString(), any()))
-				.thenAnswer(invocation -> indexedState(
-						archive,
-						invocation.getArgument(1)));
-		when(indexWriter.verifyReceipt(any(ArchiveReceiptQuery.class))).thenThrow(
-				new IndexTargetUnavailableException(IndexTargetUnavailableReason.MISSING));
+		IngestionRunState runState = runState(true);
+		IngestionArchiveState event = runState.archives().getFirst();
+		IngestionArchiveState mention = runState.archives().getLast();
+		IndexTargetUnavailableException failure =
+				new IndexTargetUnavailableException(IndexTargetUnavailableReason.MISSING);
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		when(processingLedger.register(event.archive().idempotencyKey(), eventFingerprint()))
+				.thenReturn(indexedState(event, eventFingerprint()));
+		when(indexWriter.verifyReceipt(
+				any(ArchiveReceiptQuery.class),
+				any(OperationBudget.class))).thenThrow(failure);
 
-		assertThat(service.runLatestUpdate()).isSameAs(runState);
+		assertThatThrownBy(service::runOneShot)
+				.isInstanceOfSatisfying(
+						OperationOwnershipLostException.class,
+						ownershipLost -> assertThat(ownershipLost.getSuppressed())
+								.containsExactly(failure));
 
 		verify(processingLedger, never())
 				.recordReceiptMismatch(
 						anyString(), anyString(), anyInt(), anyLong(), any(), any(), any(), any());
 		verify(processingLedger, never()).claim(anyString(), any(), any());
+		verify(processingLedger, never()).register(
+				mention.archive().idempotencyKey(),
+				mentionFingerprint());
 		verifyNoInteractions(archiveProcessor);
+		verify(metrics).cycleDuration(
+				anyLong(),
+				eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
 	}
 
 	@Test
@@ -638,7 +889,9 @@ class GdeltPipelineServiceTest {
 						mentionArchiveKey,
 						mentionFingerprint(),
 						invocation.getArgument(1)));
-		when(indexWriter.verifyReceipt(any(ArchiveReceiptQuery.class))).thenThrow(failure);
+		when(indexWriter.verifyReceipt(
+				any(ArchiveReceiptQuery.class),
+				any(OperationBudget.class))).thenThrow(failure);
 		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
 			ArchiveProcessingRequest request = invocation.getArgument(0);
 			return completed(request.kind(), successfulProgress());
@@ -680,7 +933,9 @@ class GdeltPipelineServiceTest {
 				mentionArchive.archive().idempotencyKey(),
 				mentionFingerprint()))
 				.thenReturn(indexedState(mentionArchive, mentionFingerprint()));
-		when(indexWriter.verifyReceipt(any(ArchiveReceiptQuery.class)))
+		when(indexWriter.verifyReceipt(
+				any(ArchiveReceiptQuery.class),
+				any(OperationBudget.class)))
 				.thenThrow(firstFailure, secondFailure);
 
 		assertThatThrownBy(service::runLatestUpdate)
@@ -689,7 +944,9 @@ class GdeltPipelineServiceTest {
 						.containsExactly(secondFailure));
 
 		verify(indexWriter, org.mockito.Mockito.times(2))
-				.verifyReceipt(any(ArchiveReceiptQuery.class));
+				.verifyReceipt(
+						any(ArchiveReceiptQuery.class),
+						any(OperationBudget.class));
 		verify(processingLedger, never()).claim(anyString(), any(), any());
 		verifyNoInteractions(archiveProcessor);
 	}
@@ -832,6 +1089,34 @@ class GdeltPipelineServiceTest {
 	}
 
 	@Test
+	@DisplayName("Потеря права на обработку при фиксации сбоя не запускает следующий архив")
+	void unexpectedFailureTransitionOwnershipLossStopsBeforeNextArchive() {
+		IngestionRunState runState = runState(true);
+		IngestionArchiveState mention = runState.archives().getLast();
+		IllegalStateException defect = new IllegalStateException("programming defect");
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
+		stubPendingRegistrationAndClaims();
+		when(archiveProcessor.process(any(), any(), any())).thenThrow(defect);
+		when(processingLedger.markFailed(any(), any(), any(), any()))
+				.thenReturn(AttemptTransitionResult.OWNERSHIP_LOST);
+
+		assertThatThrownBy(service::runOneShot)
+				.isInstanceOf(OperationOwnershipLostException.class)
+				.isNotSameAs(defect);
+
+		verify(processingLedger, never()).register(
+				mention.archive().idempotencyKey(),
+				mentionFingerprint());
+		verify(metrics).cycleDuration(
+				anyLong(),
+				eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
+		verify(metrics, never()).cycleDuration(
+				anyLong(),
+				eq(IngestionOperationMetricOutcome.INTERNAL_FAILURE));
+	}
+
+	@Test
 	@DisplayName("Отказ диагностической записи не подменяет unexpected runtime")
 	void preservesUnexpectedRuntimeWhenDiagnosticPersistenceFails() {
 		IngestionRunState runState = runState(true);
@@ -852,6 +1137,10 @@ class GdeltPipelineServiceTest {
 		verify(archiveProcessor).process(any(), any(), any());
 	}
 
+	private static Stream<OwnershipStatusPath> ownershipStatusPaths() {
+		return Stream.of(OwnershipStatusPath.values());
+	}
+
 	private void stubPendingRegistrationAndClaims() {
 		when(processingLedger.register(anyString(), any()))
 				.thenAnswer(invocation -> pendingState(
@@ -867,18 +1156,41 @@ class GdeltPipelineServiceTest {
 		});
 	}
 
+	private static OperationBudget guardedBudget(AtomicBoolean current) {
+		return OperationBudget
+				.start(Duration.ofMinutes(1))
+				.withLeaseGuard(
+						() -> current.get()
+								? OperationLeaseSnapshot.current(Duration.ofMinutes(5))
+								: OperationLeaseSnapshot.lost(),
+						Duration.ZERO);
+	}
+
 	private void assertPostClaimTargetOutcome(
 			IndexTargetUnavailableReason reason,
 			String expectedOutcome,
 			String expectedErrorCode
 	) {
 		IngestionRunState runState = runState(false);
-		when(ingestionRunService.runLatestUpdate()).thenReturn(runState);
+		IndexTargetUnavailableException failure = new IndexTargetUnavailableException(reason);
+		when(ingestionRunService.runOneShot(any()))
+				.thenReturn(new AcquisitionCycleResult(Optional.of(runState), false));
 		stubPendingRegistrationAndClaims();
-		when(archiveProcessor.process(any(), any(), any())).thenThrow(
-				new IndexTargetUnavailableException(reason));
+		when(archiveProcessor.process(any(), any(), any())).thenThrow(failure);
 
-		assertThat(service.runLatestUpdate()).isSameAs(runState);
+		if ("OWNERSHIP_LOST".equals(expectedOutcome)) {
+			assertThatThrownBy(service::runOneShot)
+					.isInstanceOfSatisfying(
+							OperationOwnershipLostException.class,
+							ownershipLost -> assertThat(ownershipLost.getSuppressed())
+									.containsExactly(failure));
+			verify(metrics).cycleDuration(
+					anyLong(),
+					eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
+		}
+		else {
+			assertThat(service.runOneShot()).isEqualTo(IngestionOneShotOutcome.COMPLETED);
+		}
 
 		assertThat(GdeltPipelineService.targetUnavailableOutcome(reason))
 				.isEqualTo(expectedOutcome);
@@ -1094,5 +1406,24 @@ class GdeltPipelineServiceTest {
 				UUID.fromString("22222222-2222-2222-2222-222222222222"),
 				indexName,
 				indexUuid);
+	}
+
+	private enum OwnershipStatusPath {
+		INDEX_TARGET_RESOLUTION("разрешение индекса потеряло владение"),
+		PROCESSING_CLAIM("захват обработки потерял владение"),
+		RECEIPT_TRANSITION("переход квитанции потерял владение"),
+		PROCESSOR_RESULT("обработчик сообщил о потере владения"),
+		INDEXED_TRANSITION("фиксация индекса потеряла владение");
+
+		private final String description;
+
+		OwnershipStatusPath(String description) {
+			this.description = description;
+		}
+
+		@Override
+		public String toString() {
+			return description;
+		}
 	}
 }

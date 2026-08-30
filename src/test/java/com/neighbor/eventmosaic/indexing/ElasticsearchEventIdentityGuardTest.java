@@ -9,7 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch.ElasticsearchAsyncClient;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -37,9 +38,10 @@ class ElasticsearchEventIdentityGuardTest {
 			"event-index-uuid");
 	private static final String PROCESSING_FINGERPRINT = "a".repeat(64);
 
-	private final ElasticsearchClient client = mock(ElasticsearchClient.class);
+	private final ElasticsearchAsyncClient client = mock(ElasticsearchAsyncClient.class);
 	private final ElasticsearchEventIdentityGuard guard =
-			new ElasticsearchEventIdentityGuard(client);
+			new ElasticsearchEventIdentityGuard(
+					new DirectElasticsearchRequestExecutor(client));
 
 	@Test
 	@DisplayName("Одним bounded search планирует unique creates и внутрипакетный replay")
@@ -49,7 +51,8 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response(false, 0, 0, TotalHitsRelation.Eq, List.of()));
+				.thenReturn(CompletableFuture.completedFuture(
+						response(false, 0, 0, TotalHitsRelation.Eq, List.of())));
 
 		EventIdentityGuardPlan plan = guard.plan(
 				TARGET,
@@ -87,12 +90,12 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response(
+				.thenReturn(CompletableFuture.completedFuture(response(
 						false,
 						0,
 						1,
 						TotalHitsRelation.Eq,
-						List.of(hit(TARGET.indexName(), document))));
+						List.of(hit(TARGET.indexName(), document)))));
 
 		EventIdentityGuardPlan plan = guard.plan(TARGET, List.of(document));
 
@@ -125,12 +128,12 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response(
+				.thenReturn(CompletableFuture.completedFuture(response(
 						false,
 						0,
 						1,
 						TotalHitsRelation.Eq,
-						List.of(hit(TARGET.indexName(), stored))));
+						List.of(hit(TARGET.indexName(), stored)))));
 
 		assertConflict(candidate);
 	}
@@ -142,14 +145,14 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response(
+				.thenReturn(CompletableFuture.completedFuture(response(
 						false,
 						0,
 						1,
 						TotalHitsRelation.Eq,
 						List.of(hit(
 								"gdelt-events-v1-p20260727-g0002",
-								candidate))));
+								candidate)))));
 
 		assertConflict(candidate);
 	}
@@ -161,14 +164,14 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response(
+				.thenReturn(CompletableFuture.completedFuture(response(
 						false,
 						0,
 						1,
 						TotalHitsRelation.Eq,
 						List.of(hit(
 								"gdelt-events-v1-p20260727-g0001",
-								candidate))));
+								candidate)))));
 		ExactIndexTarget shadow = new ExactIndexTarget(
 				"gdelt-events-v1-p20260727-g0002",
 				"shadow-event-index-uuid");
@@ -202,14 +205,14 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response(
+				.thenReturn(CompletableFuture.completedFuture(response(
 						false,
 						0,
 						2,
 						TotalHitsRelation.Eq,
 						List.of(
 								hit(TARGET.indexName(), candidate),
-								hit(shadow.indexName(), candidate))));
+								hit(shadow.indexName(), candidate)))));
 
 		EventIdentityGuardPlan plan = guard.plan(
 				shadow,
@@ -227,7 +230,7 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response(
+				.thenReturn(CompletableFuture.completedFuture(response(
 						false,
 						0,
 						2,
@@ -236,7 +239,7 @@ class ElasticsearchEventIdentityGuardTest {
 								hit(TARGET.indexName(), candidate),
 								hit(
 										"gdelt-events-v1-p20260727-g0002",
-										candidate))));
+										candidate)))));
 
 		assertConflict(candidate);
 	}
@@ -252,12 +255,12 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response(
+				.thenReturn(CompletableFuture.completedFuture(response(
 						false,
 						0,
 						1,
 						TotalHitsRelation.Eq,
-						List.of(malformed)));
+						List.of(malformed))));
 
 		assertConflict(candidate);
 	}
@@ -324,7 +327,7 @@ class ElasticsearchEventIdentityGuardTest {
 		when(client.search(
 				any(SearchRequest.class),
 				eq(EventIdentityProjection.class)))
-				.thenReturn(response);
+				.thenReturn(CompletableFuture.completedFuture(response));
 	}
 
 	private static SearchResponse<EventIdentityProjection> response(

@@ -77,6 +77,17 @@ public final class GdeltTestFixtures {
 						Duration.ofMinutes(15),
 						FirstRunPolicy.LATEST,
 						null),
+				new GdeltIngestionProperties.Automatic(
+						false,
+						Duration.ofMinutes(1),
+						Duration.ofMinutes(15),
+						Duration.ofSeconds(30),
+						Duration.ofMinutes(5),
+						Duration.ofMinutes(30),
+						256,
+						new GdeltIngestionProperties.ReceiptAudit(
+								Duration.ofMinutes(15),
+								2)),
 				false
 		);
 	}

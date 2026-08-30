@@ -21,7 +21,7 @@ import java.util.Objects;
  * @param writeMode обычная запись либо заполнение теневой rebuild generation
  * @param csvPath путь к подготовленному CSV
  * @param receiptPageSize максимальный размер PIT/search_after страницы receipt
- * @param operationBudget общий monotonic budget owning cycle
+ * @param operationBudget общая монотонная граница времени и проверка владения циклом
  */
 public record ArchiveProcessingRequest(
 		GdeltArchiveKind kind,
