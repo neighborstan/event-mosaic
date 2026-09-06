@@ -3,7 +3,7 @@ package com.neighbor.eventmosaic.ingestion.api;
 import com.neighbor.eventmosaic.shared.error.ApplicationErrorCode;
 
 /**
- * Стабильный каталог ошибок acquisition и continuity модуля ingestion.
+ * Задает стабильные коды ошибок загрузки GDELT. Коды сохраняются в базе данных и метриках, поэтому их имена являются устойчивым внешним соглашением.
  */
 public enum IngestionErrorCode implements ApplicationErrorCode {
 
@@ -16,6 +16,16 @@ public enum IngestionErrorCode implements ApplicationErrorCode {
 	MANIFEST_REQUIRED_ARCHIVE_MISSING("Manifest does not contain the required archive pair"),
 	MANIFEST_DUPLICATE_ARCHIVE("Manifest contains a duplicate supported archive"),
 	MANIFEST_TIMESTAMP_MISMATCH("Manifest archive timestamps do not match"),
+	MASTER_CATALOG_HTTP_ERROR("Translation master catalog request failed"),
+	MASTER_CATALOG_TIMEOUT("Translation master catalog request exceeded the configured deadline"),
+	MASTER_CATALOG_PROTOCOL_VIOLATION("Translation master catalog response violates the range protocol"),
+	MASTER_CATALOG_SNAPSHOT_CHANGED("Translation master catalog changed during a pinned read"),
+	MASTER_CATALOG_RANGE_LIMIT_EXCEEDED("Translation master catalog target is outside the bounded suffix"),
+	MASTER_CATALOG_MALFORMED_LINE("Translation master catalog contains a malformed line"),
+	MASTER_CATALOG_SOURCE_URI_REJECTED("Translation master catalog URI is outside the allowlist"),
+	MASTER_CATALOG_INCOMPLETE_PAIR("Translation master catalog contains an incomplete archive pair"),
+	MASTER_CATALOG_DUPLICATE_ARCHIVE("Translation master catalog contains a duplicate supported archive"),
+	MASTER_CATALOG_METADATA_CONFLICT("Translation master catalog metadata conflicts with captured latest"),
 	ARCHIVE_METADATA_CONFLICT("Archive metadata conflicts with the registered update"),
 	DOWNLOAD_HTTP_ERROR("Archive request failed"),
 	DOWNLOAD_TIMEOUT("Archive request exceeded the configured deadline"),

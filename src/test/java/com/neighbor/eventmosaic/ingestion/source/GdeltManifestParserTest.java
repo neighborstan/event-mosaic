@@ -22,7 +22,7 @@ class GdeltManifestParserTest {
 
 	@BeforeEach
 	void setUp() {
-		parser = new GdeltManifestParser();
+		parser = new GdeltManifestParser(new GdeltManifestLineParser());
 	}
 
 	@Test

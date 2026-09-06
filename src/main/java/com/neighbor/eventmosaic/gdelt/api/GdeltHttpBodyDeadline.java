@@ -7,33 +7,58 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 
 /**
- * Прерывает чтение streaming HTTP body по общему monotonic deadline.
+ * Ограничивает общее время чтения тела HTTP-ответа GDELT. Если срок
+ * истек, закрывает поток и тем самым прерывает зависшее чтение.
  */
 public final class GdeltHttpBodyDeadline implements AutoCloseable {
 
 	private final InputStream body;
+	private final long deadlineNanos;
+	private final LongSupplier nanoTime;
 	private final AtomicBoolean completed = new AtomicBoolean();
 	private final AtomicBoolean expired = new AtomicBoolean();
 	private CompletableFuture<Void> expiration;
 
-	private GdeltHttpBodyDeadline(InputStream body) {
+	private GdeltHttpBodyDeadline(
+			InputStream body,
+			long deadlineNanos,
+			LongSupplier nanoTime
+	) {
 		this.body = body;
+		this.deadlineNanos = deadlineNanos;
+		this.nanoTime = nanoTime;
 	}
 
 	/**
-	 * Вычисляет deadline относительно monotonic clock процесса.
+	 * Вычисляет момент, когда должно завершиться чтение. Значение опирается
+	 * на {@link System#nanoTime()}, поэтому не зависит от перевода системных часов.
 	 *
-	 * @param timeout полный timeout HTTP operation
-	 * @return значение, совместимое с {@link System#nanoTime()}
+	 * @param timeout максимальная длительность чтения
+	 * @return момент истечения срока в шкале {@link System#nanoTime()}
 	 */
 	public static long deadlineAfter(Duration timeout) {
+		return deadlineAfter(timeout, System::nanoTime);
+	}
+
+	/**
+	 * Вычисляет момент завершения по явно переданному счетчику прошедшего
+	 * времени. Тот же счетчик нужно передать в
+	 * {@link #start(InputStream, long, LongSupplier)}.
+	 *
+	 * @param timeout максимальная длительность чтения
+	 * @param nanoTime счетчик прошедшего времени, который не зависит от системных часов
+	 * @return момент истечения срока в шкале переданного счетчика
+	 */
+	public static long deadlineAfter(Duration timeout, LongSupplier nanoTime) {
 		Objects.requireNonNull(timeout, "timeout must not be null");
+		Objects.requireNonNull(nanoTime, "nanoTime must not be null");
 		if (timeout.isZero() || timeout.isNegative()) {
 			throw new IllegalArgumentException("timeout must be positive");
 		}
-		long now = System.nanoTime();
+		long now = nanoTime.getAsLong();
 		try {
 			return Math.addExact(now, timeout.toNanos());
 		} catch (ArithmeticException _) {
@@ -42,21 +67,35 @@ public final class GdeltHttpBodyDeadline implements AutoCloseable {
 	}
 
 	/**
-	 * Начинает наблюдение за body с ранее вычисленным общим deadline.
+	 * Начинает контроль срока чтения для потока тела HTTP-ответа.
 	 *
-	 * @param body streaming response body
-	 * @param deadlineNanos monotonic deadline
-	 * @return lifecycle deadline guard
+	 * @param body поток с телом HTTP-ответа
+	 * @param deadlineNanos ранее вычисленный момент истечения срока
+	 * @return объект, который закроет поток при истечении срока
 	 */
 	public static GdeltHttpBodyDeadline start(InputStream body, long deadlineNanos) {
+		return start(body, deadlineNanos, System::nanoTime);
+	}
+
+	/**
+	 * Начинает контроль срока чтения с явно заданным счетчиком прошедшего времени.
+	 * Этот вариант позволяет после чтения проверить тот же момент завершения.
+	 *
+	 * @param body поток с телом HTTP-ответа
+	 * @param deadlineNanos ранее вычисленный момент истечения срока
+	 * @param nanoTime тот же счетчик прошедшего времени, по которому вычислен срок
+	 * @return объект, который закроет поток при истечении срока
+	 */
+	public static GdeltHttpBodyDeadline start(
+			InputStream body,
+			long deadlineNanos,
+			LongSupplier nanoTime
+	) {
 		GdeltHttpBodyDeadline guard = new GdeltHttpBodyDeadline(
-				Objects.requireNonNull(body, "body must not be null"));
-		long remaining;
-		try {
-			remaining = Math.subtractExact(deadlineNanos, System.nanoTime());
-		} catch (ArithmeticException _) {
-			remaining = Long.MAX_VALUE;
-		}
+				Objects.requireNonNull(body, "body must not be null"),
+				deadlineNanos,
+				Objects.requireNonNull(nanoTime, "nanoTime must not be null"));
+		long remaining = guard.remainingNanos();
 		if (remaining <= 0) {
 			guard.expire();
 		} else {
@@ -68,16 +107,19 @@ public final class GdeltHttpBodyDeadline implements AutoCloseable {
 	}
 
 	/**
-	 * Показывает, что guard закрыл body по deadline.
+	 * Сообщает, был ли поток закрыт из-за истечения срока чтения.
 	 *
-	 * @return {@code true} после timeout
+	 * @return {@code true}, если срок чтения истек
 	 */
 	public boolean expired() {
+		if (!expired.get() && remainingNanos() <= 0) {
+			expire();
+		}
 		return expired.get();
 	}
 
 	/**
-	 * Завершает наблюдение после полного чтения body.
+	 * Прекращает контроль срока после завершения чтения или отказа от него.
 	 */
 	@Override
 	public void close() {
@@ -95,7 +137,15 @@ public final class GdeltHttpBodyDeadline implements AutoCloseable {
 		try {
 			body.close();
 		} catch (IOException _) {
-			// Основной consumer классифицирует deadline, а не cleanup close failure.
+			// Код, который читает поток, сообщит об истечении срока; ошибка закрытия не должна ее подменять.
+		}
+	}
+
+	private long remainingNanos() {
+		try {
+			return Math.subtractExact(deadlineNanos, nanoTime.getAsLong());
+		} catch (ArithmeticException _) {
+			return Long.MAX_VALUE;
 		}
 	}
 }

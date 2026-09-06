@@ -1,7 +1,5 @@
 package com.neighbor.eventmosaic.ingestion.source;
 
-import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveName;
-import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredArchive;
 import com.neighbor.eventmosaic.ingestion.api.DiscoveredUpdate;
@@ -11,26 +9,35 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionErrorContext;
 import com.neighbor.eventmosaic.ingestion.api.IngestionEventCode;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.ingestion.error.SourceDataViolationException;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 /**
- * Разбирает GDELT Translation manifest в один целостный Event/Mention update.
+ * Разбирает файл GDELT со списком архивов последнего обновления. Результатом является одна проверенная
+ * пара архивов событий Event и упоминаний Mention за один момент публикации.
  */
 @Component
 public class GdeltManifestParser {
 
+	private final GdeltManifestLineParser lineParser;
+
 	/**
-	 * Разбирает manifest и требует ровно один Event и один Mention archive одного timestamp.
+	 * Создает разборщик, который применяет общие правила каждой строки GDELT.
 	 *
-	 * @param manifest содержимое {@code lastupdate-translation.txt}
-	 * @return валидированный source update и диагностика неподдерживаемых строк
+	 * @param lineParser разборщик и проверка одной строки списка
+	 */
+	public GdeltManifestParser(GdeltManifestLineParser lineParser) {
+		this.lineParser = lineParser;
+	}
+
+	/**
+	 * Разбирает список и требует ровно один архив Event и один архив Mention за один момент публикации.
+	 *
+	 * @param manifest содержимое файла {@code lastupdate-translation.txt}
+	 * @return проверенное обновление и сведения о пропущенных неподдерживаемых строках
 	 */
 	public DiscoveredUpdate parse(String manifest) {
 		if (manifest == null) {
@@ -47,27 +54,18 @@ public class GdeltManifestParser {
 				continue;
 			}
 			int lineNumber = index + 1;
-			ParsedLine parsedLine = parseLine(line, lineNumber);
-			Optional<GdeltArchiveName> classified = classify(parsedLine.uri(), lineNumber);
-			if (classified.isEmpty()) {
+			GdeltManifestEntry entry = lineParser.parse(line, lineNumber);
+			if (entry.supportedArchive().isEmpty()) {
 				diagnostics.add(new DiscoveryDiagnostic(
 						IngestionEventCode.MANIFEST_UNSUPPORTED_ARCHIVE,
 						lineNumber));
 				continue;
 			}
-			GdeltArchiveName archiveName = classified.orElseThrow();
-			ArchiveType archiveType = ArchiveType.fromGdeltKind(archiveName.kind());
+			DiscoveredArchive archive = entry.supportedArchive().orElseThrow();
+			ArchiveType archiveType = archive.archiveType();
 			if (supported.containsKey(archiveType)) {
 				throw new SourceDataViolationException(IngestionErrorCode.MANIFEST_DUPLICATE_ARCHIVE);
 			}
-			DiscoveredArchive archive = new DiscoveredArchive(
-					archiveName.updateTime(),
-					archiveName.value(),
-					parsedLine.uri(),
-					parsedLine.md5(),
-					archiveType,
-					parsedLine.sizeBytes()
-			);
 			supported.put(archiveType, archive);
 		}
 
@@ -86,66 +84,4 @@ public class GdeltManifestParser {
 		);
 	}
 
-	private static ParsedLine parseLine(String line, int lineNumber) {
-		String[] fields = line.split("\\s+", -1);
-		if (fields.length != 3) {
-			throw new SourceDataViolationException(
-					IngestionErrorCode.MANIFEST_MALFORMED_LINE,
-					IngestionErrorContext.atLine(lineNumber));
-		}
-		long sizeBytes;
-		try {
-			sizeBytes = Long.parseLong(fields[0]);
-		} catch (NumberFormatException _) {
-			throw new SourceDataViolationException(
-					IngestionErrorCode.MANIFEST_MALFORMED_LINE,
-					IngestionErrorContext.atLine(lineNumber));
-		}
-		if (sizeBytes <= 0) {
-			throw new SourceDataViolationException(
-					IngestionErrorCode.MANIFEST_MALFORMED_LINE,
-					IngestionErrorContext.atLine(lineNumber));
-		}
-		String md5;
-		try {
-			md5 = GdeltSourceContract.normalizeMd5(fields[1]);
-		} catch (IllegalArgumentException _) {
-			throw new SourceDataViolationException(
-					IngestionErrorCode.MANIFEST_MALFORMED_LINE,
-					IngestionErrorContext.atLine(lineNumber));
-		}
-		URI uri;
-		try {
-			uri = new URI(fields[2]);
-		} catch (URISyntaxException _) {
-			throw new SourceDataViolationException(
-					IngestionErrorCode.MANIFEST_MALFORMED_LINE,
-					IngestionErrorContext.atLine(lineNumber));
-		}
-		if (!uri.isAbsolute()) {
-			throw new SourceDataViolationException(
-					IngestionErrorCode.MANIFEST_MALFORMED_LINE,
-					IngestionErrorContext.atLine(lineNumber));
-		}
-		return new ParsedLine(sizeBytes, md5, uri);
-	}
-
-	private static Optional<GdeltArchiveName> classify(URI uri, int lineNumber) {
-		String fileName;
-		try {
-			fileName = GdeltSourceContract.requireMetadataFileName(uri);
-		} catch (IllegalArgumentException _) {
-			throw new SourceDataViolationException(IngestionErrorCode.MANIFEST_SOURCE_URI_REJECTED);
-		}
-		try {
-			return GdeltArchiveName.parseSupported(fileName);
-		} catch (IllegalArgumentException _) {
-			throw new SourceDataViolationException(
-					IngestionErrorCode.MANIFEST_MALFORMED_LINE,
-					IngestionErrorContext.atLine(lineNumber));
-		}
-	}
-
-	private record ParsedLine(long sizeBytes, String md5, URI uri) {
-	}
 }

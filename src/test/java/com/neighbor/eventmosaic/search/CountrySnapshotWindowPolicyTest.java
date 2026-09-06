@@ -2,6 +2,8 @@ package com.neighbor.eventmosaic.search;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
+import com.neighbor.eventmosaic.shared.time.RollingWindowPolicy;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -34,7 +36,7 @@ class CountrySnapshotWindowPolicyTest {
 	void ignoresClockTimeZoneWhenFlooringWindow() {
 		Instant now = Instant.parse("2026-08-11T12:37:42Z");
 		Clock nonUtcClock = Clock.fixed(now, ZoneId.of("Asia/Tokyo"));
-		var policy = new CountrySnapshotWindowPolicy(nonUtcClock, properties());
+		var policy = new CountrySnapshotWindowPolicy(nonUtcClock, rollingPolicy());
 
 		CountrySnapshotWindowPolicy.Window window = policy.currentWindow();
 
@@ -46,7 +48,14 @@ class CountrySnapshotWindowPolicyTest {
 
 	private static CountrySnapshotWindowPolicy.Window windowAt(String instant) {
 		Clock clock = Clock.fixed(Instant.parse(instant), ZoneOffset.UTC);
-		return new CountrySnapshotWindowPolicy(clock, properties()).currentWindow();
+		return new CountrySnapshotWindowPolicy(clock, rollingPolicy()).currentWindow();
+	}
+
+	private static RollingWindowPolicy rollingPolicy() {
+		return new RollingWindowPolicy(
+				GdeltSourceContract.UPDATE_INTERVAL,
+				Duration.ofHours(24),
+				properties().ingestionGrace());
 	}
 
 	private static CountryMapSnapshotProperties properties() {

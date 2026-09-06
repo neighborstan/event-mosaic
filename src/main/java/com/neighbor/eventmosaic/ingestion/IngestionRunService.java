@@ -28,6 +28,8 @@ import com.neighbor.eventmosaic.ingestion.error.StoragePressureException;
 import com.neighbor.eventmosaic.ingestion.error.TransferredArtifactIntegrityException;
 import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
 import com.neighbor.eventmosaic.ingestion.observability.StorageResource;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlanner;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestClient;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestParser;
 import com.neighbor.eventmosaic.ingestion.staging.DownloadedArchive;
@@ -51,7 +53,8 @@ import org.slf4j.spi.LoggingEventBuilder;
 import org.springframework.stereotype.Service;
 
 /**
- * Координирует один latest-first acquisition cycle без привязки к trigger.
+ * Загружает архивы GDELT для одного цикла, начиная с самого нового обновления. Обнаруживает архивы, сохраняет их состояние, скачивает
+ * и безопасно подготавливает их для дальнейшей обработки.
  */
 @Service
 public class IngestionRunService {
@@ -67,6 +70,8 @@ public class IngestionRunService {
 	private final GdeltManifestClient manifestClient;
 	private final GdeltManifestParser manifestParser;
 	private final IngestionArchiveLedger archiveLedger;
+	private final RecentRecoveryPlanLedger recentRecoveryPlanLedger;
+	private final RecentWindowPlanner recentWindowPlanner;
 	private final SourcePollLedger sourcePollLedger;
 	private final StagingLayout stagingLayout;
 	private final HttpArchiveDownloader archiveDownloader;
@@ -76,23 +81,27 @@ public class IngestionRunService {
 	private final BackendDataStorageMonitor storageMonitor;
 
 	/**
-	 * Собирает orchestration boundary из source, ledger и staging collaborators.
+	 * Создает службу загрузки из клиента GDELT, хранилищ состояния и компонентов безопасной подготовки файлов.
 	 *
-	 * @param manifestClient клиент latest manifest
-	 * @param manifestParser parser целостного GDELT update
-	 * @param archiveLedger durable state boundary
-	 * @param sourcePollLedger durable current source-poll boundary
-	 * @param stagingLayout построитель безопасных staging paths
-	 * @param archiveDownloader downloader и verifier ZIP
-	 * @param archiveStager безопасный ZIP stager
-	 * @param properties runtime policy ingestion
-	 * @param metrics publisher метрик с заранее ограниченными наборами значений тегов
-	 * @param storageMonitor единая проверка storage pressure перед download
+	 * @param manifestClient клиент файла со списком архивов последнего обновления
+	 * @param manifestParser разборщик и проверка пары архивов одного обновления GDELT
+	 * @param archiveLedger хранилище состояния запусков и архивов
+	 * @param recentRecoveryPlanLedger хранилище плана восстановления последнего суточного окна
+	 * @param recentWindowPlanner планировщик окна относительно общих серверных часов
+	 * @param sourcePollLedger хранилище состояния попыток получить список последнего обновления
+	 * @param stagingLayout построитель безопасных путей к временным файлам
+	 * @param archiveDownloader загрузчик и проверка ZIP-архивов
+	 * @param archiveStager безопасная распаковка и публикация подготовленного файла
+	 * @param properties настройки загрузки GDELT
+	 * @param metrics сбор метрик о времени и исходах загрузки
+	 * @param storageMonitor проверка свободного места перед скачиванием архива
 	 */
 	public IngestionRunService(
 			GdeltManifestClient manifestClient,
 			GdeltManifestParser manifestParser,
 			IngestionArchiveLedger archiveLedger,
+			RecentRecoveryPlanLedger recentRecoveryPlanLedger,
+			RecentWindowPlanner recentWindowPlanner,
 			SourcePollLedger sourcePollLedger,
 			StagingLayout stagingLayout,
 			HttpArchiveDownloader archiveDownloader,
@@ -104,6 +113,8 @@ public class IngestionRunService {
 		this.manifestClient = manifestClient;
 		this.manifestParser = manifestParser;
 		this.archiveLedger = archiveLedger;
+		this.recentRecoveryPlanLedger = recentRecoveryPlanLedger;
+		this.recentWindowPlanner = recentWindowPlanner;
 		this.sourcePollLedger = sourcePollLedger;
 		this.stagingLayout = stagingLayout;
 		this.archiveDownloader = archiveDownloader;
@@ -114,10 +125,9 @@ public class IngestionRunService {
 	}
 
 	/**
-	 * Обнаруживает latest update, регистрирует state и независимо обрабатывает
-	 * Event и Mention archives.
+	 * Находит последнее обновление GDELT, сохраняет его состояние и независимо подготавливает архивы Event и Mention.
 	 *
-	 * @return итоговое производное состояние run
+	 * @return итоговое сохраненное состояние запуска
 	 */
 	public IngestionRunState runLatestUpdate() {
 		OperationBudget budget = OperationBudget.start(Duration.ofDays(1));
@@ -126,7 +136,7 @@ public class IngestionRunService {
 				_ -> IngestionOperationMetricOutcome.COMPLETED);
 	}
 
-	/** Выполняет acquisition pass в пределах budget owning orchestration. */
+	/** Загружает последнее обновление в пределах переданного ограничения времени и срока владения циклом. */
 	public IngestionRunState runLatestUpdate(OperationBudget budget) {
 		return observeAcquisition(
 				() -> executeLatestUpdate(budget, true),
@@ -134,19 +144,59 @@ public class IngestionRunService {
 	}
 
 	/**
-	 * Выполняет source poll либо использует newest known run при deferred retry.
+	 * Запрашивает список архивов последнего обновления. Если попытку нужно отложить, продолжает работу с самым новым ранее сохраненным запуском.
 	 */
 	AcquisitionCycleResult runOneShot(OperationBudget budget) {
 		return observeAcquisition(
 				() -> executeOneShot(budget),
-				result -> {
-					if (result.sourcePollOwnershipLost()) {
-						return IngestionOperationMetricOutcome.OWNERSHIP_LOST;
-					}
-					return result.sourcePollDeferred()
-							? IngestionOperationMetricOutcome.RETRY_DEFERRED
-							: IngestionOperationMetricOutcome.COMPLETED;
-				});
+				IngestionRunService::acquisitionOutcome);
+	}
+
+	/**
+	 * Только находит и регистрирует последнее обновление, но не скачивает его архивы. Возвращенное состояние позволяет обработать архивы по очереди.
+	 */
+	AcquisitionCycleResult prepareOneShot(OperationBudget budget) {
+		return observeAcquisition(
+				() -> executePreparedOneShot(budget),
+				IngestionRunService::acquisitionOutcome);
+	}
+
+	/** Скачивает и безопасно подготавливает ровно один архив, после чего возвращает его актуальное сохраненное состояние. */
+	IngestionArchiveState acquireArchive(
+			IngestionArchiveState archiveState,
+			OperationBudget budget
+	) {
+		return translateCycleFailures(() -> {
+			requireRemaining(budget);
+			processArchive(archiveState.archive(), budget, true);
+			requireRemaining(budget);
+			return archiveLedger.findByIdempotencyKey(
+					archiveState.archive().idempotencyKey())
+					.orElseThrow(() -> new IllegalStateException(
+							"Registered ingestion archive disappeared"));
+		});
+	}
+
+	/** После поархивной обработки пересчитывает и публикует итоговое состояние запуска. */
+	IngestionRunState completeOneShot(
+			IngestionRunState runState,
+			OperationBudget budget
+	) {
+		return translateCycleFailures(() -> {
+			requireRemaining(budget);
+			return completeRun(runState.sourceUpdateTime());
+		});
+	}
+
+	private static IngestionOperationMetricOutcome acquisitionOutcome(
+			AcquisitionCycleResult result
+	) {
+		if (result.sourcePollOwnershipLost()) {
+			return IngestionOperationMetricOutcome.OWNERSHIP_LOST;
+		}
+		return result.sourcePollDeferred()
+				? IngestionOperationMetricOutcome.RETRY_DEFERRED
+				: IngestionOperationMetricOutcome.COMPLETED;
 	}
 
 	private <T> T observeAcquisition(
@@ -188,6 +238,10 @@ public class IngestionRunService {
 
 	private <T> T observeCycle(Supplier<T> operation) {
 		metrics.runStarted();
+		return translateCycleFailures(operation);
+	}
+
+	private <T> T translateCycleFailures(Supplier<T> operation) {
 		try {
 			return operation.get();
 		} catch (UnexpectedArchiveFailure failure) {
@@ -227,10 +281,49 @@ public class IngestionRunService {
 			boolean boundedAdapters
 	) {
 		DiscoveredUpdate update = discoverAndRegister(budget, boundedAdapters);
+		if (usesRecentWindow()) {
+			return processKnownRun(
+					resolveRegisteredRun(update, budget),
+					budget,
+					boundedAdapters);
+		}
 		return processRegisteredUpdate(update, budget, boundedAdapters);
 	}
 
 	private AcquisitionCycleResult executeOneShot(OperationBudget budget) {
+		OneShotDiscovery discovery = discoverOneShot(budget);
+		if (discovery.sourcePollOwnershipLost()) {
+			return new AcquisitionCycleResult(Optional.empty(), false, true);
+		}
+		if (discovery.sourcePollDeferred()) {
+			return new AcquisitionCycleResult(
+					discovery.knownRun().map(run -> processKnownRun(run, budget, true)),
+					true);
+		}
+		DiscoveredUpdate update = discovery.update().orElseThrow();
+		IngestionRunState processed = usesRecentWindow()
+				? processKnownRun(resolveRegisteredRun(update, budget), budget, true)
+				: processRegisteredUpdate(update, budget, true);
+		return new AcquisitionCycleResult(
+				Optional.of(processed),
+				false,
+				false);
+	}
+
+	private AcquisitionCycleResult executePreparedOneShot(OperationBudget budget) {
+		OneShotDiscovery discovery = discoverOneShot(budget);
+		if (discovery.sourcePollOwnershipLost()) {
+			return new AcquisitionCycleResult(Optional.empty(), false, true);
+		}
+		if (discovery.sourcePollDeferred()) {
+			return new AcquisitionCycleResult(discovery.knownRun(), true);
+		}
+		DiscoveredUpdate update = discovery.update().orElseThrow();
+		IngestionRunState runState = resolveRegisteredRun(update, budget);
+		return new AcquisitionCycleResult(Optional.of(runState), false, false);
+	}
+
+	private OneShotDiscovery discoverOneShot(OperationBudget budget) {
 		requireRemaining(budget);
 		sourcePollLedger.register(GdeltSourceContract.SOURCE_NAME);
 		requireRemaining(budget);
@@ -238,9 +331,8 @@ public class IngestionRunService {
 				GdeltSourceContract.SOURCE_NAME,
 				properties.continuity().recoveryLease());
 		if (claimed.isEmpty()) {
-			return new AcquisitionCycleResult(
-					processNewestKnownRun(budget),
-					true);
+			requireRemaining(budget);
+			return OneShotDiscovery.deferred(archiveLedger.findLatestRun());
 		}
 
 		SourcePollAttempt pollAttempt = claimed.orElseThrow();
@@ -252,7 +344,7 @@ public class IngestionRunService {
 					GdeltSourceContract.SOURCE_NAME,
 					pollAttempt.token());
 			if (sourcePollTransition != AttemptTransitionResult.APPLIED) {
-				return new AcquisitionCycleResult(Optional.empty(), false, true);
+				return OneShotDiscovery.ownershipLost();
 			}
 			requireRemaining(budget);
 		}
@@ -269,10 +361,7 @@ public class IngestionRunService {
 			persistSourcePollInternalFailure(pollAttempt, exception, budget);
 			throw exception;
 		}
-		return new AcquisitionCycleResult(
-				Optional.of(processRegisteredUpdate(update, budget, true)),
-				false,
-				false);
+		return OneShotDiscovery.discovered(update);
 	}
 
 	private DiscoveredUpdate discoverAndRegister(
@@ -296,11 +385,17 @@ public class IngestionRunService {
 		}
 
 		requireRemaining(budget);
-		int gapsCreated = archiveLedger.registerDiscoveredUpdate(
-				update,
-				properties.continuity().firstRunPolicy(),
-				properties.continuity().firstRunStartAt()
-		);
+		int gapsCreated;
+		if (usesRecentWindow()) {
+			var plan = recentWindowPlanner.plan(update.sourceUpdateTime());
+			gapsCreated = recentRecoveryPlanLedger.activate(update, plan).auditGapsCreated();
+		}
+		else {
+			gapsCreated = archiveLedger.registerDiscoveredUpdate(
+					update,
+					properties.continuity().firstRunPolicy(),
+					properties.continuity().firstRunStartAt());
+		}
 		metrics.gapsCreated(gapsCreated);
 		return update;
 	}
@@ -318,19 +413,44 @@ public class IngestionRunService {
 		return completeRun(update.sourceUpdateTime());
 	}
 
-	private Optional<IngestionRunState> processNewestKnownRun(OperationBudget budget) {
-		requireRemaining(budget);
-		Optional<IngestionRunState> latest = archiveLedger.findLatestRun();
-		if (latest.isEmpty()) {
-			return Optional.empty();
-		}
-		IngestionRunState known = latest.orElseThrow();
+	private IngestionRunState processKnownRun(
+			IngestionRunState known,
+			OperationBudget budget,
+			boolean boundedAdapters
+	) {
 		for (var archiveState : known.archives()) {
 			requireRemaining(budget);
-			processArchive(archiveState.archive(), budget, true);
+			processArchive(archiveState.archive(), budget, boundedAdapters);
 		}
 		requireRemaining(budget);
-		return Optional.of(completeRun(known.sourceUpdateTime()));
+		return completeRun(known.sourceUpdateTime());
+	}
+
+	private IngestionRunState resolveRegisteredRun(
+			DiscoveredUpdate observed,
+			OperationBudget budget
+	) {
+		requireRemaining(budget);
+		Optional<IngestionRunState> exact = archiveLedger.findRunByUpdateTime(
+				observed.sourceUpdateTime());
+		requireRemaining(budget);
+		if (usesRecentWindow()) {
+			Optional<IngestionRunState> latest = archiveLedger.findLatestRun();
+			requireRemaining(budget);
+			if (latest.isPresent()
+					&& latest.orElseThrow().sourceUpdateTime().isAfter(observed.sourceUpdateTime())) {
+				return latest.orElseThrow();
+			}
+		}
+		if (exact.isPresent()) {
+			return exact.orElseThrow();
+		}
+		throw new IllegalStateException("Registered ingestion run disappeared");
+	}
+
+	private boolean usesRecentWindow() {
+		return properties.continuity().firstRunPolicy()
+				== com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy.RECENT_WINDOW;
 	}
 
 	private IngestionRunState completeRun(java.time.Instant sourceUpdateTime) {
@@ -679,6 +799,38 @@ public class IngestionRunService {
 
 		private RuntimeException original() {
 			return original;
+		}
+	}
+
+	private record OneShotDiscovery(
+			Optional<DiscoveredUpdate> update,
+			Optional<IngestionRunState> knownRun,
+			boolean sourcePollDeferred,
+			boolean sourcePollOwnershipLost
+	) {
+
+		private static OneShotDiscovery discovered(DiscoveredUpdate update) {
+			return new OneShotDiscovery(
+					Optional.of(update),
+					Optional.empty(),
+					false,
+					false);
+		}
+
+		private static OneShotDiscovery deferred(Optional<IngestionRunState> knownRun) {
+			return new OneShotDiscovery(
+					Optional.empty(),
+					knownRun,
+					true,
+					false);
+		}
+
+		private static OneShotDiscovery ownershipLost() {
+			return new OneShotDiscovery(
+					Optional.empty(),
+					Optional.empty(),
+					false,
+					true);
 		}
 	}
 }

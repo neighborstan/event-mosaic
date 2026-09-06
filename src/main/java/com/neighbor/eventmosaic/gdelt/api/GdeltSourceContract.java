@@ -14,29 +14,33 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
- * Канонический технический контракт источника GDELT: адреса, периодичность,
- * UTC timestamp и формат MD5 из manifest.
+ * Собирает общие правила работы с официальным источником GDELT. Здесь
+ * заданы разрешенные адреса, период публикации обновлений, формат времени и
+ * контрольной суммы MD5.
  */
 public final class GdeltSourceContract {
 
-	/** Каноническое имя источника в ingestion ledger и telemetry. */
+	/** Единое имя источника в журнале загрузки и телеметрии. */
 	public static final String SOURCE_NAME = "GDELT";
 
 	/**
 	 * Официальный HTTPS-каталог объектов GDELT v2.
 	 *
-	 * <p>URI является фиксированным trust anchor, а runtime property обязана
-	 * совпадать с ним и не расширяет allowlist.</p>
+	 * <p>Настройка адреса обязана точно совпадать с этим URI. Это не позволяет
+	 * перенаправить загрузку на недоверенный узел.</p>
 	 */
 	@SuppressWarnings("java:S1075")
 	public static final URI OFFICIAL_DOWNLOAD_BASE_URI =
 			URI.create("https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/");
 
-	/** Период публикации update GDELT. */
+	/** Период между публикациями обновлений GDELT. */
 	public static final Duration UPDATE_INTERVAL = Duration.ofMinutes(15);
 
-	/** Имя manifest с последним GDELT Translation update. */
+	/** Имя файла со списком архивов последнего обновления переводных данных GDELT. */
 	public static final String LATEST_TRANSLATION_MANIFEST = "lastupdate-translation.txt";
+
+	/** Имя файла с полным каталогом обновлений переводных данных GDELT. */
+	public static final String TRANSLATION_MASTER_CATALOG = "masterfilelist-translation.txt";
 
 	private static final String METADATA_SCHEME = "http";
 	private static final String METADATA_HOST = "data.gdeltproject.org";
@@ -52,11 +56,11 @@ public final class GdeltSourceContract {
 	}
 
 	/**
-	 * Проверяет официальный download base URI и возвращает его без преобразований.
+	 * Проверяет, что URI точно указывает на официальный каталог загрузок GDELT.
 	 *
 	 * @param baseUri проверяемый URI
-	 * @return тот же канонический URI
-	 * @throws IllegalArgumentException если URI не является официальным GCS-каталогом GDELT
+	 * @return тот же официальный URI
+	 * @throws IllegalArgumentException если URI не совпадает с официальным каталогом GDELT в Google Cloud Storage
 	 */
 	public static URI requireOfficialDownloadBaseUri(URI baseUri) {
 		Objects.requireNonNull(baseUri, "baseUri must not be null");
@@ -67,11 +71,11 @@ public final class GdeltSourceContract {
 	}
 
 	/**
-	 * Извлекает единственное имя файла из официального metadata URI.
+	 * Извлекает имя файла из URI, который GDELT публикует в списке архивов.
 	 *
-	 * @param metadataUri URI из manifest
+	 * @param metadataUri URI из файла со списком архивов
 	 * @return имя файла без каталога
-	 * @throws IllegalArgumentException если URI выходит за allowlist GDELT metadata
+	 * @throws IllegalArgumentException если URI указывает не на разрешенный каталог GDELT или не на один файл
 	 */
 	public static String requireMetadataFileName(URI metadataUri) {
 		Objects.requireNonNull(metadataUri, "metadataUri must not be null");
@@ -93,11 +97,11 @@ public final class GdeltSourceContract {
 	}
 
 	/**
-	 * Нормализует MD5 из manifest в lower-case ASCII.
+	 * Проверяет контрольную сумму MD5 и приводит ее к строчным латинским символам.
 	 *
-	 * @param checksum проверяемая checksum
+	 * @param checksum проверяемая контрольная сумма
 	 * @return нормализованные 32 шестнадцатеричных символа
-	 * @throws IllegalArgumentException если формат checksum не соответствует контракту GDELT
+	 * @throws IllegalArgumentException если значение не состоит из 32 шестнадцатеричных символов
 	 */
 	public static String normalizeMd5(String checksum) {
 		Objects.requireNonNull(checksum, "checksum must not be null");
@@ -108,11 +112,11 @@ public final class GdeltSourceContract {
 	}
 
 	/**
-	 * Разбирает строгий 14-значный UTC timestamp из имени GDELT archive.
+	 * Преобразует 14-значную отметку времени из имени архива GDELT в момент UTC.
 	 *
-	 * @param timestamp timestamp формата {@code uuuuMMddHHmmss}
+	 * @param timestamp отметка времени в формате {@code uuuuMMddHHmmss}
 	 * @return момент времени в UTC
-	 * @throws IllegalArgumentException если timestamp некорректен или не попадает на 15-минутную границу
+	 * @throws IllegalArgumentException если отметка некорректна или не попадает на 15-минутную границу
 	 */
 	public static Instant parseUpdateTimestamp(String timestamp) {
 		Objects.requireNonNull(timestamp, "timestamp must not be null");
@@ -128,7 +132,7 @@ public final class GdeltSourceContract {
 	}
 
 	/**
-	 * Форматирует момент публикации в канонический UTC timestamp GDELT.
+	 * Форматирует момент публикации как UTC-отметку времени из имени архива GDELT.
 	 *
 	 * @param updateTime момент публикации
 	 * @return строка формата {@code uuuuMMddHHmmss}
@@ -139,10 +143,10 @@ public final class GdeltSourceContract {
 	}
 
 	/**
-	 * Проверяет попадание момента на границу update GDELT.
+	 * Проверяет, что момент совпадает с границей 15-минутного обновления GDELT.
 	 *
 	 * @param updateTime проверяемый момент
-	 * @return {@code true}, если timestamp имеет секундную точность и кратен 15 минутам
+	 * @return {@code true}, если момент имеет секундную точность и кратен 15 минутам
 	 */
 	public static boolean isUpdateBoundary(Instant updateTime) {
 		Objects.requireNonNull(updateTime, "updateTime must not be null");

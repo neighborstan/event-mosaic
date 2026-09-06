@@ -21,6 +21,8 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlanner;
 import com.neighbor.eventmosaic.ingestion.staging.HttpArchiveDownloader;
 import com.neighbor.eventmosaic.ingestion.staging.StagingLayout;
 import com.neighbor.eventmosaic.ingestion.staging.ZipArchiveStager;
@@ -98,6 +100,15 @@ class GdeltPipelineEndToEndIntegrationTest {
 
 	@Autowired
 	private BackendDataStorageMonitor storageMonitor;
+
+	@Autowired
+	private RecentRecoveryPlanLedger recentRecoveryPlanLedger;
+
+	@Autowired
+	private RecentWindowPlanner recentWindowPlanner;
+
+	@Autowired
+	private GdeltTranslationMasterCatalogClient masterCatalogClient;
 
 	private HttpServer server;
 	private HttpClient httpClient;
@@ -270,8 +281,10 @@ class GdeltPipelineEndToEndIntegrationTest {
 						serverRoot.resolve("/manifest"),
 						Duration.ofSeconds(5),
 						65_536),
-				new GdeltManifestParser(),
+				new GdeltManifestParser(new GdeltManifestLineParser()),
 				ingestionLedger,
+				recentRecoveryPlanLedger,
+				recentWindowPlanner,
 				sourcePollLedger,
 				new StagingLayout(properties),
 				new HttpArchiveDownloader(httpClient, properties, metrics, resolver),
@@ -281,6 +294,8 @@ class GdeltPipelineEndToEndIntegrationTest {
 				storageMonitor);
 		return new GdeltPipelineService(
 				acquisition,
+				recentRecoveryPlanLedger,
+				masterCatalogClient,
 				processingLedger,
 				archiveProcessor,
 				fingerprintFactory,

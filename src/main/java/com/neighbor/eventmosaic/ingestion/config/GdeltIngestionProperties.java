@@ -16,16 +16,17 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * Типизированные настройки acquisition pipeline, сгруппированные по связным
- * HTTP, ZIP и continuity обязанностям.
+ * Хранит все настройки, от которых зависят загрузка и безопасная обработка
+ * данных GDELT. Настройки разделены на сетевые ограничения, распаковку архивов,
+ * восстановление после сбоев и автоматический запуск.
  *
- * @param baseUri официальный каталог объектов GDELT
- * @param stagingRoot локальный корень atomic staging
- * @param http ограничения и timeout внешнего HTTP
- * @param zip ограничения безопасной распаковки
- * @param continuity lease и first-run policy
- * @param automatic настройки автоматического запуска и ограниченной фоновой работы
- * @param oneShotEnabled явное включение однократного trigger
+ * @param baseUri официальный каталог файлов GDELT
+ * @param stagingRoot локальный рабочий каталог для скачанных и распакованных файлов
+ * @param http сетевые ограничения и максимальное время HTTP-запросов
+ * @param zip ограничения безопасной распаковки ZIP
+ * @param continuity правила первого запуска и повтора незавершенной работы
+ * @param automatic настройки последовательного фонового запуска
+ * @param oneShotEnabled разрешен ли явно запрошенный однократный цикл
  */
 @Validated
 @ConfigurationProperties("event-mosaic.ingestion.gdelt")
@@ -39,7 +40,7 @@ public record GdeltIngestionProperties(
 		@DefaultValue("false") boolean oneShotEnabled
 ) {
 
-	/** Проверяет source allowlist и наличие обязательных nested groups. */
+	/** Проверяет адрес источника и наличие всех обязательных групп настроек. */
 	public GdeltIngestionProperties {
 		GdeltSourceContract.requireOfficialDownloadBaseUri(baseUri);
 		Objects.requireNonNull(stagingRoot, "stagingRoot must not be null");
@@ -50,12 +51,12 @@ public record GdeltIngestionProperties(
 	}
 
 	/**
-	 * HTTP limits и timeout manifest/archive transport.
+	 * Задает максимальные размеры ответов GDELT и время ожидания HTTP-запросов.
 	 *
-	 * @param maxManifestBytes максимальный размер manifest
+	 * @param maxManifestBytes максимальный размер файла со списком архивов
 	 * @param maxArchiveBytes максимальный размер одного ZIP
-	 * @param connectTimeout timeout установки соединения
-	 * @param requestTimeout timeout одного запроса
+	 * @param connectTimeout максимальное время установки соединения
+	 * @param requestTimeout максимальное время одного запроса вместе с чтением ответа
 	 */
 	public record Http(
 			@DefaultValue("65536") @Positive long maxManifestBytes,
@@ -64,7 +65,7 @@ public record GdeltIngestionProperties(
 			@DefaultValue("2m") @NotNull Duration requestTimeout
 	) {
 
-		/** Проверяет положительные HTTP limits и timeout независимо от Spring binding. */
+		/** Проверяет, что размеры и временные ограничения положительны. */
 		public Http {
 			requirePositive(maxManifestBytes, "maxManifestBytes");
 			requirePositive(maxArchiveBytes, "maxArchiveBytes");
@@ -76,8 +77,8 @@ public record GdeltIngestionProperties(
 	/**
 	 * Ограничения потоковой распаковки недоверенного ZIP.
 	 *
-	 * @param maxEntries максимальное количество entries
-	 * @param maxEntryBytes максимальный размер одной entry
+	 * @param maxEntries максимальное количество файлов внутри архива
+	 * @param maxEntryBytes максимальный размер одного распакованного файла
 	 * @param maxTotalBytes максимальный суммарный распакованный размер
 	 */
 	public record Zip(
@@ -86,7 +87,7 @@ public record GdeltIngestionProperties(
 			@DefaultValue("1073741824") @Positive long maxTotalBytes
 	) {
 
-		/** Проверяет положительность и согласованность ZIP limits. */
+		/** Проверяет, что все ограничения положительны и размер одного файла не превышает общий предел. */
 		public Zip {
 			requirePositive(maxEntries, "maxEntries");
 			requirePositive(maxEntryBytes, "maxEntryBytes");
@@ -98,19 +99,19 @@ public record GdeltIngestionProperties(
 	}
 
 	/**
-	 * Настройки lease, recovery и continuity первого запуска.
+	 * Задает правила первого запуска и повтора незавершенной после сбоя работы.
 	 *
-	 * @param recoveryLease длительность attempt ownership
-	 * @param firstRunPolicy политика continuity baseline
-	 * @param firstRunStartAt явная UTC граница для policy FIXED
+	 * @param recoveryLease срок, в течение которого начатая попытка считается принадлежащей одному процессу
+	 * @param firstRunPolicy способ выбора начальной границы загрузки
+	 * @param firstRunStartAt явная граница UTC для режима {@link FirstRunPolicy#FIXED}
 	 */
 	public record Continuity(
 			@DefaultValue("15m") @NotNull Duration recoveryLease,
-			@DefaultValue("LATEST") @NotNull FirstRunPolicy firstRunPolicy,
+			@DefaultValue("RECENT_WINDOW") @NotNull FirstRunPolicy firstRunPolicy,
 			Instant firstRunStartAt
 	) {
 
-		/** Проверяет lease и cross-field first-run contract. */
+		/** Проверяет срок владения попыткой и согласованность настроек первого запуска. */
 		public Continuity {
 			Objects.requireNonNull(firstRunPolicy, "firstRunPolicy must not be null");
 			requirePositive(recoveryLease, "recoveryLease");
@@ -128,17 +129,16 @@ public record GdeltIngestionProperties(
 	}
 
 	/**
-	 * Настройки одного последовательного автоматического worker и ограниченной
-	 * фоновой работы ingestion.
+	 * Задает режим одного последовательного фонового исполнителя загрузки GDELT.
 	 *
-	 * @param enabled разрешен ли автоматический запуск в обычном web-процессе
-	 * @param pollDelay задержка от terminal завершения до следующего запуска
-	 * @param cycleLease срок глобального владения одним ingestion cycle
-	 * @param shutdownGrace максимальное ожидание cooperative остановки worker
-	 * @param schedulerStaleBase базовый порог устаревшего scheduler
+	 * @param enabled разрешен ли автоматический запуск в обычном серверном процессе
+	 * @param pollDelay задержка между завершением одного цикла и началом следующего
+	 * @param cycleLease срок, на который один процесс получает исключительное право выполнять цикл
+	 * @param shutdownGrace максимальное время ожидания штатной остановки фонового исполнителя
+	 * @param schedulerStaleBase базовый срок, после которого отсутствие работы планировщика считается подозрительным
 	 * @param sourceOutageThreshold порог недоступности источника
-	 * @param dueWorkLimit максимум локальной due work за один cycle
-	 * @param receiptAudit настройки ограниченной проверки terminal receipts
+	 * @param dueWorkLimit максимальное число отложенных локальных задач за один цикл
+	 * @param receiptAudit настройки периодической проверки сохраненных подтверждений индексации
 	 */
 	public record Automatic(
 			@DefaultValue("false") boolean enabled,
@@ -165,11 +165,11 @@ public record GdeltIngestionProperties(
 		}
 
 		/**
-		 * Вычисляет порог stale так, чтобы долгий штатный cycle не считался
-		 * остановившимся scheduler.
+		 * Вычисляет, через какое время без новой работы планировщик можно считать
+		 * остановившимся. Порог учитывает, что штатный цикл может занять все разрешенное время.
 		 *
-		 * @param operationDeadline общая deadline одного cycle
-		 * @return большее из базового порога и двух poll delay плюс deadline
+		 * @param operationDeadline общее ограничение времени одного цикла
+		 * @return большее из базового порога и суммы двух задержек с ограничением времени цикла
 		 */
 		public Duration effectiveSchedulerStaleThreshold(Duration operationDeadline) {
 			requirePositive(operationDeadline, "operationDeadline");
@@ -182,17 +182,17 @@ public record GdeltIngestionProperties(
 	}
 
 	/**
-	 * Настройки небольшой периодической проверки уже сохраненных receipts.
+	 * Задает периодическую проверку ранее сохраненных подтверждений индексации.
 	 *
 	 * @param interval минимальный интервал между проверками
-	 * @param batchSize максимум receipts в одной проверке
+	 * @param batchSize максимальное число подтверждений в одной проверке
 	 */
 	public record ReceiptAudit(
 			@DefaultValue("15m") @NotNull Duration interval,
 			@DefaultValue("2") @Positive int batchSize
 	) {
 
-		/** Проверяет положительные границы независимо от Spring binding. */
+		/** Проверяет, что интервал и количество проверяемых подтверждений положительны. */
 		public ReceiptAudit {
 			requirePositive(interval, "interval");
 			if (batchSize <= 0) {

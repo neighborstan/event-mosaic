@@ -38,6 +38,8 @@ import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonito
 import com.neighbor.eventmosaic.ingestion.error.StoragePressureException;
 import com.neighbor.eventmosaic.ingestion.observability.StoragePressureState;
 import com.neighbor.eventmosaic.ingestion.observability.StorageResource;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlan;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestClient;
 import com.neighbor.eventmosaic.ingestion.source.GdeltManifestParser;
 import com.neighbor.eventmosaic.ingestion.staging.DownloadedArchive;
@@ -68,6 +70,7 @@ class IngestionRunServiceTest {
 	private GdeltManifestClient manifestClient;
 	private GdeltManifestParser manifestParser;
 	private IngestionArchiveLedger ledger;
+	private RecentRecoveryPlanLedger recentRecoveryPlanLedger;
 	private SourcePollLedger sourcePollLedger;
 	private StagingLayout layout;
 	private HttpArchiveDownloader downloader;
@@ -81,21 +84,28 @@ class IngestionRunServiceTest {
 		manifestClient = mock(GdeltManifestClient.class);
 		manifestParser = mock(GdeltManifestParser.class);
 		ledger = mock(IngestionArchiveLedger.class);
+		recentRecoveryPlanLedger = mock(RecentRecoveryPlanLedger.class);
 		sourcePollLedger = mock(SourcePollLedger.class);
 		layout = mock(StagingLayout.class);
 		downloader = mock(HttpArchiveDownloader.class);
 		stager = mock(ZipArchiveStager.class);
 		metrics = mock(IngestionMetrics.class);
 		storageMonitor = mock(BackendDataStorageMonitor.class);
-		service = new IngestionRunService(
+		service = newService(properties());
+	}
+
+	private IngestionRunService newService(GdeltIngestionProperties properties) {
+		return new IngestionRunService(
 				manifestClient,
 				manifestParser,
 				ledger,
+				recentRecoveryPlanLedger,
+				GdeltTestFixtures.recentWindowPlanner(),
 				sourcePollLedger,
 				layout,
 				downloader,
 				stager,
-				properties(),
+				properties,
 				metrics,
 				storageMonitor
 		);
@@ -153,6 +163,174 @@ class IngestionRunServiceTest {
 		assertThat(result.sourcePollDeferred()).isTrue();
 		assertThat(result.runState()).isEmpty();
 		verifyNoInteractions(manifestClient, manifestParser, downloader, stager);
+	}
+
+	@Test
+	@DisplayName("Подготовка one-shot регистрирует обновление без загрузки архивов")
+	void preparedOneShotStopsBeforeArchiveAcquisition() {
+		UUID token = UUID.randomUUID();
+		SourcePollAttempt attempt = new SourcePollAttempt(
+				GdeltSourceContract.SOURCE_NAME,
+				token,
+				Instant.parse("2026-07-20T12:01:00Z"),
+				1,
+				false);
+		DiscoveredUpdate update = update();
+		IngestionRunState registeredRun = runState(IngestionRunStatus.PARTIAL);
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(1));
+		when(sourcePollLedger.claim(any(), any())).thenReturn(Optional.of(attempt));
+		when(manifestClient.fetchLatestManifest(budget)).thenReturn("manifest");
+		when(manifestParser.parse("manifest")).thenReturn(update);
+		when(ledger.registerDiscoveredUpdate(update, FirstRunPolicy.LATEST, null))
+				.thenReturn(0);
+		when(sourcePollLedger.markSucceeded(GdeltSourceContract.SOURCE_NAME, token))
+				.thenReturn(AttemptTransitionResult.APPLIED);
+		when(ledger.findRunByUpdateTime(update.sourceUpdateTime()))
+				.thenReturn(Optional.of(registeredRun));
+
+		AcquisitionCycleResult result = service.prepareOneShot(budget);
+
+		assertThat(result.runState()).containsSame(registeredRun);
+		assertThat(result.sourcePollDeferred()).isFalse();
+		verify(ledger, never()).claimArchive(any(), any());
+		verifyNoInteractions(layout, downloader, stager);
+	}
+
+	@Test
+	@DisplayName("Политика недавнего окна атомарно активирует план вместе со свежей парой")
+	void recentWindowPolicyActivatesPlanInsteadOfLegacyContinuityRegistration() {
+		UUID token = UUID.randomUUID();
+		SourcePollAttempt attempt = new SourcePollAttempt(
+				GdeltSourceContract.SOURCE_NAME,
+				token,
+				Instant.parse("2026-07-20T12:01:00Z"),
+				1,
+				false);
+		DiscoveredUpdate update = update();
+		RecentWindowPlan expectedPlan = GdeltTestFixtures.recentWindowPlanner()
+				.plan(update.sourceUpdateTime());
+		IngestionRunState registeredRun = runState(IngestionRunStatus.PARTIAL);
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(1));
+		when(sourcePollLedger.claim(any(), any())).thenReturn(Optional.of(attempt));
+		when(manifestClient.fetchLatestManifest(budget)).thenReturn("manifest");
+		when(manifestParser.parse("manifest")).thenReturn(update);
+		when(recentRecoveryPlanLedger.activate(update, expectedPlan)).thenReturn(
+				new RecentRecoveryPlanLedger.ActivationResult(
+						RecentRecoveryPlanLedger.ActivationOutcome.ACTIVATED,
+						Optional.empty(),
+						2));
+		when(sourcePollLedger.markSucceeded(GdeltSourceContract.SOURCE_NAME, token))
+				.thenReturn(AttemptTransitionResult.APPLIED);
+		when(ledger.findRunByUpdateTime(update.sourceUpdateTime()))
+				.thenReturn(Optional.of(registeredRun));
+		service = newService(GdeltTestFixtures.properties(
+				Path.of("build", "recent-window-test"),
+				1024 * 1024,
+				FirstRunPolicy.RECENT_WINDOW));
+
+		AcquisitionCycleResult result = service.prepareOneShot(budget);
+
+		assertThat(result.runState()).containsSame(registeredRun);
+		verify(recentRecoveryPlanLedger).activate(update, expectedPlan);
+		verify(ledger, never()).registerDiscoveredUpdate(any(), any(), any());
+		verify(metrics).gapsCreated(2);
+	}
+
+	@Test
+	@DisplayName("Устаревший latest manifest продолжает более новый durable запуск без отката состояния")
+	void staleRecentManifestUsesStrictlyNewerDurableRun() {
+		UUID token = UUID.randomUUID();
+		SourcePollAttempt attempt = new SourcePollAttempt(
+				GdeltSourceContract.SOURCE_NAME,
+				token,
+				Instant.parse("2026-07-20T12:16:00Z"),
+				1,
+				false);
+		DiscoveredUpdate observed = update();
+		RecentWindowPlan observedPlan = GdeltTestFixtures.recentWindowPlanner()
+				.plan(observed.sourceUpdateTime());
+		IngestionRunState durableLatest = new IngestionRunState(
+				2,
+				Instant.parse("2026-07-20T12:15:00Z"),
+				IngestionRunStatus.STAGED,
+				Instant.parse("2026-07-20T12:15:30Z"),
+				Instant.parse("2026-07-20T12:16:00Z"),
+				null,
+				List.of());
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(1));
+		when(sourcePollLedger.claim(any(), any())).thenReturn(Optional.of(attempt));
+		when(manifestClient.fetchLatestManifest(budget)).thenReturn("manifest");
+		when(manifestParser.parse("manifest")).thenReturn(observed);
+		when(recentRecoveryPlanLedger.activate(observed, observedPlan)).thenReturn(
+				new RecentRecoveryPlanLedger.ActivationResult(
+						RecentRecoveryPlanLedger.ActivationOutcome.STALE_FRONTIER,
+						Optional.empty(),
+						0));
+		when(sourcePollLedger.markSucceeded(GdeltSourceContract.SOURCE_NAME, token))
+				.thenReturn(AttemptTransitionResult.APPLIED);
+		when(ledger.findRunByUpdateTime(observed.sourceUpdateTime()))
+				.thenReturn(Optional.empty());
+		when(ledger.findLatestRun()).thenReturn(Optional.of(durableLatest));
+		service = newService(GdeltTestFixtures.properties(
+				Path.of("build", "stale-recent-test"),
+				1024 * 1024,
+				FirstRunPolicy.RECENT_WINDOW));
+
+		AcquisitionCycleResult result = service.prepareOneShot(budget);
+
+		assertThat(result.runState()).containsSame(durableLatest);
+		verify(recentRecoveryPlanLedger).activate(observed, observedPlan);
+		verify(ledger, never()).registerDiscoveredUpdate(any(), any(), any());
+		verifyNoInteractions(layout, downloader, stager);
+	}
+
+	@Test
+	@DisplayName("Устаревший latest manifest не выбирает старый exact run вместо нового durable запуска")
+	void staleRecentManifestPrefersNewerDurableRunOverExistingExactRun() {
+		UUID token = UUID.randomUUID();
+		SourcePollAttempt attempt = new SourcePollAttempt(
+				GdeltSourceContract.SOURCE_NAME,
+				token,
+				Instant.parse("2026-07-20T12:16:00Z"),
+				1,
+				false);
+		DiscoveredUpdate observed = update();
+		RecentWindowPlan observedPlan = GdeltTestFixtures.recentWindowPlanner()
+				.plan(observed.sourceUpdateTime());
+		IngestionRunState exactOld = runState(IngestionRunStatus.STAGED);
+		IngestionRunState durableLatest = new IngestionRunState(
+				2,
+				Instant.parse("2026-07-20T12:15:00Z"),
+				IngestionRunStatus.PARTIAL,
+				Instant.parse("2026-07-20T12:15:30Z"),
+				null,
+				null,
+				List.of());
+		OperationBudget budget = OperationBudget.start(Duration.ofMinutes(1));
+		when(sourcePollLedger.claim(any(), any())).thenReturn(Optional.of(attempt));
+		when(manifestClient.fetchLatestManifest(budget)).thenReturn("manifest");
+		when(manifestParser.parse("manifest")).thenReturn(observed);
+		when(recentRecoveryPlanLedger.activate(observed, observedPlan)).thenReturn(
+				new RecentRecoveryPlanLedger.ActivationResult(
+						RecentRecoveryPlanLedger.ActivationOutcome.STALE_FRONTIER,
+						Optional.empty(),
+						0));
+		when(sourcePollLedger.markSucceeded(GdeltSourceContract.SOURCE_NAME, token))
+				.thenReturn(AttemptTransitionResult.APPLIED);
+		when(ledger.findRunByUpdateTime(observed.sourceUpdateTime()))
+				.thenReturn(Optional.of(exactOld));
+		when(ledger.findLatestRun()).thenReturn(Optional.of(durableLatest));
+		service = newService(GdeltTestFixtures.properties(
+				Path.of("build", "stale-recent-exact-test"),
+				1024 * 1024,
+				FirstRunPolicy.RECENT_WINDOW));
+
+		AcquisitionCycleResult result = service.prepareOneShot(budget);
+
+		assertThat(result.runState()).containsSame(durableLatest);
+		verify(recentRecoveryPlanLedger).activate(observed, observedPlan);
+		verify(ledger, never()).registerDiscoveredUpdate(any(), any(), any());
+		verifyNoInteractions(layout, downloader, stager);
 	}
 
 	@Test

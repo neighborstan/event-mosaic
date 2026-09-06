@@ -1,5 +1,6 @@
 package com.neighbor.eventmosaic.ingestion.state;
 
+import static com.neighbor.eventmosaic.ingestion.GdeltTestFixtures.update;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.neighbor.eventmosaic.FixedClockTestConfiguration;
@@ -8,6 +9,9 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageEvidence;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageInterval;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageQuery;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageStatus;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger.ActivationOutcome;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlan;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Duration;
@@ -43,6 +47,9 @@ class JdbcIngestionCoverageQueryIntegrationTest {
 
 	@Autowired
 	private IngestionCoverageQuery coverageQuery;
+
+	@Autowired
+	private RecentRecoveryPlanLedger recentRecoveryPlanLedger;
 
 	@Autowired
 	private JdbcClient jdbcClient;
@@ -82,6 +89,32 @@ class JdbcIngestionCoverageQueryIntegrationTest {
 		assertThat(evidence).isEqualTo(IngestionCoverageEvidence.complete());
 		assertThat(indexedEventCount()).isEqualTo(96);
 		assertThat(receiptDocumentCount(WINDOW_FROM.plus(Duration.ofHours(7)))).isZero();
+	}
+
+	@Test
+	@DisplayName("Активация recent-плана расширяет LATEST baseline назад, а 96 Event receipts дают полное окно")
+	void recentActivationBackshiftsLatestBaselineAndCompleteGridCoversWindow() {
+		insertLatestSourceState(WINDOW_TO);
+		RecentWindowPlan plan = RecentWindowPlan.fromBoundaries(
+				WINDOW_FROM,
+				WINDOW_TO,
+				WINDOW_TO);
+
+		var activation = recentRecoveryPlanLedger.activate(update(WINDOW_TO), plan);
+		insertPartitionAndGenerations();
+		insertRuns();
+		insertEventArchives();
+		insertIndexedEventProcessing(null);
+
+		assertThat(activation.outcome()).isEqualTo(ActivationOutcome.ACTIVATED);
+		assertThat(sourceWatermarks()).satisfies(watermarks -> {
+			assertThat(watermarks.baseline()).isEqualTo(WINDOW_FROM);
+			assertThat(watermarks.latestObserved()).isEqualTo(WINDOW_TO);
+			assertThat(watermarks.firstRunPolicy()).isEqualTo("LATEST");
+		});
+		assertThat(indexedEventCount()).isEqualTo(96);
+		assertThat(coverageQuery.read(WINDOW_FROM, WINDOW_TO))
+				.isEqualTo(IngestionCoverageEvidence.complete());
 	}
 
 	@Test
@@ -156,6 +189,23 @@ class JdbcIngestionCoverageQueryIntegrationTest {
 				values ('GDELT', :baseline, :latestObserved, 'FIXED', :recordedAt, :recordedAt)
 				""")
 				.param("baseline", Timestamp.from(baseline))
+				.param("latestObserved", Timestamp.from(latestObserved))
+				.param("recordedAt", Timestamp.from(RECORDED_AT))
+				.update();
+	}
+
+	private void insertLatestSourceState(Instant latestObserved) {
+		jdbcClient.sql("""
+				insert into ingestion_source_state (
+				    source_name,
+				    continuity_baseline,
+				    latest_observed_update_time,
+				    first_run_policy,
+				    initialized_at,
+				    updated_at
+				)
+				values ('GDELT', :latestObserved, :latestObserved, 'LATEST', :recordedAt, :recordedAt)
+				""")
 				.param("latestObserved", Timestamp.from(latestObserved))
 				.param("recordedAt", Timestamp.from(RECORDED_AT))
 				.update();
@@ -355,8 +405,12 @@ class JdbcIngestionCoverageQueryIntegrationTest {
 				    :recordedAt
 				from ingestion_runs ingestion_run
 				where ingestion_run.source_name = 'GDELT'
+				  and ingestion_run.source_update_time >= :windowFrom
+				  and ingestion_run.source_update_time < :windowTo
 				""")
 				.param("recordedAt", Timestamp.from(RECORDED_AT))
+				.param("windowFrom", Timestamp.from(WINDOW_FROM))
+				.param("windowTo", Timestamp.from(WINDOW_TO))
 				.update();
 	}
 
@@ -443,8 +497,12 @@ class JdbcIngestionCoverageQueryIntegrationTest {
 				  on active_generation.partition_key = logical_partition.partition_key
 				 and active_generation.state = 'ACTIVE'
 				where archive.archive_type = 'TRANSLATION_EVENTS'
+				  and archive.source_update_time >= :windowFrom
+				  and archive.source_update_time < :windowTo
 				""")
-				.param("recordedAt", Timestamp.from(RECORDED_AT));
+				.param("recordedAt", Timestamp.from(RECORDED_AT))
+				.param("windowFrom", Timestamp.from(WINDOW_FROM))
+				.param("windowTo", Timestamp.from(WINDOW_TO));
 		if (zeroReceiptAt == null) {
 			statement.param("zeroReceiptAt", null, Types.TIMESTAMP_WITH_TIMEZONE);
 		} else {
@@ -633,7 +691,27 @@ class JdbcIngestionCoverageQueryIntegrationTest {
 				.single();
 	}
 
+	private SourceWatermarks sourceWatermarks() {
+		return jdbcClient.sql("""
+				select continuity_baseline, latest_observed_update_time, first_run_policy
+				from ingestion_source_state
+				where source_name = 'GDELT'
+				""")
+				.query((resultSet, rowNumber) -> new SourceWatermarks(
+						IngestionJdbcMappers.instant(resultSet, "continuity_baseline"),
+						IngestionJdbcMappers.instant(resultSet, "latest_observed_update_time"),
+						resultSet.getString("first_run_policy")))
+				.single();
+	}
+
 	private static IngestionCoverageInterval interval(Instant from, Instant to) {
 		return new IngestionCoverageInterval(from, to);
+	}
+
+	private record SourceWatermarks(
+			Instant baseline,
+			Instant latestObserved,
+			String firstRunPolicy
+	) {
 	}
 }

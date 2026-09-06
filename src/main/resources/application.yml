@@ -90,7 +90,7 @@ event-mosaic:
         max-total-bytes: 1073741824
       continuity:
         recovery-lease: 15m
-        first-run-policy: LATEST
+        first-run-policy: RECENT_WINDOW
       automatic:
         enabled: false
         poll-delay: 1m

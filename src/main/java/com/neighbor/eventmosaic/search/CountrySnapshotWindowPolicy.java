@@ -1,5 +1,6 @@
 package com.neighbor.eventmosaic.search;
 
+import com.neighbor.eventmosaic.shared.time.RollingWindowPolicy;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -14,30 +15,26 @@ import org.springframework.stereotype.Component;
 @Component
 final class CountrySnapshotWindowPolicy {
 
-	private static final long SOURCE_CADENCE_SECONDS = Duration.ofMinutes(15).toSeconds();
 	private static final Duration SNAPSHOT_DURATION = Duration.ofHours(24);
 
 	private final Clock clock;
-	private final CountryMapSnapshotProperties properties;
+	private final RollingWindowPolicy rollingWindowPolicy;
 
 	CountrySnapshotWindowPolicy(
 			Clock clock,
-			CountryMapSnapshotProperties properties
+			RollingWindowPolicy rollingWindowPolicy
 	) {
 		this.clock = Objects.requireNonNull(clock, "clock must not be null");
-		this.properties = Objects.requireNonNull(properties, "properties must not be null");
+		this.rollingWindowPolicy = Objects.requireNonNull(
+				rollingWindowPolicy, "rollingWindowPolicy must not be null");
 	}
 
 	Window currentWindow() {
-		Instant afterGrace = clock.instant().minus(properties.ingestionGrace());
-		long closedCadence = Math.floorDiv(
-				afterGrace.getEpochSecond(),
-				SOURCE_CADENCE_SECONDS) * SOURCE_CADENCE_SECONDS;
-		Instant to = Instant.ofEpochSecond(closedCadence);
-		return new Window(to.minus(SNAPSHOT_DURATION), to);
+		var window = rollingWindowPolicy.windowAt(clock.instant());
+		return new Window(window.from(), window.to());
 	}
 
-	/** Точное полуоткрытое суточное окно на UTC-сетке исходных обновлений. */
+	/** Хранит суточное окно на сетке UTC: начало входит в интервал, а конец не входит. */
 	record Window(Instant from, Instant to) {
 
 		Window {
@@ -54,7 +51,9 @@ final class CountrySnapshotWindowPolicy {
 
 		private static boolean isCadenceBoundary(Instant instant) {
 			return instant.getNano() == 0
-					&& Math.floorMod(instant.getEpochSecond(), SOURCE_CADENCE_SECONDS) == 0;
+					&& Math.floorMod(
+							instant.getEpochSecond(),
+							Duration.ofMinutes(15).toSeconds()) == 0;
 		}
 	}
 }

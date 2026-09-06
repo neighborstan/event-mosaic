@@ -5,9 +5,8 @@ import java.util.Objects;
 import org.springframework.stereotype.Component;
 
 /**
- * Проверяет совместимость настроек automatic ingestion с общей deadline и
- * retry policy. Так приложение останавливается при небезопасной конфигурации
- * еще до первого запуска pipeline.
+ * Проверяет, что сроки автоматической загрузки GDELT согласованы между собой.
+ * При небезопасном сочетании настроек приложение остановится до первого цикла загрузки.
  */
 @Component
 public final class IngestionRuntimePropertiesValidator {
@@ -15,10 +14,10 @@ public final class IngestionRuntimePropertiesValidator {
 	private static final Duration LEASE_SAFETY_MARGIN = Duration.ofMinutes(3);
 
 	/**
-	 * Проверяет межгрупповые временные границы после Spring binding.
+	 * Проверяет взаимосвязанные временные ограничения после чтения настроек Spring.
 	 *
-	 * @param ingestionProperties настройки GDELT ingestion
-	 * @param backendDataProperties общие deadline и retry policy
+	 * @param ingestionProperties настройки загрузки GDELT
+	 * @param backendDataProperties общее ограничение времени операции и задержки повторных попыток
 	 */
 	public IngestionRuntimePropertiesValidator(
 			GdeltIngestionProperties ingestionProperties,
@@ -35,10 +34,6 @@ public final class IngestionRuntimePropertiesValidator {
 			GdeltIngestionProperties ingestionProperties,
 			BackendDataProperties backendData
 	) {
-		if (ingestionProperties.continuity().firstRunPolicy() == FirstRunPolicy.RECENT_WINDOW) {
-			throw new IllegalArgumentException(
-					"firstRunPolicy RECENT_WINDOW is not supported yet; use LATEST or FIXED");
-		}
 		validate(ingestionProperties.automatic(), backendData);
 	}
 

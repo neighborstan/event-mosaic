@@ -1,8 +1,9 @@
 package com.neighbor.eventmosaic.ingestion.api;
 
 /**
- * Каталог информационных ingestion diagnostics, которые не являются failure.
+ * Задает коды информационных событий загрузки GDELT. Эти события помогают понять особенности данных источника, но сами по себе не означают сбой.
  */
 public enum IngestionEventCode {
-	MANIFEST_UNSUPPORTED_ARCHIVE
+	MANIFEST_UNSUPPORTED_ARCHIVE,
+	MASTER_AHEAD_OF_LATEST
 }

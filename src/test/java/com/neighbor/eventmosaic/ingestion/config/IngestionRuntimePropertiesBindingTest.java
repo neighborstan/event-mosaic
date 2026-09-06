@@ -24,10 +24,12 @@ class IngestionRuntimePropertiesBindingTest {
 	void bindsSafeDefaults() {
 		contextRunner.run(context -> {
 			assertThat(context).hasNotFailed();
-			GdeltIngestionProperties.Automatic automatic = context
-					.getBean(GdeltIngestionProperties.class)
-					.automatic();
+			GdeltIngestionProperties properties = context
+					.getBean(GdeltIngestionProperties.class);
+			GdeltIngestionProperties.Automatic automatic = properties.automatic();
 
+			assertThat(properties.continuity().firstRunPolicy())
+					.isEqualTo(FirstRunPolicy.RECENT_WINDOW);
 			assertThat(automatic.enabled()).isFalse();
 			assertThat(automatic.pollDelay()).isEqualTo(Duration.ofMinutes(1));
 			assertThat(automatic.cycleLease()).isEqualTo(Duration.ofMinutes(15));
@@ -112,11 +114,17 @@ class IngestionRuntimePropertiesBindingTest {
 	}
 
 	@Test
-	@DisplayName("Политика текущего окна отклоняется до появления ее runtime-реализации")
-	void rejectsRecentWindowPolicyBeforeRuntimeSupport() {
-		assertStartupFailure(
-				CONTINUITY_PREFIX + "first-run-policy=RECENT_WINDOW",
-				"firstRunPolicy RECENT_WINDOW is not supported yet; use LATEST or FIXED");
+	@DisplayName("Spring принимает политику текущего окна как first-run default")
+	void acceptsRecentWindowPolicyWithRuntimeSupport() {
+		contextRunner
+				.withPropertyValues(CONTINUITY_PREFIX + "first-run-policy=RECENT_WINDOW")
+				.run(context -> {
+					assertThat(context).hasNotFailed();
+					assertThat(context.getBean(GdeltIngestionProperties.class)
+							.continuity()
+							.firstRunPolicy())
+							.isEqualTo(FirstRunPolicy.RECENT_WINDOW);
+				});
 	}
 
 	private void assertStartupFailure(String property, String message) {

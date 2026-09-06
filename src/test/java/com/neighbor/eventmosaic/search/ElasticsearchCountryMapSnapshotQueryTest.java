@@ -15,6 +15,7 @@ import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.TotalHitsRelation;
+import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageEvidence;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageQuery;
@@ -24,6 +25,7 @@ import com.neighbor.eventmosaic.search.api.CountryMapSnapshot.CoverageStatus;
 import com.neighbor.eventmosaic.search.api.CountryMapSnapshot.UnlocatedReason;
 import com.neighbor.eventmosaic.search.api.CountryMapSnapshot.UnmappedReason;
 import com.neighbor.eventmosaic.search.api.SearchAccessException;
+import com.neighbor.eventmosaic.shared.time.RollingWindowPolicy;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -73,7 +75,10 @@ class ElasticsearchCountryMapSnapshotQueryTest {
 					catalogLoader,
 					new CountrySnapshotWindowPolicy(
 							Clock.fixed(NOW, ZoneOffset.UTC),
-							properties()),
+							new RollingWindowPolicy(
+									GdeltSourceContract.UPDATE_INTERVAL,
+									Duration.ofHours(24),
+									properties().ingestionGrace())),
 					new CountryMapSnapshotAssembler(catalogLoader),
 					new SearchMetrics(meterRegistry));
 

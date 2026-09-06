@@ -7,10 +7,14 @@ import com.neighbor.eventmosaic.ingestion.api.DiscoveredUpdate;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlanner;
+import com.neighbor.eventmosaic.shared.time.RollingWindowPolicy;
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 
 public final class GdeltTestFixtures {
@@ -64,6 +68,14 @@ public final class GdeltTestFixtures {
 	}
 
 	public static GdeltIngestionProperties properties(Path stagingRoot, long maxArchiveBytes) {
+		return properties(stagingRoot, maxArchiveBytes, FirstRunPolicy.LATEST);
+	}
+
+	public static GdeltIngestionProperties properties(
+			Path stagingRoot,
+			long maxArchiveBytes,
+			FirstRunPolicy firstRunPolicy
+	) {
 		return new GdeltIngestionProperties(
 				GdeltSourceContract.OFFICIAL_DOWNLOAD_BASE_URI,
 				stagingRoot,
@@ -75,7 +87,7 @@ public final class GdeltTestFixtures {
 				new GdeltIngestionProperties.Zip(4, 1024 * 1024, 1024 * 1024),
 				new GdeltIngestionProperties.Continuity(
 						Duration.ofMinutes(15),
-						FirstRunPolicy.LATEST,
+						firstRunPolicy,
 						null),
 				new GdeltIngestionProperties.Automatic(
 						false,
@@ -90,6 +102,15 @@ public final class GdeltTestFixtures {
 								2)),
 				false
 		);
+	}
+
+	public static RecentWindowPlanner recentWindowPlanner() {
+		return new RecentWindowPlanner(
+				Clock.fixed(UPDATE_TIME.plus(Duration.ofMinutes(30)), ZoneOffset.UTC),
+				new RollingWindowPolicy(
+						GdeltSourceContract.UPDATE_INTERVAL,
+						Duration.ofHours(24),
+						Duration.ofMinutes(15)));
 	}
 
 	public static BackendDataProperties backendDataProperties() {

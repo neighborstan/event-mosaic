@@ -16,6 +16,8 @@ import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlanner;
 import com.neighbor.eventmosaic.ingestion.staging.HttpArchiveDownloader;
 import com.neighbor.eventmosaic.ingestion.staging.StagingLayout;
 import com.neighbor.eventmosaic.ingestion.staging.ZipArchiveStager;
@@ -59,6 +61,12 @@ class IngestionFakeSourceIntegrationTest {
 
 	@Autowired
 	private SourcePollLedger sourcePollLedger;
+
+	@Autowired
+	private RecentRecoveryPlanLedger recentRecoveryPlanLedger;
+
+	@Autowired
+	private RecentWindowPlanner recentWindowPlanner;
 
 	@Autowired
 	private JdbcClient jdbcClient;
@@ -115,7 +123,8 @@ class IngestionFakeSourceIntegrationTest {
 				Duration.ofSeconds(5),
 				65536
 		);
-		GdeltManifestParser parser = new GdeltManifestParser();
+		GdeltManifestParser parser = new GdeltManifestParser(
+				new GdeltManifestLineParser());
 		GdeltIngestionProperties properties = properties();
 		IngestionMetrics metrics = new IngestionMetrics(new SimpleMeterRegistry());
 		ArchiveDownloadUriResolver downloadUriResolver = archiveName ->
@@ -124,6 +133,8 @@ class IngestionFakeSourceIntegrationTest {
 				manifestClient,
 				parser,
 				ledger,
+				recentRecoveryPlanLedger,
+				recentWindowPlanner,
 				sourcePollLedger,
 				new StagingLayout(properties),
 				new HttpArchiveDownloader(httpClient, properties, metrics, downloadUriResolver),
