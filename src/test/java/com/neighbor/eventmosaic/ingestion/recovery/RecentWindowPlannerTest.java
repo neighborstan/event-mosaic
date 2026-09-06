@@ -4,7 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
-import com.neighbor.eventmosaic.ingestion.error.SourceDataViolationException;
+import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.shared.time.RollingWindowPolicy;
 import java.time.Clock;
 import java.time.Duration;
@@ -57,10 +57,10 @@ class RecentWindowPlannerTest {
 	@Test
 	@DisplayName("Frontier позже уже наступившей UTC-границы отклоняется типизированно")
 	void rejectsFrontierAfterCurrentCadenceBoundary() {
-		assertThatExceptionOfType(SourceDataViolationException.class)
+		assertThatExceptionOfType(RemoteSourceAccessException.class)
 				.isThrownBy(() -> planner(Duration.ofMinutes(15))
 						.plan(Instant.parse("2026-08-11T12:45:00Z")))
-				.extracting(SourceDataViolationException::errorCode)
+				.extracting(RemoteSourceAccessException::errorCode)
 				.isEqualTo(IngestionErrorCode.MANIFEST_TIMESTAMP_MISMATCH);
 	}
 

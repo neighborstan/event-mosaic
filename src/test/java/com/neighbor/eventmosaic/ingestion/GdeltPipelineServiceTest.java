@@ -92,7 +92,10 @@ import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import com.neighbor.eventmosaic.ingestion.audit.ReceiptAuditService;
+import com.neighbor.eventmosaic.ingestion.audit.ReceiptAuditService.AuditBatchResult;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -153,10 +156,12 @@ class GdeltPipelineServiceTest {
 			mock(BackendDataStorageMonitor.class);
 
 	private GdeltPipelineService service;
+	private final ReceiptAuditService receiptAuditService = mock(ReceiptAuditService.class);
 
 	@BeforeEach
 	void setUp() {
 		service = newService(GdeltTestFixtures.properties(tempDir, 1024 * 1024));
+		when(receiptAuditService.auditDue(any())).thenReturn(new AuditBatchResult(0, 0, false));
 		when(indexTargetResolver.resolve(any(), any(OperationBudget.class))).thenReturn(
 				IndexTargetResolution.ready(ACTIVE_TARGETS));
 		when(fingerprintFactory.create(
@@ -184,6 +189,17 @@ class GdeltPipelineServiceTest {
 				.thenAnswer(invocation -> invocation.getArgument(0));
 	}
 
+	private void stubEligibleWork(List<IngestionArchiveState> events, List<IngestionArchiveState> mentions) {
+		when(ingestionRunService.eligibleRecentWork(anyInt(), any(), any())).thenAnswer(invocation -> {
+			Set<String> excluded = invocation.getArgument(1);
+			return Stream.concat(events.stream(), mentions.stream())
+					.filter(state -> !excluded.contains(state.archive().idempotencyKey()))
+					.filter(state -> processingLedger.findByArchiveIdempotencyKey(state.archive().idempotencyKey())
+							.map(processing -> processing.status() != ArchiveProcessingStatus.INDEXED).orElse(true))
+					.toList();
+		});
+	}
+
 	private GdeltPipelineService newService(GdeltIngestionProperties properties) {
 		return new GdeltPipelineService(
 				ingestionRunService,
@@ -197,7 +213,74 @@ class GdeltPipelineServiceTest {
 				properties,
 				GdeltTestFixtures.backendDataProperties(),
 				metrics,
-				storageMonitor);
+				storageMonitor, receiptAuditService);
+	}
+
+	@Test
+	@DisplayName("Ошибка GDELT не отменяет сохраненный архив и остается итогом цикла")
+	void failedRemotePollStillProcessesLocalWorkAndPreservesFailure() {
+		var recent = archiveState(GdeltTestFixtures.UPDATE_TIME.minus(Duration.ofMinutes(15)),
+				ArchiveType.TRANSLATION_EVENTS);
+		var failure = new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_HTTP_ERROR);
+		when(ingestionRunService.prepareOneShot(any())).thenThrow(failure);
+		stubEligibleWork(List.of(recent), List.of());
+		stubPendingRegistrationAndClaims();
+		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
+			ArchiveProcessingRequest request = invocation.getArgument(0);
+			return completed(request.kind(), successfulProgress());
+		});
+
+		assertThatThrownBy(service::runOneShot).isSameAs(failure);
+		verify(ingestionRunService).acquireArchive(eq(recent), any());
+		verify(processingLedger).markIndexed(any(), any(), any());
+		verify(receiptAuditService).auditDue(any());
+		verifyNoInteractions(masterCatalogClient);
+	}
+
+	@Test
+	@DisplayName("Неизменившийся источник без готовой работы не обращается к индексу")
+	void unchangedWithoutDueWorkSkipsIndexIo() {
+		service = newService(GdeltTestFixtures.properties(tempDir, 1024 * 1024, FirstRunPolicy.RECENT_WINDOW));
+		when(ingestionRunService.prepareOneShot(any())).thenReturn(
+				new AcquisitionCycleResult(Optional.of(runState(GdeltTestFixtures.UPDATE_TIME, true)),
+						false, false, true));
+
+		assertThat(service.runOneShot()).isEqualTo(IngestionOneShotOutcome.UNCHANGED);
+		verifyNoInteractions(indexWriter, indexTargetResolver, archiveProcessor);
+		verify(receiptAuditService).auditDue(any());
+	}
+
+	@Test
+	@DisplayName("Отложенное восстановление раздела не выдается за завершенную локальную работу")
+	void unchangedDueWorkBlockedByMaintenanceIsDeferred() {
+		service = newService(GdeltTestFixtures.properties(tempDir, 1024 * 1024, FirstRunPolicy.RECENT_WINDOW));
+		when(ingestionRunService.prepareOneShot(any())).thenReturn(
+				new AcquisitionCycleResult(Optional.empty(), false, false, true));
+		stubEligibleWork(List.of(archiveState(GdeltTestFixtures.UPDATE_TIME,
+				ArchiveType.TRANSLATION_EVENTS)), List.of());
+		when(indexTargetResolver.resolve(any(), any())).thenReturn(
+				IndexTargetResolution.outcome(IndexTargetResolutionStatus.MAINTENANCE_DEFERRED));
+
+		assertThat(service.runOneShot()).isEqualTo(IngestionOneShotOutcome.RETRY_DEFERRED);
+		verifyNoInteractions(archiveProcessor, indexWriter);
+		verify(processingLedger, never()).register(any(), any());
+	}
+
+	@Test
+	@DisplayName("Явный режим последнего обновления продолжает сохраненный архив при неизменившемся источнике")
+	void latestOnlyContinuesSavedProcessingOnUnchangedPoll() {
+		when(ingestionRunService.prepareOneShot(any())).thenReturn(
+				new AcquisitionCycleResult(Optional.of(runState(true)), false, false, true));
+		stubPendingRegistrationAndClaims();
+		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
+			ArchiveProcessingRequest request = invocation.getArgument(0);
+			return completed(request.kind(), successfulProgress());
+		});
+
+		service.runOneShot();
+		verify(archiveProcessor, org.mockito.Mockito.times(2)).process(any(), any(), any());
+		verify(processingLedger, org.mockito.Mockito.times(2)).markIndexed(any(), any(), any());
+		verifyNoInteractions(masterCatalogClient);
 	}
 
 	@Test
@@ -224,7 +307,7 @@ class GdeltPipelineServiceTest {
 				archiveProcessor,
 				indexWriter,
 				indexTargetResolver);
-		verify(metrics).cycleDuration(
+		verify(metrics).pipelineDuration(
 				anyLong(),
 				eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
 	}
@@ -313,12 +396,7 @@ class GdeltPipelineServiceTest {
 				new RecentRecoveryPlanLedger.CatalogRegistrationResult(
 						RecentRecoveryPlanLedger.CatalogRegistrationOutcome.APPLIED,
 						pendingPlan));
-		when(recentRecoveryPlanLedger.archivesNewestFirst(
-				com.neighbor.eventmosaic.ingestion.api.ArchiveType.TRANSLATION_EVENTS))
-				.thenReturn(List.of(recentNewestEvent, recentOlderEvent));
-		when(recentRecoveryPlanLedger.archivesNewestFirst(
-				com.neighbor.eventmosaic.ingestion.api.ArchiveType.TRANSLATION_MENTIONS))
-				.thenReturn(List.of(recentNewestMention, recentOlderMention));
+		stubEligibleWork(List.of(recentNewestEvent, recentOlderEvent), List.of(recentNewestMention, recentOlderMention));
 		stubPendingRegistrationAndClaims();
 		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
 			ArchiveProcessingRequest request = invocation.getArgument(0);
@@ -402,10 +480,7 @@ class GdeltPipelineServiceTest {
 		when(recentRecoveryPlanLedger.currentPlan()).thenReturn(Optional.of(pendingPlan));
 		when(masterCatalogClient.fetchCatalog(any(), any(), any()))
 				.thenThrow(masterFailure);
-		when(recentRecoveryPlanLedger.archivesNewestFirst(ArchiveType.TRANSLATION_EVENTS))
-				.thenReturn(List.of(recentEvent));
-		when(recentRecoveryPlanLedger.archivesNewestFirst(ArchiveType.TRANSLATION_MENTIONS))
-				.thenReturn(List.of());
+		stubEligibleWork(List.of(recentEvent), List.of());
 		stubPendingRegistrationAndClaims();
 		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
 			ArchiveProcessingRequest request = invocation.getArgument(0);
@@ -454,10 +529,7 @@ class GdeltPipelineServiceTest {
 				RecentRecoveryPlanLedger.CatalogStatus.PENDING)));
 		when(masterCatalogClient.fetchCatalog(any(), any(), any()))
 				.thenThrow(masterFailure);
-		when(recentRecoveryPlanLedger.archivesNewestFirst(ArchiveType.TRANSLATION_EVENTS))
-				.thenReturn(List.of(recentEvent));
-		when(recentRecoveryPlanLedger.archivesNewestFirst(ArchiveType.TRANSLATION_MENTIONS))
-				.thenReturn(List.of());
+		stubEligibleWork(List.of(recentEvent), List.of());
 		stubPendingRegistrationAndClaims();
 		when(archiveProcessor.process(any(), any(), any())).thenAnswer(invocation -> {
 			ArchiveProcessingRequest request = invocation.getArgument(0);
@@ -525,10 +597,7 @@ class GdeltPipelineServiceTest {
 				.thenReturn(new AcquisitionCycleResult(Optional.of(latest), false));
 		when(recentRecoveryPlanLedger.currentPlan()).thenReturn(Optional.of(recentPlan(
 				RecentRecoveryPlanLedger.CatalogStatus.CATALOG_COMPLETE)));
-		when(recentRecoveryPlanLedger.archivesNewestFirst(ArchiveType.TRANSLATION_EVENTS))
-				.thenReturn(List.of(recentEvent));
-		when(recentRecoveryPlanLedger.archivesNewestFirst(ArchiveType.TRANSLATION_MENTIONS))
-				.thenReturn(List.of(recentMention));
+		stubEligibleWork(List.of(recentEvent), List.of(recentMention));
 		stubIndexedRegistrations(latest);
 		when(processingLedger.findByArchiveIdempotencyKey(
 				recentEvent.archive().idempotencyKey()))
@@ -570,10 +639,7 @@ class GdeltPipelineServiceTest {
 				.thenReturn(new AcquisitionCycleResult(Optional.of(latest), false));
 		when(recentRecoveryPlanLedger.currentPlan()).thenReturn(Optional.of(recentPlan(
 				RecentRecoveryPlanLedger.CatalogStatus.CATALOG_COMPLETE)));
-		when(recentRecoveryPlanLedger.archivesNewestFirst(ArchiveType.TRANSLATION_EVENTS))
-				.thenReturn(List.of(recentNewestEvent, recentOlderEvent));
-		when(recentRecoveryPlanLedger.archivesNewestFirst(ArchiveType.TRANSLATION_MENTIONS))
-				.thenReturn(List.of());
+		stubEligibleWork(List.of(recentNewestEvent, recentOlderEvent), List.of());
 		when(processingLedger.findByArchiveIdempotencyKey(
 				recentNewestEvent.archive().idempotencyKey()))
 				.thenAnswer(_ -> newestIndexed.get()
@@ -699,8 +765,10 @@ class GdeltPipelineServiceTest {
 
 		assertThat(service.runOneShot()).isEqualTo(IngestionOneShotOutcome.STORAGE_PRESSURE);
 
-		verifyNoInteractions(processingLedger, archiveProcessor, indexWriter, indexTargetResolver);
-		verify(metrics).cycleDuration(
+		verifyNoInteractions(archiveProcessor, indexWriter, indexTargetResolver);
+		verify(processingLedger, never()).register(any(), any());
+		verify(processingLedger, never()).claim(any(), any(), any());
+		verify(metrics).pipelineDuration(
 				anyLong(),
 				eq(IngestionOperationMetricOutcome.STORAGE_PRESSURE));
 	}
@@ -1120,7 +1188,7 @@ class GdeltPipelineServiceTest {
 		verify(processingLedger, never()).register(
 				mention.archive().idempotencyKey(),
 				mentionFingerprint());
-		verify(metrics).cycleDuration(
+		verify(metrics).pipelineDuration(
 				anyLong(),
 				eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
 	}
@@ -1531,10 +1599,10 @@ class GdeltPipelineServiceTest {
 		verify(processingLedger, never()).register(
 				mention.archive().idempotencyKey(),
 				mentionFingerprint());
-		verify(metrics).cycleDuration(
+		verify(metrics).pipelineDuration(
 				anyLong(),
 				eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
-		verify(metrics, never()).cycleDuration(
+		verify(metrics, never()).pipelineDuration(
 				anyLong(),
 				eq(IngestionOperationMetricOutcome.INTERNAL_FAILURE));
 	}
@@ -1705,7 +1773,7 @@ class GdeltPipelineServiceTest {
 							OperationOwnershipLostException.class,
 							ownershipLost -> assertThat(ownershipLost.getSuppressed())
 									.containsExactly(failure));
-			verify(metrics).cycleDuration(
+			verify(metrics).pipelineDuration(
 					anyLong(),
 					eq(IngestionOperationMetricOutcome.OWNERSHIP_LOST));
 		}

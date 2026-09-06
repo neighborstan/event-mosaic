@@ -2,7 +2,7 @@ package com.neighbor.eventmosaic.ingestion.recovery;
 
 import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
-import com.neighbor.eventmosaic.ingestion.error.SourceDataViolationException;
+import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
 import com.neighbor.eventmosaic.shared.time.RollingWindowPolicy;
 import java.time.Clock;
 import java.time.Instant;
@@ -32,11 +32,11 @@ public final class RecentWindowPlanner {
 	public RecentWindowPlan plan(Instant newestUpdateTime) {
 		Objects.requireNonNull(newestUpdateTime, "newestUpdateTime must not be null");
 		if (!GdeltSourceContract.isUpdateBoundary(newestUpdateTime)) {
-			throw new SourceDataViolationException(IngestionErrorCode.MANIFEST_TIMESTAMP_MISMATCH);
+			throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_TIMESTAMP_MISMATCH);
 		}
 		Instant capturedNow = clock.instant();
 		if (newestUpdateTime.isAfter(windowPolicy.floorToCadence(capturedNow))) {
-			throw new SourceDataViolationException(IngestionErrorCode.MANIFEST_TIMESTAMP_MISMATCH);
+			throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_TIMESTAMP_MISMATCH);
 		}
 		var window = windowPolicy.windowAt(capturedNow);
 		return RecentWindowPlan.fromBoundaries(window.from(), window.to(), newestUpdateTime);

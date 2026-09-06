@@ -41,7 +41,7 @@ public class GdeltManifestParser {
 	 */
 	public DiscoveredUpdate parse(String manifest) {
 		if (manifest == null) {
-			throw new SourceDataViolationException(
+			throw new RemoteSourceAccessException(
 					IngestionErrorCode.MANIFEST_MALFORMED_LINE,
 					IngestionErrorContext.atLine(1));
 		}
@@ -54,7 +54,7 @@ public class GdeltManifestParser {
 				continue;
 			}
 			int lineNumber = index + 1;
-			GdeltManifestEntry entry = lineParser.parse(line, lineNumber);
+			GdeltManifestEntry entry = parseMutableLatestLine(line, lineNumber);
 			if (entry.supportedArchive().isEmpty()) {
 				diagnostics.add(new DiscoveryDiagnostic(
 						IngestionEventCode.MANIFEST_UNSUPPORTED_ARCHIVE,
@@ -64,7 +64,7 @@ public class GdeltManifestParser {
 			DiscoveredArchive archive = entry.supportedArchive().orElseThrow();
 			ArchiveType archiveType = archive.archiveType();
 			if (supported.containsKey(archiveType)) {
-				throw new SourceDataViolationException(IngestionErrorCode.MANIFEST_DUPLICATE_ARCHIVE);
+				throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_DUPLICATE_ARCHIVE);
 			}
 			supported.put(archiveType, archive);
 		}
@@ -75,13 +75,26 @@ public class GdeltManifestParser {
 			throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_REQUIRED_ARCHIVE_MISSING);
 		}
 		if (!events.sourceUpdateTime().equals(mentions.sourceUpdateTime())) {
-			throw new SourceDataViolationException(IngestionErrorCode.MANIFEST_TIMESTAMP_MISMATCH);
+			throw new RemoteSourceAccessException(IngestionErrorCode.MANIFEST_TIMESTAMP_MISMATCH);
 		}
 		return new DiscoveredUpdate(
 				events.sourceUpdateTime(),
 				List.of(events, mentions),
 				diagnostics
 		);
+	}
+
+	private GdeltManifestEntry parseMutableLatestLine(String line, int lineNumber) {
+		try {
+			return lineParser.parse(line, lineNumber);
+		}
+		catch (SourceDataViolationException exception) {
+			// Последняя публикация может быть исправлена поставщиком; общие правила безопасности URI остаются постоянными.
+			if (exception.failure().code() == IngestionErrorCode.MANIFEST_MALFORMED_LINE) {
+				throw new RemoteSourceAccessException(exception.failure().code(), exception.context());
+			}
+			throw exception;
+		}
 	}
 
 }

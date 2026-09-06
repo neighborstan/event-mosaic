@@ -6,6 +6,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionEventCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOutcome;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.DisplayName;
@@ -29,7 +30,7 @@ class IngestionMetricsTest {
 		metrics.retry(ArchiveType.TRANSLATION_MENTIONS, true);
 		metrics.error(IngestionErrorCode.DOWNLOAD_MD5_MISMATCH);
 		metrics.event(IngestionEventCode.MANIFEST_UNSUPPORTED_ARCHIVE);
-		metrics.cycleDuration(10, IngestionOperationMetricOutcome.STORAGE_PRESSURE);
+		metrics.cycleDuration(10, IngestionCycleOutcome.STORAGE_PRESSURE);
 		metrics.acquisitionDuration(20, IngestionOperationMetricOutcome.RETRY_DEFERRED);
 
 		assertCounter(registry, "event_mosaic.ingestion.runs", 1, "outcome", "started");

@@ -4,6 +4,7 @@ import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionEventCode;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOutcome;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Locale;
 import java.util.Objects;
@@ -131,15 +132,22 @@ public class IngestionMetrics {
 		).increment();
 	}
 
-	/** Записывает duration полного one-shot cycle ровно с одним bounded outcome. */
+	/** Учитывает весь цикл вместе с получением и освобождением права на работу, включая пропуск занятого цикла. */
 	public void cycleDuration(
 			long elapsedNanos,
-			IngestionOperationMetricOutcome outcome
+			IngestionCycleOutcome outcome
 	) {
+		Objects.requireNonNull(outcome, "outcome must not be null");
 		recordDuration(
 				"event_mosaic.ingestion.cycle.duration",
 				elapsedNanos,
 				outcome);
+		meterRegistry.counter("event_mosaic.ingestion.cycles", OUTCOME_TAG, tag(outcome)).increment();
+	}
+
+	/** Записывает результат работы с данными отдельно от получения и завершения общего права на цикл. */
+	public void pipelineDuration(long elapsedNanos, IngestionOperationMetricOutcome outcome) {
+		recordDuration("event_mosaic.ingestion.pipeline.duration", elapsedNanos, outcome);
 	}
 
 	/** Записывает duration acquisition pass ровно с одним bounded outcome. */
@@ -156,7 +164,7 @@ public class IngestionMetrics {
 	private void recordDuration(
 			String meterName,
 			long elapsedNanos,
-			IngestionOperationMetricOutcome outcome
+			Enum<?> outcome
 	) {
 		if (elapsedNanos < 0) {
 			throw new IllegalArgumentException("elapsedNanos must not be negative");

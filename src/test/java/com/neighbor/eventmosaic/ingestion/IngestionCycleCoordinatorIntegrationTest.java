@@ -12,6 +12,8 @@ import com.neighbor.eventmosaic.PostgreSqlTestcontainersConfiguration;
 import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCycleLedger;
+import com.neighbor.eventmosaic.ingestion.observability.IngestionCycleActivity;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOutcome;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOwnership;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCycleStatus;
@@ -232,7 +234,9 @@ class IngestionCycleCoordinatorIntegrationTest {
 						pipeline,
 						OperationBudget::start,
 						DEADLINE,
-						LEASE));
+						LEASE,
+						new IngestionMetrics(new SimpleMeterRegistry()),
+						mock(IngestionCycleActivity.class)));
 		context.refresh();
 		return new ApplicationInstance(
 				context,

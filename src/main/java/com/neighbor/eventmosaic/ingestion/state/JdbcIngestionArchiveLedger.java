@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Isolation;
@@ -149,6 +150,19 @@ public class JdbcIngestionArchiveLedger implements IngestionArchiveLedger {
 			throw new IllegalArgumentException("startAt must be before endAt");
 		}
 		return archiveRepository.findStagedBetween(startAt, endAt);
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public List<IngestionArchiveState> findEligibleRecentWork(int limit, Set<String> excludedKeys) {
+		if (limit < 1 || limit > 1024) {
+			throw new IllegalArgumentException("limit must be between 1 and 1024");
+		}
+		Set<String> exclusions = Set.copyOf(excludedKeys);
+		if (exclusions.size() > 1024 || exclusions.stream().anyMatch(String::isBlank)) {
+			throw new IllegalArgumentException("excludedKeys must contain at most 1024 nonblank keys");
+		}
+		return archiveRepository.findEligibleRecentWork(limit, exclusions, clock.instant());
 	}
 
 	@Override

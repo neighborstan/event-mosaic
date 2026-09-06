@@ -3,6 +3,7 @@ package com.neighbor.eventmosaic.ingestion.retry;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.neighbor.eventmosaic.ingestion.GdeltTestFixtures;
+import com.neighbor.eventmosaic.ingestion.api.AutomaticRetryState;
 import java.time.Duration;
 import java.time.Instant;
 import org.junit.jupiter.api.DisplayName;
@@ -48,6 +49,15 @@ class RetryDelayPolicyTest {
 				.isEqualTo(NOW.plus(Duration.ofMinutes(10)));
 		assertThat(policy.retryNotBefore(NOW, 0, Duration.ofHours(1)))
 				.isEqualTo(NOW.plus(Duration.ofMinutes(15)));
+	}
+
+	@Test
+	@DisplayName("После третьего повтора пауза равна пятнадцати минутам при любом случайном отклонении")
+	void exhaustedSequenceUsesExactMaximumWithoutJitter() {
+		var exhausted = new AutomaticRetryState(3, 3, 3, null);
+		assertThat(policy(0.0).retryNotBefore(NOW, exhausted, Duration.ZERO)).isEqualTo(NOW.plusSeconds(900));
+		assertThat(policy(Math.nextDown(1.0)).retryNotBefore(NOW, exhausted, Duration.ofHours(1)))
+				.isEqualTo(NOW.plusSeconds(900));
 	}
 
 	private static RetryDelayPolicy policy(double sample) {

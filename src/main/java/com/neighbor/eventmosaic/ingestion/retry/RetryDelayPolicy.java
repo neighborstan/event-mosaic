@@ -1,6 +1,7 @@
 package com.neighbor.eventmosaic.ingestion.retry;
 
 import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
+import com.neighbor.eventmosaic.ingestion.api.AutomaticRetryState;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -72,5 +73,21 @@ public final class RetryDelayPolicy {
 			return properties.maximumDelay();
 		}
 		return Duration.ofNanos(Math.max(1L, Math.round(nanos)));
+	}
+
+	/** Возвращает конец паузы между сериями: ровно максимальную задержку без случайного отклонения. */
+	public Instant cooldownNotBefore(Instant now) {
+		return Objects.requireNonNull(now, "now must not be null").plus(properties.maximumDelay());
+	}
+
+	/** Выбирает обычную задержку либо полную паузу, если текущая серия уже израсходовала все повторы. */
+	public Instant retryNotBefore(Instant now, AutomaticRetryState retry, Duration retryAfter) {
+		Objects.requireNonNull(retry, "retry must not be null");
+		Objects.requireNonNull(retryAfter, "retryAfter must not be null");
+		if (retryAfter.isNegative()) {
+			throw new IllegalArgumentException("retryAfter must not be negative");
+		}
+		return retry.exhausted() ? cooldownNotBefore(now)
+				: retryNotBefore(now, retry.consecutiveRetryableFailures(), retryAfter);
 	}
 }

@@ -50,7 +50,7 @@ class GdeltManifestParserTest {
 	@Test
 	@DisplayName("Некорректная непустая строка отклоняется без раскрытия содержимого")
 	void rejectsMalformedNonblankLineWithoutEchoingIt() {
-		assertThatExceptionOfType(SourceDataViolationException.class)
+		assertThatExceptionOfType(RemoteSourceAccessException.class)
 				.isThrownBy(() -> parser.parse("\nsecret malformed line"))
 				.satisfies(exception -> {
 					assertThat(exception.errorCode())
@@ -101,7 +101,7 @@ class GdeltManifestParserTest {
 		assertFailure(
 				manifest,
 				IngestionErrorCode.MANIFEST_DUPLICATE_ARCHIVE,
-				SourceDataViolationException.class);
+				RemoteSourceAccessException.class);
 	}
 
 	@Test
@@ -115,7 +115,7 @@ class GdeltManifestParserTest {
 		assertFailure(
 				manifest,
 				IngestionErrorCode.MANIFEST_TIMESTAMP_MISMATCH,
-				SourceDataViolationException.class);
+				RemoteSourceAccessException.class);
 	}
 
 	private void assertFailure(

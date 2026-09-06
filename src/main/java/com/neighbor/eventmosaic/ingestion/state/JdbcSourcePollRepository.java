@@ -44,6 +44,9 @@ class JdbcSourcePollRepository {
 			    consecutive_retryable_failures,
 			    automatic_retry_limit,
 			    retry_not_before,
+			    retry_sequence,
+			    last_exhausted_at,
+			    last_exhausted_error_code,
 			    last_attempt_at,
 			    last_succeeded_at,
 			    failed_at,
@@ -106,6 +109,7 @@ class JdbcSourcePollRepository {
 
 		boolean recovered = state.status() == SourcePollStatus.POLLING;
 		boolean automaticRetry = state.status() != SourcePollStatus.IDLE;
+		boolean newSequence = automaticRetry && state.attempt().retry().exhausted();
 		UUID token = UUID.randomUUID();
 		Instant leaseExpiresAt = now.plus(leaseDuration);
 		int updated = jdbcClient.sql("""
@@ -114,7 +118,17 @@ class JdbcSourcePollRepository {
 				    attempt_token = :attemptToken,
 				    lease_expires_at = :leaseExpiresAt,
 				    total_attempt_count = total_attempt_count + 1,
-				    automatic_retries_used = automatic_retries_used + :automaticRetryIncrement,
+				    automatic_retries_used = case when :newSequence then 0
+				        else automatic_retries_used + :automaticRetryIncrement end,
+				    consecutive_retryable_failures = case when :newSequence then 0
+				        else consecutive_retryable_failures end,
+				    retry_sequence = retry_sequence + case when :newSequence then 1 else 0 end,
+				    last_exhausted_at = case when :expiredExhausted then lease_expires_at
+				        when :newSequence then coalesce(last_exhausted_at, failed_at)
+				        else last_exhausted_at end,
+				    last_exhausted_error_code = case when :expiredExhausted then 'ATTEMPT_LEASE_EXPIRED'
+				        when :newSequence then coalesce(last_exhausted_error_code, last_error_code)
+				        else last_exhausted_error_code end,
 				    retry_not_before = null,
 				    last_attempt_at = :lastAttemptAt,
 				    failed_at = null,
@@ -128,6 +142,8 @@ class JdbcSourcePollRepository {
 				.param("attemptToken", token)
 				.param("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
 				.param("automaticRetryIncrement", automaticRetry ? 1 : 0)
+				.param("newSequence", newSequence)
+				.param("expiredExhausted", recovered && newSequence)
 				.param("lastAttemptAt", Timestamp.from(now))
 				.param("updatedAt", Timestamp.from(now))
 				.param("sourceName", sourceName)
@@ -190,7 +206,7 @@ class JdbcSourcePollRepository {
 				? OffsetDateTime.ofInstant(
 						retryDelayPolicy.retryNotBefore(
 								now,
-								state.attempt().retry().consecutiveRetryableFailures(),
+								state.attempt().retry(),
 								retryAfter),
 						ZoneOffset.UTC)
 				: null;
@@ -207,6 +223,12 @@ class JdbcSourcePollRepository {
 				    failed_at = :failedAt,
 				    last_error_code = :errorCode,
 				    last_error_retryable = :retryable,
+				    last_exhausted_at = case
+				        when :retryable and automatic_retries_used >= automatic_retry_limit
+				        then :failedAt else last_exhausted_at end,
+				    last_exhausted_error_code = case
+				        when :retryable and automatic_retries_used >= automatic_retry_limit
+				        then :errorCode else last_exhausted_error_code end,
 				    state_version = state_version + 1,
 				    updated_at = :updatedAt
 				where source_name = :sourceName
@@ -240,14 +262,14 @@ class JdbcSourcePollRepository {
 				.optional();
 	}
 
-	private static boolean isClaimable(SourcePollState state, Instant now) {
+	private boolean isClaimable(SourcePollState state, Instant now) {
 		return switch (state.status()) {
 			case IDLE -> true;
 			case FAILED -> state.failure().failure().retryable()
-					&& !state.attempt().retry().exhausted()
 					&& !state.attempt().retry().retryNotBefore().isAfter(now);
-			case POLLING -> !state.attempt().retry().exhausted()
-					&& !state.attempt().leaseExpiresAt().isAfter(now);
+			case POLLING -> !state.attempt().leaseExpiresAt().isAfter(now)
+					&& (!state.attempt().retry().exhausted()
+						|| !retryDelayPolicy.cooldownNotBefore(state.attempt().leaseExpiresAt()).isAfter(now));
 		};
 	}
 
@@ -261,7 +283,10 @@ class JdbcSourcePollRepository {
 						resultSet.getInt("automatic_retries_used"),
 						resultSet.getInt("consecutive_retryable_failures"),
 						resultSet.getInt("automatic_retry_limit"),
-						nullableInstant(resultSet, "retry_not_before")));
+						nullableInstant(resultSet, "retry_not_before"),
+								resultSet.getLong("retry_sequence"),
+								nullableInstant(resultSet, "last_exhausted_at"),
+								resultSet.getString("last_exhausted_error_code")));
 		return new SourcePollState(
 				resultSet.getString("source_name"),
 				SourcePollStatus.valueOf(resultSet.getString("status")),

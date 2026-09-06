@@ -73,7 +73,7 @@ class GdeltTranslationMasterCatalogClientTest {
 	}
 
 	@AfterEach
-	void stopServer() {
+	void stopServer() throws InterruptedException {
 		try {
 			if (server != null) {
 				server.stop(0);
@@ -81,8 +81,58 @@ class GdeltTranslationMasterCatalogClientTest {
 		}
 		finally {
 			if (httpClient != null) {
-				httpClient.close();
+				httpClient.shutdownNow();
+				assertThat(httpClient.awaitTermination(Duration.ofSeconds(3))).isTrue();
 			}
+		}
+	}
+
+	@Test
+	@DisplayName("Остановка во время чтения хвоста прерывает worker и не запрашивает следующий диапазон")
+	void interruptionStopsOpenRangeWithoutExpansion() throws Exception {
+		var opened = new CountDownLatch(1);
+		var release = new CountDownLatch(1);
+		var requests = new AtomicInteger();
+		var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+		var interrupted = new java.util.concurrent.atomic.AtomicBoolean();
+		server.createContext("/catalog", exchange -> {
+			requests.incrementAndGet();
+			exchange.getResponseHeaders().add("Content-Range", "bytes 0-999/1000");
+			exchange.getResponseHeaders().add("x-goog-generation", "101");
+			exchange.getResponseHeaders().add("ETag", "\"etag-a\"");
+			exchange.sendResponseHeaders(206, 1000);
+			exchange.getResponseBody().write('x');
+			exchange.getResponseBody().flush();
+			opened.countDown();
+			try {
+				release.await(5, TimeUnit.SECONDS);
+			} catch (InterruptedException _) {
+				Thread.currentThread().interrupt();
+			} finally {
+				exchange.close();
+			}
+		});
+		Thread worker = Thread.ofVirtual().start(() -> {
+			try {
+				client(Duration.ofSeconds(10)).fetchCatalog(Set.of(FRONTIER), latest(), budget());
+			} catch (RuntimeException exception) {
+				failure.set(exception);
+				interrupted.set(Thread.currentThread().isInterrupted());
+			}
+		});
+		try {
+			assertThat(opened.await(3, TimeUnit.SECONDS)).isTrue();
+			worker.interrupt();
+			worker.join(3000);
+			assertThat(worker.isAlive()).isFalse();
+			assertThat(failure.get()).isInstanceOf(
+					com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException.class);
+			assertThat(interrupted).isTrue();
+			assertThat(requests).hasValue(1);
+		} finally {
+			release.countDown();
+			worker.interrupt();
+			worker.join(3000);
 		}
 	}
 

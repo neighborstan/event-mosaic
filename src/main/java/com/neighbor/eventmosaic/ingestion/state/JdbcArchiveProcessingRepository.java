@@ -122,6 +122,9 @@ class JdbcArchiveProcessingRepository {
 			    consecutive_retryable_failures,
 			    automatic_retry_limit,
 			    retry_not_before,
+			    retry_sequence,
+			    last_exhausted_at,
+			    last_exhausted_error_code,
 			    last_attempt_at,
 			    delivered_records,
 			    source_invalid_records,
@@ -151,15 +154,18 @@ class JdbcArchiveProcessingRepository {
 	private final JdbcClient jdbcClient;
 	private final int automaticRetryLimit;
 	private final RetryDelayPolicy retryDelayPolicy;
+	private final JdbcRecentWorkQuery recentWorkQuery;
 
 	JdbcArchiveProcessingRepository(
 			JdbcClient jdbcClient,
 			BackendDataProperties properties,
-			RetryDelayPolicy retryDelayPolicy
+			RetryDelayPolicy retryDelayPolicy,
+			JdbcRecentWorkQuery recentWorkQuery
 	) {
 		this.jdbcClient = jdbcClient;
 		this.automaticRetryLimit = properties.retry().automaticRetryLimit();
 		this.retryDelayPolicy = retryDelayPolicy;
+		this.recentWorkQuery = recentWorkQuery;
 	}
 
 	ArchiveProcessingState register(
@@ -237,13 +243,24 @@ class JdbcArchiveProcessingRepository {
 		Instant leaseExpiresAt = now.plus(leaseDuration);
 		boolean recovered = state.status() == ArchiveProcessingStatus.PROCESSING;
 		boolean automaticRetry = state.status() == ArchiveProcessingStatus.FAILED || recovered;
+		boolean newSequence = automaticRetry && state.attempt().retry().exhausted();
 		int updated = jdbcClient.sql("""
 				update ingestion_archive_processing
 				set status = :status,
 				    attempt_token = :attemptToken,
 				    lease_expires_at = :leaseExpiresAt,
 				    total_attempt_count = total_attempt_count + 1,
-				    automatic_retries_used = automatic_retries_used + :automaticRetryIncrement,
+				    automatic_retries_used = case when :newSequence then 0
+				        else automatic_retries_used + :automaticRetryIncrement end,
+				    consecutive_retryable_failures = case when :newSequence then 0
+				        else consecutive_retryable_failures end,
+				    retry_sequence = retry_sequence + case when :newSequence then 1 else 0 end,
+				    last_exhausted_at = case when :expiredExhausted then lease_expires_at
+				        when :newSequence then coalesce(last_exhausted_at, failed_at)
+				        else last_exhausted_at end,
+				    last_exhausted_error_code = case when :expiredExhausted then 'ATTEMPT_LEASE_EXPIRED'
+				        when :newSequence then coalesce(last_exhausted_error_code, last_error_code)
+				        else last_exhausted_error_code end,
 				    retry_not_before = null,
 				    last_attempt_at = :lastAttemptAt,
 				    logical_partition_key = :partitionKey,
@@ -281,6 +298,8 @@ class JdbcArchiveProcessingRepository {
 				.param("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
 				.param("lastAttemptAt", Timestamp.from(now))
 				.param("automaticRetryIncrement", automaticRetry ? 1 : 0)
+				.param("newSequence", newSequence)
+				.param("expiredExhausted", recovered && newSequence)
 				.param(PARAM_PARTITION_KEY, targetBinding.partitionKey())
 				.param(PARAM_PARTITION_VERSION, targetBinding.partitionStateVersion())
 				.param(PARAM_GENERATION_ID, targetBinding.generationId())
@@ -442,7 +461,7 @@ class JdbcArchiveProcessingRepository {
 				? OffsetDateTime.ofInstant(
 						retryDelayPolicy.retryNotBefore(
 								now,
-								state.attempt().retry().consecutiveRetryableFailures(),
+								state.attempt().retry(),
 								Duration.ZERO),
 						ZoneOffset.UTC)
 				: null;
@@ -476,6 +495,12 @@ class JdbcArchiveProcessingRepository {
 						    retry_not_before = :retryNotBefore,
 						    last_error_code = :errorCode,
 						    last_error_retryable = :retryable,
+						    last_exhausted_at = case
+						        when :retryable and automatic_retries_used >= automatic_retry_limit
+						        then :failedAt else last_exhausted_at end,
+						    last_exhausted_error_code = case
+						        when :retryable and automatic_retries_used >= automatic_retry_limit
+						        then :errorCode else last_exhausted_error_code end,
 						    expected_document_count = :expectedDocumentCount,
 						    receipt_digest_algorithm = :receiptDigestAlgorithm,
 						    expected_identity_digest = :expectedIdentityDigest,
@@ -600,7 +625,7 @@ class JdbcArchiveProcessingRepository {
 				? OffsetDateTime.ofInstant(
 						retryDelayPolicy.retryNotBefore(
 								now,
-								state.attempt().retry().consecutiveRetryableFailures(),
+								state.attempt().retry(),
 								Duration.ZERO),
 						ZoneOffset.UTC)
 				: null;
@@ -627,6 +652,12 @@ class JdbcArchiveProcessingRepository {
 				    retry_not_before = :retryNotBefore,
 				    last_error_code = :errorCode,
 				    last_error_retryable = :retryable,
+				    last_exhausted_at = case
+				        when :retryable and automatic_retries_used >= automatic_retry_limit
+				        then :failedAt else last_exhausted_at end,
+				    last_exhausted_error_code = case
+				        when :retryable and automatic_retries_used >= automatic_retry_limit
+				        then :errorCode else last_exhausted_error_code end,
 				    state_version = state_version + 1,
 				    updated_at = :updatedAt
 				where archive_idempotency_key = :archiveIdempotencyKey
@@ -832,15 +863,18 @@ class JdbcArchiveProcessingRepository {
 				.isPresent();
 	}
 
-	private static boolean isClaimable(ArchiveProcessingState state, Instant now) {
+	private boolean isClaimable(ArchiveProcessingState state, Instant now) {
 		return switch (state.status()) {
 			case PENDING -> true;
 			case FAILED -> state.failure() != null
 					&& state.failure().failure().retryable()
-					&& !state.attempt().retry().exhausted()
-					&& !state.attempt().retry().retryNotBefore().isAfter(now);
-			case PROCESSING -> !state.attempt().retry().exhausted()
-					&& !state.attempt().leaseExpiresAt().isAfter(now);
+					&& !state.attempt().retry().retryNotBefore().isAfter(now)
+					&& (!state.attempt().retry().exhausted()
+						|| recentWorkQuery.belongsToActivePlan(state.archiveIdempotencyKey()));
+			case PROCESSING -> !state.attempt().leaseExpiresAt().isAfter(now)
+					&& (!state.attempt().retry().exhausted()
+						|| (recentWorkQuery.belongsToActivePlan(state.archiveIdempotencyKey())
+							&& !retryDelayPolicy.cooldownNotBefore(state.attempt().leaseExpiresAt()).isAfter(now)));
 			case INDEXED -> false;
 		};
 	}

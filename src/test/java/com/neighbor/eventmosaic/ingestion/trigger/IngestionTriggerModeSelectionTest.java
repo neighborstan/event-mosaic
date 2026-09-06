@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import com.neighbor.eventmosaic.ingestion.IngestionCycleCoordinator;
+import com.neighbor.eventmosaic.ingestion.observability.IngestionCycleActivity;
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupCommandLine;
 import com.neighbor.eventmosaic.ingestion.api.GenerationCleanupService;
 import com.neighbor.eventmosaic.ingestion.api.PartitionRebuildCommandLine;
@@ -219,6 +220,7 @@ class IngestionTriggerModeSelectionTest {
 			BackendDataProperties.class
 	})
 	@Import({
+			IngestionCycleActivity.class,
 			IngestionOneShotRunner.class,
 			PartitionRebuildCommandLineAdapter.class,
 			GenerationCleanupCommandLineAdapter.class,

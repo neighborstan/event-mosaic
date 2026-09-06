@@ -109,7 +109,8 @@ final class DefaultBackendDataOperationalState implements BackendDataOperational
 				database.generations(),
 				database.repairRequiredPartitions(),
 				database.openMaintenanceOperations(),
-				aliasState);
+				aliasState,
+				database.live());
 	}
 
 	private record CachedSnapshot(

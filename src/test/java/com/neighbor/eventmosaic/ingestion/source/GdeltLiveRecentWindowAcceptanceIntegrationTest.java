@@ -11,6 +11,7 @@ import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetResolver;
 import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
+import com.neighbor.eventmosaic.ingestion.audit.ReceiptAuditService;
 import com.neighbor.eventmosaic.ingestion.GdeltTestFixtures;
 import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
 import com.neighbor.eventmosaic.ingestion.IngestionOneShotOutcome;
@@ -155,6 +156,9 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 	@Autowired
 	private AcceptanceClock clock;
 
+	@Autowired
+	private javax.sql.DataSource dataSource;
+
 	private final List<String> trace = new CopyOnWriteArrayList<>();
 	private HttpClient httpClient;
 	private FakeGdeltSource source;
@@ -163,6 +167,13 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 	void setUp() throws Exception {
 		clock.reset();
 		Thread.interrupted();
+		var previousIndices = jdbcClient.sql("""
+				select event_index_name from index_generations
+				union select mention_index_name from index_generations
+				""").query(String.class).list();
+		if (!previousIndices.isEmpty()) {
+			elasticsearchClient.indices().delete(request -> request.index(previousIndices).ignoreUnavailable(true));
+		}
 		jdbcClient.sql("""
 				truncate table
 				    ingestion_receipt_audit_state,
@@ -199,6 +210,88 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 				httpClient.close();
 			}
 		}
+	}
+
+	@Test
+	@DisplayName("После длительной недоступности GDELT новая серия завершает суточное окно и перезапуск Spring сохраняет историю")
+	void recoversAfterExhaustedOutageAndPreservesHistoryAcrossSpringRestart() throws Exception {
+		source.useCoherentMaster();
+		source.unavailableArchive.set(source.artifact(FIRST_HISTORICAL,
+				ArchiveType.TRANSLATION_EVENTS).archiveName());
+		assertThat(pipeline(realArchiveProcessor).runOneShot()).isEqualTo(IngestionOneShotOutcome.EXPECTED_FAILURE);
+		assertThat(coverageQuery.read(WINDOW_FROM, WINDOW_TO).status()).isEqualTo(IngestionCoverageStatus.PARTIAL);
+		source.manifestUnavailable.set(true);
+		for (int attempt = 0; attempt < 4; attempt++) {
+			assertThatExceptionOfType(com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException.class)
+					.isThrownBy(() -> pipeline(realArchiveProcessor).runOneShot());
+			if (attempt < 3) {
+				var next = sourcePollLedger.findBySourceName(GdeltSourceContract.SOURCE_NAME).orElseThrow()
+						.attempt().retry().retryNotBefore();
+				clock.advance(Duration.between(clock.instant(), next));
+			}
+		}
+		var exhausted = sourcePollLedger.findBySourceName(GdeltSourceContract.SOURCE_NAME).orElseThrow().attempt();
+		assertThat(exhausted.retry().automaticRetriesUsed()).isEqualTo(3);
+		assertThat(exhausted.retry().retryNotBefore()).isEqualTo(clock.instant().plus(Duration.ofMinutes(15)));
+		int polls = source.manifestRequests();
+		assertThat(pipeline(realArchiveProcessor).runOneShot()).isEqualTo(IngestionOneShotOutcome.RETRY_DEFERRED);
+		assertThat(source.manifestRequests()).isEqualTo(polls);
+
+		source.manifestUnavailable.set(false);
+		source.unavailableArchive.set(null);
+		clock.advance(Duration.ofMinutes(15));
+		assertThat(pipeline(realArchiveProcessor).runOneShot()).isEqualTo(IngestionOneShotOutcome.COMPLETED);
+		assertThat(coverageQuery.read(WINDOW_FROM, WINDOW_TO).status()).isEqualTo(IngestionCoverageStatus.COMPLETE);
+		assertThat(sourcePollLedger.findBySourceName(GdeltSourceContract.SOURCE_NAME).orElseThrow().attempt().retry())
+				.satisfies(retry -> {
+					assertThat(retry.retrySequence()).isEqualTo(2);
+					assertThat(retry.lastExhaustedErrorCode()).isEqualTo("MANIFEST_HTTP_ERROR");
+				});
+		assertThat(runCount()).isEqualTo(EXPECTED_WINDOW_SLOTS);
+		assertThat(documentCount(GdeltIndexKind.EVENT)).isEqualTo(EXPECTED_WINDOW_SLOTS);
+		assertThat(documentCount(GdeltIndexKind.MENTION)).isEqualTo(EXPECTED_WINDOW_SLOTS);
+		Map<Path, String> finalFiles = finalFileHashes();
+		assertThat(finalFiles).hasSize(EXPECTED_WINDOW_SLOTS * 4);
+
+		// Два новых Spring runtime работают с тем же внешним хранилищем. Закрытие runtime не владеет жизнью БД/ES.
+		for (int restart = 0; restart < 2; restart++) {
+			try (var runtime = new org.springframework.boot.builder.SpringApplicationBuilder(
+					com.neighbor.eventmosaic.EventMosaicApplication.class)
+					.initializers(application -> {
+						var context = (org.springframework.context.support.GenericApplicationContext) application;
+						context.registerBean(javax.sql.DataSource.class, () -> dataSource,
+								definition -> definition.setDestroyMethodName(""));
+						context.registerBean(ElasticsearchClient.class, () -> elasticsearchClient,
+								definition -> definition.setDestroyMethodName(""));
+					})
+					.run("--server.port=0", "--spring.docker.compose.enabled=false",
+							"--event-mosaic.ingestion.gdelt.automatic.enabled=false",
+							"--event-mosaic.ingestion.gdelt.one-shot-enabled=false",
+							"--event-mosaic.ingestion.gdelt.staging-root=" + tempDir.resolve("staging"))) {
+				assertThat(runtime.getBean(IngestionCoverageQuery.class).read(WINDOW_FROM, WINDOW_TO).status())
+						.isEqualTo(IngestionCoverageStatus.COMPLETE);
+				assertThat(runtime.getBean(JdbcClient.class).sql("select count(*) from ingestion_runs")
+						.query(Long.class).single()).isEqualTo((long) EXPECTED_WINDOW_SLOTS);
+			}
+		}
+		assertThat(finalFileHashes()).isEqualTo(finalFiles);
+		assertThat(documentCount(GdeltIndexKind.EVENT)).isEqualTo(EXPECTED_WINDOW_SLOTS);
+		assertThat(documentCount(GdeltIndexKind.MENTION)).isEqualTo(EXPECTED_WINDOW_SLOTS);
+		int downloads = source.objectRequests();
+		assertThat(pipeline(realArchiveProcessor).runOneShot()).isEqualTo(IngestionOneShotOutcome.UNCHANGED);
+		assertThat(source.objectRequests()).isEqualTo(downloads);
+	}
+
+	private Map<Path, String> finalFileHashes() throws Exception {
+		Map<Path, String> hashes = new LinkedHashMap<>();
+		try (var paths = java.nio.file.Files.walk(tempDir.resolve("staging"))) {
+			for (Path path : paths.filter(java.nio.file.Files::isRegularFile).toList()) {
+				assertThat(path.getFileName().toString()).doesNotEndWith(".part");
+				hashes.put(path, HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+						.digest(java.nio.file.Files.readAllBytes(path))));
+			}
+		}
+		return hashes;
 	}
 
 	@Test
@@ -254,7 +347,7 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 				trace,
 				null));
 
-		assertThat(restartedGraph.runOneShot()).isEqualTo(IngestionOneShotOutcome.COMPLETED);
+		assertThat(restartedGraph.runOneShot()).isEqualTo(IngestionOneShotOutcome.EXPECTED_FAILURE);
 
 		assertThat(recentRecoveryPlanLedger.currentPlan().orElseThrow().catalogStatus())
 				.isEqualTo(RecentRecoveryPlanLedger.CatalogStatus.CATALOG_COMPLETE);
@@ -289,7 +382,7 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 				trace,
 				null));
 
-		assertThat(repeatedGraph.runOneShot()).isEqualTo(IngestionOneShotOutcome.COMPLETED);
+		assertThat(repeatedGraph.runOneShot()).isEqualTo(IngestionOneShotOutcome.UNCHANGED);
 
 		assertThat(source.manifestRequests()).isEqualTo(manifestsBeforeRepeat + 1);
 		assertThat(source.masterRequests()).isEqualTo(masterBeforeRepeat);
@@ -298,6 +391,9 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 		assertThat(documentCount(GdeltIndexKind.EVENT)).isEqualTo(eventDocumentsBeforeRepeat);
 		assertThat(documentCount(GdeltIndexKind.MENTION)).isEqualTo(mentionDocumentsBeforeRepeat);
 	}
+
+	@Autowired
+	private ReceiptAuditService receiptAuditService;
 
 	private GdeltPipelineService pipeline(GdeltArchiveProcessor archiveProcessor) {
 		GdeltIngestionProperties properties = GdeltTestFixtures.properties(
@@ -351,7 +447,7 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 				properties,
 				GdeltTestFixtures.backendDataProperties(),
 				metrics,
-				storageMonitor);
+				storageMonitor, receiptAuditService);
 	}
 
 	private void assertLatestPairWasTerminalBeforeMasterRequest() {
@@ -566,6 +662,8 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 		private final AtomicBoolean failedMentionPending = new AtomicBoolean();
 		private final AtomicInteger failedMentionRequests = new AtomicInteger();
 		private final AtomicInteger manifestRequests = new AtomicInteger();
+		private final AtomicBoolean manifestUnavailable = new AtomicBoolean();
+		private final AtomicReference<String> unavailableArchive = new AtomicReference<>();
 		private final AtomicInteger masterRequests = new AtomicInteger();
 		private final AtomicInteger objectRequests = new AtomicInteger();
 		private final List<Boolean> masterLatestTerminalObservations =
@@ -641,6 +739,11 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 		private void serveManifest(HttpExchange exchange) throws IOException {
 			manifestRequests.incrementAndGet();
 			trace.add("manifest");
+			if (manifestUnavailable.get()) {
+				exchange.sendResponseHeaders(503, -1);
+				exchange.close();
+				return;
+			}
 			byte[] body = manifestBody().getBytes(StandardCharsets.UTF_8);
 			respond(exchange, 200, body);
 		}
@@ -674,6 +777,11 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 				return;
 			}
 			objectRequests.incrementAndGet();
+			if (archiveName.equals(unavailableArchive.get())) {
+				exchange.sendResponseHeaders(503, -1);
+				exchange.close();
+				return;
+			}
 			trace.add("download:" + artifact.archiveType() + ":" + artifact.updateTime());
 			if (archiveName.equals(failedMentionArchive.get())
 					&& failedMentionPending.compareAndSet(true, false)) {
@@ -811,7 +919,9 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 		private static byte[] zip(String entryName, byte[] content) throws IOException {
 			ByteArrayOutputStream bytes = new ByteArrayOutputStream();
 			try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-				zip.putNextEntry(new ZipEntry(entryName));
+				var entry = new ZipEntry(entryName);
+				entry.setTime(INITIAL_NOW.toEpochMilli());
+				zip.putNextEntry(entry);
 				zip.write(content);
 				zip.closeEntry();
 			}

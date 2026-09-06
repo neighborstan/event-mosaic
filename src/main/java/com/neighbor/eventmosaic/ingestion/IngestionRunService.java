@@ -161,6 +161,21 @@ public class IngestionRunService {
 				IngestionRunService::acquisitionOutcome);
 	}
 
+	/** Возвращает только готовую к попытке работу текущего плана в ограниченном количестве. */
+	java.util.List<IngestionArchiveState> eligibleRecentWork(
+			int limit, java.util.Set<String> excludedKeys, OperationBudget budget) {
+		requireRemaining(budget);
+		var work = archiveLedger.findEligibleRecentWork(limit, excludedKeys);
+		requireRemaining(budget);
+		return work;
+	}
+
+	/** Сохраняет возможность продолжить последний запуск в явно выбранном режиме без суточного плана. */
+	Optional<IngestionRunState> latestKnownRun(OperationBudget budget) {
+		requireRemaining(budget);
+		return archiveLedger.findLatestRun();
+	}
+
 	/** Скачивает и безопасно подготавливает ровно один архив, после чего возвращает его актуальное сохраненное состояние. */
 	IngestionArchiveState acquireArchive(
 			IngestionArchiveState archiveState,
@@ -311,6 +326,8 @@ public class IngestionRunService {
 	}
 
 	private AcquisitionCycleResult executePreparedOneShot(OperationBudget budget) {
+		requireRemaining(budget);
+		var previous = archiveLedger.findLatestRun();
 		OneShotDiscovery discovery = discoverOneShot(budget);
 		if (discovery.sourcePollOwnershipLost()) {
 			return new AcquisitionCycleResult(Optional.empty(), false, true);
@@ -320,7 +337,9 @@ public class IngestionRunService {
 		}
 		DiscoveredUpdate update = discovery.update().orElseThrow();
 		IngestionRunState runState = resolveRegisteredRun(update, budget);
-		return new AcquisitionCycleResult(Optional.of(runState), false, false);
+		boolean unchanged = previous.map(run -> !run.sourceUpdateTime()
+				.isBefore(runState.sourceUpdateTime())).orElse(false);
+		return new AcquisitionCycleResult(Optional.of(runState), false, false, unchanged);
 	}
 
 	private OneShotDiscovery discoverOneShot(OperationBudget budget) {
@@ -599,6 +618,7 @@ public class IngestionRunService {
 	}
 
 	private static void requireRemaining(OperationBudget budget) {
+		com.neighbor.eventmosaic.ingestion.error.IngestionInterruption.throwIfRequested();
 		try {
 			budget.requireAvailable();
 		}

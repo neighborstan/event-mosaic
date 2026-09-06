@@ -20,6 +20,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -33,15 +34,18 @@ class JdbcIngestionArchiveRepository {
 	private final JdbcClient jdbcClient;
 	private final int automaticRetryLimit;
 	private final RetryDelayPolicy retryDelayPolicy;
+	private final JdbcRecentWorkQuery recentWorkQuery;
 
 	JdbcIngestionArchiveRepository(
 			JdbcClient jdbcClient,
 			BackendDataProperties properties,
-			RetryDelayPolicy retryDelayPolicy
+			RetryDelayPolicy retryDelayPolicy,
+			JdbcRecentWorkQuery recentWorkQuery
 	) {
 		this.jdbcClient = jdbcClient;
 		this.automaticRetryLimit = properties.retry().automaticRetryLimit();
 		this.retryDelayPolicy = retryDelayPolicy;
+		this.recentWorkQuery = recentWorkQuery;
 	}
 
 	void register(long runId, DiscoveredArchive archive, Instant now) {
@@ -105,6 +109,7 @@ class JdbcIngestionArchiveRepository {
 		IngestionArchiveState state = locked.orElseThrow();
 		boolean recovered = state.status() == IngestionArchiveStatus.PROCESSING;
 		boolean automaticRetry = state.status() == IngestionArchiveStatus.FAILED || recovered;
+		boolean newSequence = automaticRetry && state.attempt().retry().exhausted();
 		UUID token = UUID.randomUUID();
 		Instant leaseExpiresAt = now.plus(leaseDuration);
 		jdbcClient.sql("""
@@ -115,7 +120,17 @@ class JdbcIngestionArchiveRepository {
 				    lease_expires_at = :leaseExpiresAt,
 				    last_attempt_at = :lastAttemptAt,
 				    total_attempt_count = total_attempt_count + 1,
-				    automatic_retries_used = automatic_retries_used + :automaticRetryIncrement,
+				    automatic_retries_used = case when :newSequence then 0
+				        else automatic_retries_used + :automaticRetryIncrement end,
+				    consecutive_retryable_failures = case when :newSequence then 0
+				        else consecutive_retryable_failures end,
+				    retry_sequence = retry_sequence + case when :newSequence then 1 else 0 end,
+				    last_exhausted_at = case when :expiredExhausted then lease_expires_at
+				        when :newSequence then coalesce(last_exhausted_at, failed_at)
+				        else last_exhausted_at end,
+				    last_exhausted_error_code = case when :expiredExhausted then 'ATTEMPT_LEASE_EXPIRED'
+				        when :newSequence then coalesce(last_exhausted_error_code, last_error_code)
+				        else last_exhausted_error_code end,
 				    retry_not_before = null,
 				    last_error_code = null,
 				    last_error_retryable = null,
@@ -128,6 +143,8 @@ class JdbcIngestionArchiveRepository {
 				.param("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
 				.param("lastAttemptAt", Timestamp.from(now))
 				.param("automaticRetryIncrement", automaticRetry ? 1 : 0)
+				.param("newSequence", newSequence)
+				.param("expiredExhausted", recovered && newSequence)
 				.param("updatedAt", Timestamp.from(now))
 				.param("idempotencyKey", idempotencyKey)
 				.update();
@@ -205,7 +222,7 @@ class JdbcIngestionArchiveRepository {
 				? OffsetDateTime.ofInstant(
 						retryDelayPolicy.retryNotBefore(
 								now,
-								state.attempt().retry().consecutiveRetryableFailures(),
+								state.attempt().retry(),
 								retryAfter),
 						ZoneOffset.UTC)
 				: null;
@@ -222,6 +239,12 @@ class JdbcIngestionArchiveRepository {
 				    retry_not_before = :retryNotBefore,
 				    last_error_code = :errorCode,
 				    last_error_retryable = :retryable,
+				    last_exhausted_at = case
+				        when :retryable and automatic_retries_used >= automatic_retry_limit
+				        then :failedAt else last_exhausted_at end,
+				    last_exhausted_error_code = case
+				        when :retryable and automatic_retries_used >= automatic_retry_limit
+				        then :errorCode else last_exhausted_error_code end,
 				    state_version = state_version + 1,
 				    updated_at = :updatedAt
 				where idempotency_key = :idempotencyKey
@@ -261,6 +284,10 @@ class JdbcIngestionArchiveRepository {
 				.param("endAt", Timestamp.from(endAt))
 				.query(IngestionJdbcMappers.ARCHIVE)
 				.list();
+	}
+
+	List<IngestionArchiveState> findEligibleRecentWork(int limit, Set<String> excludedKeys, Instant now) {
+		return recentWorkQuery.findEligible(limit, excludedKeys, now);
 	}
 
 	private Optional<IngestionArchiveState> findForUpdate(String idempotencyKey) {
@@ -309,19 +336,22 @@ class JdbcIngestionArchiveRepository {
 				.flatMap(Optional::ofNullable);
 	}
 
-	private static boolean isClaimable(IngestionArchiveState state, Instant now) {
+	private boolean isClaimable(IngestionArchiveState state, Instant now) {
 		if (state.status() == IngestionArchiveStatus.STAGED) {
 			return false;
 		}
 		if (state.status() == IngestionArchiveStatus.PROCESSING) {
-			return !state.attempt().retry().exhausted()
-					&& !state.attempt().leaseExpiresAt().isAfter(now);
+			return !state.attempt().leaseExpiresAt().isAfter(now)
+					&& (!state.attempt().retry().exhausted()
+						|| (recentWorkQuery.belongsToActivePlan(state.archive().idempotencyKey())
+							&& !retryDelayPolicy.cooldownNotBefore(state.attempt().leaseExpiresAt()).isAfter(now)));
 		}
 		if (state.status() == IngestionArchiveStatus.FAILED) {
 			return state.failure() != null
 					&& state.failure().failure().retryable()
-					&& !state.attempt().retry().exhausted()
-					&& !state.attempt().retry().retryNotBefore().isAfter(now);
+					&& !state.attempt().retry().retryNotBefore().isAfter(now)
+					&& (!state.attempt().retry().exhausted()
+						|| recentWorkQuery.belongsToActivePlan(state.archive().idempotencyKey()));
 		}
 		return state.status() == IngestionArchiveStatus.DISCOVERED;
 	}

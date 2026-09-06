@@ -61,7 +61,10 @@ import com.neighbor.eventmosaic.shared.error.SafeExceptionProjection;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
 import com.neighbor.eventmosaic.shared.time.OperationOwnershipLostException;
-import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Optional;
+import com.neighbor.eventmosaic.ingestion.audit.ReceiptAuditService;
+import com.neighbor.eventmosaic.ingestion.error.IngestionInterruption;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
@@ -104,6 +107,7 @@ public class GdeltPipelineService {
 	private final GdeltIngestionProperties properties;
 	private final BackendDataProperties backendDataProperties;
 	private final IngestionMetrics metrics;
+	private final ReceiptAuditService receiptAuditService;
 	private final BackendDataStorageMonitor storageMonitor;
 
 	/**
@@ -120,6 +124,7 @@ public class GdeltPipelineService {
 	 * @param properties настройки загрузки GDELT и сроков владения попытками
 	 * @param backendDataProperties общие ограничения времени операции и проверки сохраненных данных
 	 * @param metrics сбор метрик о времени и исходах цикла
+	 * @param receiptAuditService редкая проверка ранее подтвержденных архивов
 	 * @param storageMonitor проверка свободного места перед ростом поискового индекса
 	 */
 	public GdeltPipelineService(
@@ -134,7 +139,8 @@ public class GdeltPipelineService {
 			GdeltIngestionProperties properties,
 			BackendDataProperties backendDataProperties,
 			IngestionMetrics metrics,
-			BackendDataStorageMonitor storageMonitor
+			BackendDataStorageMonitor storageMonitor,
+			ReceiptAuditService receiptAuditService
 	) {
 		this.ingestionRunService = ingestionRunService;
 		this.recentRecoveryPlanLedger = recentRecoveryPlanLedger;
@@ -148,6 +154,7 @@ public class GdeltPipelineService {
 		this.backendDataProperties = backendDataProperties;
 		this.metrics = metrics;
 		this.storageMonitor = storageMonitor;
+		this.receiptAuditService = receiptAuditService;
 	}
 
 	/**
@@ -186,63 +193,74 @@ public class GdeltPipelineService {
 		IngestionOperationMetricOutcome metricOutcome =
 				IngestionOperationMetricOutcome.INTERNAL_FAILURE;
 		try {
-			AcquisitionCycleResult acquisition = ingestionRunService.prepareOneShot(budget);
+			AcquisitionCycleResult acquisition;
+			RuntimeException deferredFailure = null;
+			try {
+				acquisition = ingestionRunService.prepareOneShot(budget);
+			}
+			catch (RemoteSourceAccessException | RemoteResponseRejectedException
+					| SourceDataViolationException exception) {
+				// Ошибка источника не отменяет уже сохраненную локальную работу.
+				deferredFailure = exception;
+				var known = properties.continuity().firstRunPolicy() == FirstRunPolicy.RECENT_WINDOW
+						? Optional.<IngestionRunState>empty() : ingestionRunService.latestKnownRun(budget);
+				acquisition = new AcquisitionCycleResult(known, false, false, true);
+			}
 			if (acquisition.sourcePollOwnershipLost()) {
 				metricOutcome = IngestionOperationMetricOutcome.OWNERSHIP_LOST;
 				return IngestionOneShotOutcome.OWNERSHIP_LOST;
 			}
+			var attemptedKeys = new HashSet<String>();
+			boolean progressed = false;
+			boolean archiveFailed = false;
 			if (acquisition.runState().isPresent()) {
 				IngestionRunState runState = acquisition.runState().orElseThrow();
-				ArchiveBatchResult latest = processArchiveBatch(
-						orderedArchives(runState),
-						budget,
-						true,
-						false);
-				if (latest.deadlineReached()) {
-					metricOutcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
-					return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
-				}
-				ingestionRunService.completeOneShot(runState, budget);
-				RuntimeException deferredFailure = latest.deferredFailure();
-				RecentWorkPreparation recentPreparation = prepareRecentWork(
-						runState,
-						budget);
-				deferredFailure = combineDeferredFailures(
-						deferredFailure,
-						recentPreparation.deferredFailure());
-				if (recentPreparation.processKnownWork()) {
-					ArchiveBatchResult recentEvents = processRecentArchives(
-							ArchiveType.TRANSLATION_EVENTS,
-							runState.sourceUpdateTime(),
-							budget);
-					deferredFailure = combineDeferredFailures(
-							deferredFailure,
-							recentEvents.deferredFailure());
-					if (recentEvents.deadlineReached()) {
-						metricOutcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
-						return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
+				if ((!acquisition.sourcePollDeferred() && !acquisition.sourceUnchanged())
+						|| properties.continuity().firstRunPolicy() != FirstRunPolicy.RECENT_WINDOW) {
+					var latestArchives = orderedArchives(runState);
+					ArchiveBatchResult latest = processArchiveBatch(latestArchives, budget, true, false);
+					if (latest.deadlineReached()) {
+						throw new OperationDeadlineExceededException();
 					}
-
-					ArchiveBatchResult recentMentions = processRecentArchives(
-							ArchiveType.TRANSLATION_MENTIONS,
-							runState.sourceUpdateTime(),
-							budget);
-					deferredFailure = combineDeferredFailures(
-							deferredFailure,
-							recentMentions.deferredFailure());
-					if (recentMentions.deadlineReached()) {
-						metricOutcome = IngestionOperationMetricOutcome.OPERATION_DEADLINE_EXCEEDED;
-						return IngestionOneShotOutcome.OPERATION_DEADLINE_EXCEEDED;
-					}
+					deferredFailure = combineDeferredFailures(deferredFailure, latest.deferredFailure());
+					archiveFailed = latest.failed();
+					progressed = (!acquisition.sourcePollDeferred() && !acquisition.sourceUnchanged()) || latest.progressed();
+					latestArchives.forEach(state -> attemptedKeys.add(state.archive().idempotencyKey()));
+					ingestionRunService.completeOneShot(runState, budget);
 				}
-				throwDeferredFailure(deferredFailure);
+				deferredFailure = combineDeferredFailures(deferredFailure, refreshRecentCatalog(runState, budget));
 			}
-			IngestionOneShotOutcome outcome = acquisition.sourcePollDeferred()
-					? IngestionOneShotOutcome.RETRY_DEFERRED
-					: IngestionOneShotOutcome.COMPLETED;
-			metricOutcome = outcome == IngestionOneShotOutcome.RETRY_DEFERRED
-					? IngestionOperationMetricOutcome.RETRY_DEFERRED
-					: IngestionOperationMetricOutcome.COMPLETED;
+			var due = ingestionRunService.eligibleRecentWork(
+					properties.automatic().dueWorkLimit(), Set.copyOf(attemptedKeys), budget);
+			ArchiveBatchResult local = processArchiveBatch(due, budget, true, false);
+			if (local.deadlineReached()) {
+				throw new OperationDeadlineExceededException();
+			}
+			deferredFailure = combineDeferredFailures(deferredFailure, local.deferredFailure());
+			archiveFailed |= local.failed();
+			progressed |= local.progressed();
+			requireRemaining(budget);
+			var audit = receiptAuditService.auditDue(budget);
+			progressed |= audit.checked() > 0;
+			requireRemaining(budget);
+			throwDeferredFailure(deferredFailure);
+			IngestionOneShotOutcome outcome;
+			if (archiveFailed || audit.infrastructureFailure() || audit.mismatched() > 0) {
+				outcome = IngestionOneShotOutcome.EXPECTED_FAILURE;
+				metricOutcome = IngestionOperationMetricOutcome.EXPECTED_FAILURE;
+			}
+			else if (progressed) {
+				outcome = IngestionOneShotOutcome.COMPLETED;
+				metricOutcome = IngestionOperationMetricOutcome.COMPLETED;
+			}
+			else if (acquisition.sourcePollDeferred() || !due.isEmpty()) {
+				outcome = IngestionOneShotOutcome.RETRY_DEFERRED;
+				metricOutcome = IngestionOperationMetricOutcome.RETRY_DEFERRED;
+			}
+			else {
+				outcome = IngestionOneShotOutcome.UNCHANGED;
+				metricOutcome = IngestionOperationMetricOutcome.UNCHANGED;
+			}
 			return outcome;
 		}
 		catch (OperationDeadlineExceededException _) {
@@ -274,7 +292,7 @@ public class GdeltPipelineService {
 			throw exception;
 		}
 		finally {
-			metrics.cycleDuration(System.nanoTime() - startedAt, metricOutcome);
+			metrics.pipelineDuration(System.nanoTime() - startedAt, metricOutcome);
 		}
 	}
 
@@ -314,7 +332,17 @@ public class GdeltPipelineService {
 			boolean verifyIndexedReceipt
 	) {
 		RuntimeException deferredFailure = null;
+		boolean failed = false;
+		boolean progressed = false;
 		for (IngestionArchiveState registeredState : archives) {
+			requireRemaining(budget);
+			var before = acquireBeforeProcessing
+					? processingLedger.findByArchiveIdempotencyKey(registeredState.archive().idempotencyKey())
+					: Optional.<ArchiveProcessingState>empty();
+			if (acquireBeforeProcessing && !verifyIndexedReceipt
+					&& before.map(state -> state.status() == ArchiveProcessingStatus.INDEXED).orElse(false)) {
+				continue;
+			}
 			IngestionArchiveState archiveState = acquireBeforeProcessing
 					? ingestionRunService.acquireArchive(registeredState, budget)
 					: registeredState;
@@ -323,36 +351,42 @@ public class GdeltPipelineService {
 					budget,
 					verifyIndexedReceipt);
 			if (step.deadlineReached()) {
-				return ArchiveBatchResult.deadline(deferredFailure);
+				return ArchiveBatchResult.deadline(deferredFailure, failed, progressed);
 			}
 			deferredFailure = combineDeferredFailures(
 					deferredFailure,
 					step.deferredFailure());
+			failed |= archiveState.status() == IngestionArchiveStatus.FAILED;
+			if (acquireBeforeProcessing) {
+				var after = processingLedger.findByArchiveIdempotencyKey(archiveState.archive().idempotencyKey());
+				failed |= after.map(state -> state.status() == ArchiveProcessingStatus.FAILED).orElse(false);
+				progressed |= !before.equals(after) || !registeredState.equals(archiveState);
+			}
 		}
-		return ArchiveBatchResult.completed(deferredFailure);
+		return ArchiveBatchResult.completed(deferredFailure, failed, progressed);
 	}
 
-	private RecentWorkPreparation prepareRecentWork(
+	private RuntimeException refreshRecentCatalog(
 			IngestionRunState latestRun,
 			OperationBudget budget
 	) {
 		if (properties.continuity().firstRunPolicy() != FirstRunPolicy.RECENT_WINDOW) {
-			return RecentWorkPreparation.skip();
+			return null;
 		}
 		requireRemaining(budget);
 		var currentPlan = recentRecoveryPlanLedger.currentPlan();
 		requireRemaining(budget);
 		if (currentPlan.isEmpty()) {
-			return RecentWorkPreparation.skip();
+			return null;
 		}
 		var planState = currentPlan.orElseThrow();
 		var revision = planState.revision();
 		if (!revision.sourceFrontier().equals(latestRun.sourceUpdateTime())) {
-			return RecentWorkPreparation.skip();
+			return null;
 		}
 		if (planState.catalogStatus()
 				== RecentRecoveryPlanLedger.CatalogStatus.CATALOG_COMPLETE) {
-			return RecentWorkPreparation.ready();
+			return null;
 		}
 
 		DiscoveredUpdate capturedLatest = capturedUpdate(latestRun);
@@ -370,7 +404,7 @@ public class GdeltPipelineService {
 		catch (RemoteResponseRejectedException
 				| RemoteSourceAccessException
 				| SourceDataViolationException exception) {
-			return RecentWorkPreparation.ready(exception);
+			return exception;
 		}
 		emitCatalogDiagnostics(capturedLatest, catalog.diagnostics());
 		requireRemaining(budget);
@@ -385,7 +419,7 @@ public class GdeltPipelineService {
 								== GdeltTranslationMasterCatalogStatus.CATALOG_COMPLETE));
 		requireRemaining(budget);
 		return switch (registration.outcome()) {
-			case APPLIED, ALREADY_COMPLETE -> RecentWorkPreparation.ready();
+			case APPLIED, ALREADY_COMPLETE -> null;
 			case STALE_PLAN -> throw new OperationOwnershipLostException();
 		};
 	}
@@ -464,33 +498,6 @@ public class GdeltPipelineService {
 					.addKeyValue("line_number", diagnostic.lineNumber())
 					.log("GDELT master catalog entry ignored");
 		}
-	}
-
-	private ArchiveBatchResult processRecentArchives(
-			ArchiveType archiveType,
-			java.time.Instant sourceFrontier,
-			OperationBudget budget
-	) {
-		requireRemaining(budget);
-		List<IngestionArchiveState> registered =
-				recentRecoveryPlanLedger.archivesNewestFirst(archiveType);
-		requireRemaining(budget);
-		var eligible = new ArrayList<IngestionArchiveState>(registered.size());
-		for (IngestionArchiveState archiveState : registered) {
-			requireRemaining(budget);
-			if (archiveState.archive().sourceUpdateTime().equals(sourceFrontier)) {
-				continue;
-			}
-			boolean terminalIndexed = processingLedger.findByArchiveIdempotencyKey(
-					archiveState.archive().idempotencyKey())
-					.map(state -> state.status() == ArchiveProcessingStatus.INDEXED)
-					.orElse(false);
-			requireRemaining(budget);
-			if (!terminalIndexed) {
-				eligible.add(archiveState);
-			}
-		}
-		return processArchiveBatch(List.copyOf(eligible), budget, true, false);
 	}
 
 	private static DiscoveredUpdate capturedUpdate(IngestionRunState runState) {
@@ -1137,6 +1144,7 @@ public class GdeltPipelineService {
 	}
 
 	private static void requireRemaining(OperationBudget budget) {
+		IngestionInterruption.throwIfRequested();
 		try {
 			budget.requireAvailable();
 		}
@@ -1284,24 +1292,6 @@ public class GdeltPipelineService {
 		}
 	}
 
-	private record RecentWorkPreparation(
-			boolean processKnownWork,
-			RuntimeException deferredFailure
-	) {
-
-		private static RecentWorkPreparation skip() {
-			return new RecentWorkPreparation(false, null);
-		}
-
-		private static RecentWorkPreparation ready() {
-			return new RecentWorkPreparation(true, null);
-		}
-
-		private static RecentWorkPreparation ready(RuntimeException deferredFailure) {
-			return new RecentWorkPreparation(true, deferredFailure);
-		}
-	}
-
 	private record ArchiveStepResult(
 			boolean deadlineReached,
 			RuntimeException deferredFailure
@@ -1322,15 +1312,17 @@ public class GdeltPipelineService {
 
 	private record ArchiveBatchResult(
 			boolean deadlineReached,
-			RuntimeException deferredFailure
+			RuntimeException deferredFailure,
+			boolean failed,
+			boolean progressed
 	) {
 
-		private static ArchiveBatchResult completed(RuntimeException deferredFailure) {
-			return new ArchiveBatchResult(false, deferredFailure);
+		private static ArchiveBatchResult completed(RuntimeException deferredFailure, boolean failed, boolean progressed) {
+			return new ArchiveBatchResult(false, deferredFailure, failed, progressed);
 		}
 
-		private static ArchiveBatchResult deadline(RuntimeException deferredFailure) {
-			return new ArchiveBatchResult(true, deferredFailure);
+		private static ArchiveBatchResult deadline(RuntimeException deferredFailure, boolean failed, boolean progressed) {
+			return new ArchiveBatchResult(true, deferredFailure, failed, progressed);
 		}
 	}
 }

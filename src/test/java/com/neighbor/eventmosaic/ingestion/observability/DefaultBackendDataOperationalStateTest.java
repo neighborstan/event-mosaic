@@ -145,6 +145,7 @@ class DefaultBackendDataOperationalStateTest {
 				openMaintenance,
 				aliasTransitions,
 				eventIndices,
-				mentionIndices);
+				mentionIndices,
+				BackendDataOperationalSnapshot.LiveCounts.empty());
 	}
 }

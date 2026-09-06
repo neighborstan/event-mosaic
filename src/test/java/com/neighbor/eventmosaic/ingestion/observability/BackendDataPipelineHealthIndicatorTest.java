@@ -6,6 +6,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Set;
+import java.nio.file.Path;
+import com.neighbor.eventmosaic.ingestion.GdeltTestFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -19,16 +21,21 @@ class BackendDataPipelineHealthIndicatorTest {
 	private BackendDataOperationalMetrics operationalMetrics;
 	private BackendDataStorageMonitor storageMonitor;
 	private BackendDataPipelineHealthIndicator indicator;
+	private IngestionCycleActivity activity;
 
 	@BeforeEach
 	void setUp() {
 		operationalState = mock(BackendDataOperationalState.class);
 		operationalMetrics = mock(BackendDataOperationalMetrics.class);
 		storageMonitor = mock(BackendDataStorageMonitor.class);
+		activity = mock(IngestionCycleActivity.class);
+		when(activity.observe()).thenReturn(new IngestionCycleActivity.Observation(false, false, false, 0, 0));
 		indicator = new BackendDataPipelineHealthIndicator(
 				operationalState,
 				operationalMetrics,
-				storageMonitor);
+				storageMonitor,
+				activity,
+				GdeltTestFixtures.properties(Path.of(".local", "health-test"), 1024));
 		when(storageMonitor.observe()).thenReturn(storage(
 				StoragePressureState.AVAILABLE,
 				StoragePressureState.AVAILABLE));
@@ -52,9 +59,14 @@ class BackendDataPipelineHealthIndicatorTest {
 				"state",
 				"lagSeconds",
 				"openGaps",
+				"automaticEnabled", "cycleRunning", "schedulerStale", "terminalActivityAgeSeconds",
+				"nextCycleDelaySeconds", "sourceOutage", "successfulPollAgeSeconds", "sourceLagSeconds",
+				"sourceRetryDelaySeconds", "sourceCooldown", "catalogPending", "eventBootstrapRemaining",
+				"mentionBootstrapRemaining",
 				"retryDue",
 				"retryDeferred",
 				"retryExhausted",
+				"receiptAuditRetryDue", "receiptAuditRetryDeferred", "receiptAuditRetryExhausted",
 				"permanentFailures",
 				"receiptMismatches",
 				"receiptSurpluses",
@@ -107,13 +119,38 @@ class BackendDataPipelineHealthIndicatorTest {
 				snapshot.generations(),
 				snapshot.repairRequiredPartitions(),
 				snapshot.openMaintenanceOperations(),
-				snapshot.aliasConsistency());
+				snapshot.aliasConsistency(),
+				snapshot.live());
 		when(operationalState.observe()).thenReturn(snapshot);
 
 		Health health = indicator.health();
 
 		assertThat(health.getStatus().getCode()).isEqualTo("DEGRADED");
 		assertThat(health.getDetails()).containsEntry("lagSeconds", 900L);
+	}
+
+	@Test
+	@DisplayName("Долгий отказ GDELT и пауза повторов не означают остановку планировщика")
+	void sourceOutageAndCooldownRemainSeparateFromSchedulerActivity() {
+		BackendDataOperationalSnapshot base = snapshot(true, 0, 0, AliasConsistencyState.CONSISTENT);
+		when(operationalState.observe()).thenReturn(new BackendDataOperationalSnapshot(
+				base.databaseAvailable(), base.lagSeconds(), base.openGaps(),
+				base.sourcePollRetries(), base.acquisitionRetries(), base.processingRetries(),
+				base.permanentFailures(), base.receipts(), base.generations(),
+				base.repairRequiredPartitions(), base.openMaintenanceOperations(), base.aliasConsistency(),
+				new BackendDataOperationalSnapshot.LiveCounts(2400, 2400, 1800, 600, true, false, 0, 1,
+						new BackendDataOperationalSnapshot.RetryCounts(0, 1, 0))));
+		when(activity.observe()).thenReturn(new IngestionCycleActivity.Observation(true, false, false, 20, 40));
+
+		Health health = indicator.health();
+
+		assertThat(health.getStatus().getCode()).isEqualTo("DEGRADED");
+		assertThat(health.getDetails()).containsEntry("sourceOutage", true)
+				.containsEntry("schedulerStale", false)
+				.containsEntry("sourceCooldown", true)
+				.containsEntry("eventBootstrapRemaining", 0L)
+				.containsEntry("mentionBootstrapRemaining", 1L)
+				.containsEntry("receiptAuditRetryDeferred", 1L);
 	}
 
 	@Test
@@ -163,7 +200,8 @@ class BackendDataPipelineHealthIndicatorTest {
 				new BackendDataOperationalSnapshot.GenerationCounts(0, 0, 0),
 				0,
 				0,
-				aliasState);
+				aliasState,
+				BackendDataOperationalSnapshot.LiveCounts.empty());
 	}
 
 	private static BackendDataStorageSnapshot storage(

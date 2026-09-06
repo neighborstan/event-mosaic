@@ -18,10 +18,16 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionFailure;
 import com.neighbor.eventmosaic.ingestion.api.IngestionRunStatus;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlan;
 import com.neighbor.eventmosaic.ingestion.error.SourceDataViolationException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.Clock;
+import java.time.ZoneOffset;
+import java.sql.Timestamp;
+import java.util.Set;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -34,6 +40,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Import({PostgreSqlTestcontainersConfiguration.class, FixedClockTestConfiguration.class})
 @SpringBootTest
@@ -46,12 +54,130 @@ class IngestionArchiveLedgerIntegrationTest {
 	@Autowired
 	private JdbcClient jdbcClient;
 
+	@Autowired
+	private RecentRecoveryPlanLedger recentPlanLedger;
+
+	@Autowired
+	private JdbcIngestionRunRepository runRepository;
+
+	@Autowired
+	private JdbcIngestionArchiveRepository archiveRepository;
+
+	@Autowired
+	private JdbcIngestionContinuityRepository continuityRepository;
+
+	@Autowired
+	private PlatformTransactionManager transactionManager;
+
 	@BeforeEach
 	void cleanLedger() {
 		jdbcClient.sql("""
 				truncate table ingestion_gaps, ingestion_source_state, ingestion_archives, ingestion_runs
 				restart identity cascade
 				""").update();
+	}
+
+	@Test
+	@DisplayName("После длительного отказа загрузки новая серия сохраняет историю и разрешает только одного владельца")
+	void recentAcquisitionRearmsAtCooldownBoundaryAndKeepsEvidence() throws Exception {
+		Instant frontier = Instant.parse("2026-07-20T12:00:00Z");
+		recentPlanLedger.activate(update(frontier), RecentWindowPlan.fromBoundaries(frontier.minus(Duration.ofHours(24)), frontier, frontier));
+		DiscoveredArchive events = update(frontier).archives().getFirst();
+		Instant now = FixedClockTestConfiguration.NOW;
+		var transaction = new TransactionTemplate(transactionManager);
+		for (int retry = 0; retry <= 3; retry++) {
+			IngestionArchiveLedger runtime = at(now);
+			var attempt = transaction.execute(_ -> runtime.claimArchive(events.idempotencyKey(), Duration.ofMinutes(10)).orElseThrow());
+			assertThat(attempt).isNotNull();
+			assertThat(attempt.attemptCount()).isEqualTo(retry + 1);
+			transaction.executeWithoutResult(_ -> runtime.markFailed(events.idempotencyKey(), attempt.token(),
+					new IngestionFailure(IngestionErrorCode.DOWNLOAD_HTTP_ERROR, true)));
+			var state = runtime.findByIdempotencyKey(events.idempotencyKey()).orElseThrow();
+			assertThat(state.attempt().retry().retryNotBefore()).isEqualTo(now.plus(Duration.ofMinutes(retry == 3 ? 15 : 1L << retry)));
+			now = state.attempt().retry().retryNotBefore();
+		}
+		Instant boundary = now;
+		var early = at(boundary.minusNanos(1000));
+		var earlyClaim = transaction.execute(_ -> early.claimArchive(events.idempotencyKey(), Duration.ofMinutes(10)));
+		assertThat(earlyClaim).isEmpty();
+		IngestionArchiveLedger restarted = at(boundary);
+		var evidence = restarted.findByIdempotencyKey(events.idempotencyKey()).orElseThrow().attempt().retry();
+		var claims = runConcurrently(
+				() -> new TransactionTemplate(transactionManager).execute(_ -> restarted.claimArchive(events.idempotencyKey(), Duration.ofMinutes(10))),
+				() -> new TransactionTemplate(transactionManager).execute(_ -> restarted.claimArchive(events.idempotencyKey(), Duration.ofMinutes(10))));
+		assertThat(claims).filteredOn(java.util.Optional::isPresent).hasSize(1);
+		var owner = claims.stream().flatMap(java.util.Optional::stream).findFirst().orElseThrow();
+		assertThat(owner.attemptCount()).isEqualTo(5);
+		transaction.executeWithoutResult(_ -> restarted.markStaged(events.idempotencyKey(), owner.token(), staged(events)));
+		var completed = restarted.findByIdempotencyKey(events.idempotencyKey()).orElseThrow();
+		assertThat(completed.status()).isEqualTo(IngestionArchiveStatus.STAGED);
+		assertThat(completed.attempt().retry().retrySequence()).isEqualTo(2);
+		assertThat(completed.attempt().retry().lastExhaustedAt()).isEqualTo(evidence.lastExhaustedAt());
+		assertThat(completed.attempt().retry().lastExhaustedErrorCode()).isEqualTo("DOWNLOAD_HTTP_ERROR");
+	}
+
+	@Test
+	@DisplayName("Выборка недавних загрузок ограничена, упорядочена и пропускает будущие повторы и постоянные ошибки")
+	void eligibleRecentWorkIsBoundedOrderedAndExcludesUnavailableArchives() {
+		Instant frontier = Instant.parse("2026-07-20T12:00:00Z");
+		recentPlanLedger.activate(update(frontier), RecentWindowPlan.fromBoundaries(frontier.minus(Duration.ofHours(24)), frontier, frontier));
+		DiscoveredUpdate older = update(frontier.minusSeconds(900));
+		archiveLedger.registerDiscoveredUpdate(older, FirstRunPolicy.LATEST, null);
+		DiscoveredUpdate outside = update(frontier.minus(Duration.ofHours(24)).minusSeconds(900));
+		archiveLedger.registerDiscoveredUpdate(outside, FirstRunPolicy.LATEST, null);
+		var newestEvent = update(frontier).archives().getFirst();
+		var newestMention = update(frontier).archives().getLast();
+		var oldEvent = older.archives().getFirst();
+		var oldMention = older.archives().getLast();
+		assertThat(archiveLedger.findEligibleRecentWork(3, Set.of()))
+				.extracting(state -> state.archive().idempotencyKey())
+				.containsExactly(newestEvent.idempotencyKey(), oldEvent.idempotencyKey(), newestMention.idempotencyKey());
+		assertThat(archiveLedger.findEligibleRecentWork(1, Set.of(newestEvent.idempotencyKey())))
+				.extracting(state -> state.archive().idempotencyKey()).containsExactly(oldEvent.idempotencyKey());
+		var eventAttempt = archiveLedger.claimArchive(newestEvent.idempotencyKey(), Duration.ofMinutes(10)).orElseThrow();
+		archiveLedger.markFailed(newestEvent.idempotencyKey(), eventAttempt.token(), new IngestionFailure(IngestionErrorCode.DOWNLOAD_HTTP_ERROR, true));
+		var mentionAttempt = archiveLedger.claimArchive(newestMention.idempotencyKey(), Duration.ofMinutes(10)).orElseThrow();
+		archiveLedger.markFailed(newestMention.idempotencyKey(), mentionAttempt.token(), new IngestionFailure(IngestionErrorCode.STAGING_ARTIFACT_CONFLICT, false));
+		var active = archiveLedger.claimArchive(oldEvent.idempotencyKey(), Duration.ofMinutes(10)).orElseThrow();
+		assertThat(archiveLedger.findEligibleRecentWork(10, Set.of())).extracting(state -> state.archive().idempotencyKey()).containsExactly(oldMention.idempotencyKey());
+		jdbcClient.sql("update ingestion_archives set retry_not_before = :now where idempotency_key = :key")
+				.param("now", Timestamp.from(FixedClockTestConfiguration.NOW)).param("key", newestEvent.idempotencyKey()).update();
+		jdbcClient.sql("update ingestion_archives set last_attempt_at = :start, lease_expires_at = :now where idempotency_key = :key")
+				.param("start", Timestamp.from(FixedClockTestConfiguration.NOW.minusSeconds(60)))
+				.param("now", Timestamp.from(FixedClockTestConfiguration.NOW)).param("key", oldEvent.idempotencyKey()).update();
+		assertThat(archiveLedger.findEligibleRecentWork(10, Set.of())).extracting(state -> state.archive().idempotencyKey())
+				.containsExactly(newestEvent.idempotencyKey(), oldEvent.idempotencyKey(), oldMention.idempotencyKey());
+		assertThat(archiveLedger.claimArchive(oldEvent.idempotencyKey(), Duration.ofMinutes(10))).isPresent();
+		assertThat(archiveLedger.markStaged(oldEvent.idempotencyKey(), active.token(), staged(oldEvent))).isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		assertThatThrownBy(() -> archiveLedger.findEligibleRecentWork(0, Set.of())).isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> archiveLedger.findEligibleRecentWork(1025, Set.of())).isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	@DisplayName("Исчерпанный архив после выхода из суточного плана сохраняется для диагностики без нового владельца")
+	void exhaustedAcquisitionAgedOutOfPlanCannotRearm() {
+		Instant frontier = Instant.parse("2026-07-20T12:00:00Z");
+		recentPlanLedger.activate(update(frontier), RecentWindowPlan.fromBoundaries(frontier.minus(Duration.ofHours(24)), frontier, frontier));
+		var events = update(frontier).archives().getFirst();
+		var attempt = archiveLedger.claimArchive(events.idempotencyKey(), Duration.ofMinutes(10)).orElseThrow();
+		archiveLedger.markFailed(events.idempotencyKey(), attempt.token(), new IngestionFailure(IngestionErrorCode.DOWNLOAD_HTTP_ERROR, true));
+		jdbcClient.sql("""
+				update ingestion_archives set automatic_retries_used = 3, total_attempt_count = 4,
+					retry_not_before = :now, last_exhausted_at = failed_at, last_exhausted_error_code = last_error_code
+				where idempotency_key = :key
+				""").param("now", Timestamp.from(FixedClockTestConfiguration.NOW)).param("key", events.idempotencyKey()).update();
+		Instant next = frontier.plus(Duration.ofHours(25));
+		recentPlanLedger.activate(update(next), RecentWindowPlan.fromBoundaries(next.minus(Duration.ofHours(24)), next, next));
+		assertThat(archiveLedger.findEligibleRecentWork(10, Set.of())).noneMatch(state -> state.archive().idempotencyKey().equals(events.idempotencyKey()));
+		assertThat(archiveLedger.claimArchive(events.idempotencyKey(), Duration.ofMinutes(10))).isEmpty();
+		var state = archiveLedger.findByIdempotencyKey(events.idempotencyKey()).orElseThrow();
+		assertThat(state.attempt().count()).isEqualTo(4);
+		assertThat(state.attempt().retry().retrySequence()).isEqualTo(1);
+		assertThat(state.attempt().retry().lastExhaustedErrorCode()).isEqualTo("DOWNLOAD_HTTP_ERROR");
+	}
+
+	private IngestionArchiveLedger at(Instant now) {
+		return new JdbcIngestionArchiveLedger(runRepository, archiveRepository, continuityRepository, Clock.fixed(now, ZoneOffset.UTC));
 	}
 
 	@Test

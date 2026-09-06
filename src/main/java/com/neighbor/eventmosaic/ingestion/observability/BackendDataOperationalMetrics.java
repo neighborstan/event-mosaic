@@ -26,12 +26,24 @@ public class BackendDataOperationalMetrics {
 	/** Регистрирует bounded gauges поверх общего application registry. */
 	public BackendDataOperationalMetrics(
 			MeterRegistry meterRegistry,
-			BackendDataOperationalState operationalState
+			BackendDataOperationalState operationalState,
+			IngestionCycleActivity cycleActivity
 	) {
 		this.operationalState = Objects.requireNonNull(
 				operationalState,
 				"operationalState must not be null");
 		Objects.requireNonNull(meterRegistry, "meterRegistry must not be null");
+		Objects.requireNonNull(cycleActivity, "cycleActivity must not be null");
+		Gauge.builder("event_mosaic.ingestion.automatic.enabled", cycleActivity,
+				activity -> activity.observe().automaticEnabled() ? 1 : 0).register(meterRegistry);
+		Gauge.builder("event_mosaic.ingestion.cycle.running", cycleActivity,
+				activity -> activity.observe().running() ? 1 : 0).register(meterRegistry);
+		Gauge.builder("event_mosaic.ingestion.scheduler.stale", cycleActivity,
+				activity -> activity.observe().stale() ? 1 : 0).register(meterRegistry);
+		Gauge.builder("event_mosaic.ingestion.scheduler.terminal.age", cycleActivity,
+				activity -> activity.observe().terminalAgeSeconds()).baseUnit("seconds").register(meterRegistry);
+		Gauge.builder("event_mosaic.ingestion.cycle.next.delay", cycleActivity,
+				activity -> activity.observe().nextDelaySeconds()).baseUnit("seconds").register(meterRegistry);
 		aliasIncidents = meterRegistry.counter(
 				"event_mosaic.indexing.alias.consistency.incidents");
 
@@ -39,6 +51,22 @@ public class BackendDataOperationalMetrics {
 				BackendDataOperationalSnapshot::lagSeconds);
 		gauge(meterRegistry, "event_mosaic.pipeline.gaps", null, null, null,
 				BackendDataOperationalSnapshot::openGaps);
+		gauge(meterRegistry, "event_mosaic.ingestion.source.poll.age", "seconds", null, null,
+				snapshot -> snapshot.live().successfulPollAgeSeconds());
+		gauge(meterRegistry, "event_mosaic.ingestion.source.outage.age", "seconds", null, null,
+				snapshot -> snapshot.live().sourceOutageAgeSeconds());
+		gauge(meterRegistry, "event_mosaic.ingestion.source.lag", "seconds", null, null,
+				snapshot -> snapshot.live().sourceLagSeconds());
+		gauge(meterRegistry, "event_mosaic.ingestion.source.retry.delay", "seconds", null, null,
+				snapshot -> snapshot.live().sourceRetryDelaySeconds());
+		gauge(meterRegistry, "event_mosaic.ingestion.source.cooldown", null, null, null,
+				snapshot -> snapshot.live().sourceCooldown() ? 1 : 0);
+		gauge(meterRegistry, "event_mosaic.ingestion.bootstrap.catalog.pending", null, null, null,
+				snapshot -> snapshot.live().catalogPending() ? 1 : 0);
+		gauge(meterRegistry, "event_mosaic.ingestion.bootstrap.remaining", null, "type", "event",
+				snapshot -> snapshot.live().eventBootstrapRemaining());
+		gauge(meterRegistry, "event_mosaic.ingestion.bootstrap.remaining", null, "type", "mention",
+				snapshot -> snapshot.live().mentionBootstrapRemaining());
 		gauge(meterRegistry, "event_mosaic.pipeline.failures", null, "state", "permanent",
 				BackendDataOperationalSnapshot::permanentFailures);
 		gauge(meterRegistry, "event_mosaic.indexing.receipt.state", null,
@@ -71,6 +99,12 @@ public class BackendDataOperationalMetrics {
 	}
 
 	private void registerRetryGauges(MeterRegistry meterRegistry) {
+		gauge(meterRegistry, "event_mosaic.pipeline.retries", null,
+				OWNER_TAG, "receipt_audit", STATE_TAG, "due", snapshot -> snapshot.live().receiptAuditRetries().due());
+		gauge(meterRegistry, "event_mosaic.pipeline.retries", null,
+				OWNER_TAG, "receipt_audit", STATE_TAG, "deferred", snapshot -> snapshot.live().receiptAuditRetries().deferred());
+		gauge(meterRegistry, "event_mosaic.pipeline.retries", null,
+				OWNER_TAG, "receipt_audit", STATE_TAG, "exhausted", snapshot -> snapshot.live().receiptAuditRetries().exhausted());
 		gauge(meterRegistry, "event_mosaic.pipeline.retries", null,
 				OWNER_TAG, "source_poll", STATE_TAG, "due",
 				snapshot -> snapshot.sourcePollRetries().due());

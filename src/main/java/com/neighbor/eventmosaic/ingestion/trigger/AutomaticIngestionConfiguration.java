@@ -2,6 +2,7 @@ package com.neighbor.eventmosaic.ingestion.trigger;
 
 import com.neighbor.eventmosaic.ingestion.IngestionCycleCoordinator;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
+import com.neighbor.eventmosaic.ingestion.observability.IngestionCycleActivity;
 import java.time.Clock;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -65,8 +66,10 @@ public class AutomaticIngestionConfiguration {
 			IngestionCycleCoordinator coordinator,
 			@Qualifier("automaticIngestionTaskScheduler") TaskScheduler taskScheduler,
 			Clock clock,
-			GdeltIngestionProperties properties
+			GdeltIngestionProperties properties,
+			IngestionCycleActivity activity
 	) {
+		activity.automaticEnabled();
 		return new AutomaticIngestionScheduler(
 				coordinator,
 				taskScheduler,

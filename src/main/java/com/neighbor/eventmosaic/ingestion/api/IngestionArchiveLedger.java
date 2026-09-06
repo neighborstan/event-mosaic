@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -79,6 +80,15 @@ public interface IngestionArchiveLedger {
 
 	/** Возвращает полный STAGED archive set half-open UTC interval. */
 	List<IngestionArchiveState> findStagedBetween(Instant startAt, Instant endAt);
+
+	/**
+	 * Выбирает доступные для загрузки или индексирования архивы текущего суточного плана: сначала события, затем упоминания, от новых к старым.
+	 *
+	 * @param limit максимум возвращаемых архивов, от 1 до 1024
+	 * @param excludedKeys ключи уже посещенных в этом цикле архивов, не больше 1024
+	 * @return ограниченная выборка без завершенных архивов, будущих повторов и постоянных ошибок
+	 */
+	List<IngestionArchiveState> findEligibleRecentWork(int limit, Set<String> excludedKeys);
 
 	/**
 	 * Находит производное состояние run по времени source update.

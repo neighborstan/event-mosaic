@@ -4,6 +4,7 @@ package com.neighbor.eventmosaic.ingestion;
 enum IngestionOperationMetricOutcome {
 
 	COMPLETED,
+	UNCHANGED,
 	RETRY_DEFERRED,
 	OWNERSHIP_LOST,
 	OPERATION_DEADLINE_EXCEEDED,

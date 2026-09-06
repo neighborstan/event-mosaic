@@ -15,6 +15,8 @@ import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import java.time.Clock;
 import java.sql.Timestamp;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Callable;
@@ -27,6 +29,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Import({PostgreSqlTestcontainersConfiguration.class, FixedClockTestConfiguration.class})
 @SpringBootTest
@@ -51,9 +55,88 @@ class SourcePollLedgerIntegrationTest {
 	@Autowired
 	private Clock clock;
 
+	@Autowired
+	private PlatformTransactionManager transactionManager;
+
 	@BeforeEach
 	void cleanLedger() {
 		jdbcClient.sql("truncate table ingestion_source_poll_state").update();
+	}
+
+	@Test
+	@DisplayName("Длительный отказ проходит две серии повторов и восстанавливается после перезапуска без потери истории")
+	void repeatedOutageSequencesKeepEvidenceAcrossRestart() {
+		sourcePollLedger.register(SOURCE_NAME);
+		Instant now = FixedClockTestConfiguration.NOW;
+		var failure = new IngestionFailure(IngestionErrorCode.MANIFEST_TIMEOUT, true);
+		var transaction = new TransactionTemplate(transactionManager);
+		for (int sequence = 1; sequence <= 2; sequence++) {
+			for (int retry = 0; retry <= 3; retry++) {
+				SourcePollLedger runtime = at(now);
+				var attempt = transaction.execute(_ -> runtime.claim(SOURCE_NAME, LEASE).orElseThrow());
+				assertThat(attempt).isNotNull();
+				assertThat(attempt.attemptCount()).isEqualTo((sequence - 1) * 4 + retry + 1);
+				assertThat(runtime.findBySourceName(SOURCE_NAME).orElseThrow().attempt().retry().automaticRetriesUsed())
+						.isEqualTo(retry);
+				transaction.executeWithoutResult(_ -> runtime.markFailed(SOURCE_NAME, attempt.token(), failure));
+				var retryState = runtime.findBySourceName(SOURCE_NAME).orElseThrow().attempt().retry();
+				Duration expectedDelay = Duration.ofMinutes(retry == 3 ? 15 : 1L << retry);
+				assertThat(retryState.retryNotBefore()).isEqualTo(now.plus(expectedDelay));
+				if (retry == 3) {
+					assertThat(retryState.lastExhaustedAt()).isEqualTo(now);
+					assertThat(retryState.lastExhaustedErrorCode()).isEqualTo("MANIFEST_TIMEOUT");
+				}
+				SourcePollLedger restartedBeforeBoundary = at(retryState.retryNotBefore().minusNanos(1000));
+				var earlyClaim = transaction.execute(_ -> restartedBeforeBoundary.claim(SOURCE_NAME, LEASE));
+				assertThat(earlyClaim).isEmpty();
+				now = retryState.retryNotBefore();
+			}
+		}
+		SourcePollLedger restarted = at(now);
+		var exhaustedEvidence = restarted.findBySourceName(SOURCE_NAME).orElseThrow().attempt().retry();
+		var recovered = transaction.execute(_ -> restarted.claim(SOURCE_NAME, LEASE).orElseThrow());
+		assertThat(recovered).isNotNull();
+		assertThat(recovered.attemptCount()).isEqualTo(9);
+		transaction.executeWithoutResult(_ -> restarted.markSucceeded(SOURCE_NAME, recovered.token()));
+		var healthy = restarted.findBySourceName(SOURCE_NAME).orElseThrow();
+		assertThat(healthy.status()).isEqualTo(SourcePollStatus.IDLE);
+		assertThat(healthy.attempt().retry().retrySequence()).isEqualTo(3);
+		assertThat(healthy.attempt().retry().automaticRetriesUsed()).isZero();
+		assertThat(healthy.attempt().retry().lastExhaustedAt()).isEqualTo(exhaustedEvidence.lastExhaustedAt());
+		assertThat(healthy.attempt().retry().lastExhaustedErrorCode()).isEqualTo("MANIFEST_TIMEOUT");
+	}
+
+	@Test
+	@DisplayName("Остановка последнего повтора восстанавливается после паузы от конца аренды и отклоняет старого владельца")
+	void expiredExhaustedSourceLeaseRearmsAfterMaximumCooldown() {
+		sourcePollLedger.register(SOURCE_NAME);
+		var abandoned = sourcePollLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
+		jdbcClient.sql("""
+				update ingestion_source_poll_state
+				set total_attempt_count = 4, automatic_retries_used = 3
+				where source_name = :sourceName
+				""").param("sourceName", SOURCE_NAME).update();
+		var transaction = new TransactionTemplate(transactionManager);
+		Instant boundary = abandoned.leaseExpiresAt().plus(Duration.ofMinutes(15));
+		var early = at(boundary.minusNanos(1000));
+		var earlyClaim = transaction.execute(_ -> early.claim(SOURCE_NAME, LEASE));
+		assertThat(earlyClaim).isEmpty();
+		var restarted = at(boundary);
+		var recovered = transaction.execute(_ -> restarted.claim(SOURCE_NAME, LEASE).orElseThrow());
+		assertThat(recovered).isNotNull();
+		assertThat(recovered.recovered()).isTrue();
+		assertThat(recovered.attemptCount()).isEqualTo(5);
+		var state = restarted.findBySourceName(SOURCE_NAME).orElseThrow();
+		assertThat(state.attempt().retry().retrySequence()).isEqualTo(2);
+		assertThat(state.attempt().retry().lastExhaustedAt()).isEqualTo(abandoned.leaseExpiresAt());
+		assertThat(state.attempt().retry().lastExhaustedErrorCode()).isEqualTo("ATTEMPT_LEASE_EXPIRED");
+		var staleResult = transaction.execute(_ -> restarted.markSucceeded(SOURCE_NAME, abandoned.token()));
+		assertThat(staleResult).isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		transaction.executeWithoutResult(_ -> restarted.markSucceeded(SOURCE_NAME, recovered.token()));
+	}
+
+	private SourcePollLedger at(Instant now) {
+		return new JdbcSourcePollLedger(sourcePollRepository, backendDataProperties, Clock.fixed(now, ZoneOffset.UTC));
 	}
 
 	@Test
@@ -108,8 +191,8 @@ class SourcePollLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Future retry и исчерпанный budget не создают poll token")
-	void futureRetryAndExhaustedBudgetDoNotCreateToken() {
+	@DisplayName("Будущая задержка запрещает запрос, а наступившая пауза открывает новую серию")
+	void futureRetryDefersAndElapsedCooldownStartsNewSequence() {
 		sourcePollLedger.register(SOURCE_NAME);
 		var attempt = sourcePollLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
 		sourcePollLedger.markFailed(
@@ -143,12 +226,13 @@ class SourcePollLedgerIntegrationTest {
 				.param("sourceName", SOURCE_NAME)
 				.update();
 
-		assertThat(sourcePollLedger.claim(SOURCE_NAME, LEASE)).isEmpty();
+		assertThat(sourcePollLedger.claim(SOURCE_NAME, LEASE)).isPresent();
 		assertThat(sourcePollLedger.findBySourceName(SOURCE_NAME).orElseThrow())
 				.satisfies(state -> {
-					assertThat(state.attempt().count()).isEqualTo(4);
-					assertThat(state.attempt().token()).isNull();
-					assertThat(state.attempt().retry().exhausted()).isTrue();
+					assertThat(state.attempt().count()).isEqualTo(5);
+					assertThat(state.attempt().retry().automaticRetriesUsed()).isZero();
+					assertThat(state.attempt().retry().retrySequence()).isEqualTo(2);
+					assertThat(state.attempt().retry().lastExhaustedErrorCode()).isEqualTo("MANIFEST_TIMEOUT");
 				});
 	}
 

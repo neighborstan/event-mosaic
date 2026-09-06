@@ -44,6 +44,7 @@ public enum IngestionErrorCode implements ApplicationErrorCode {
 	COVERAGE_QUERY_UNAVAILABLE("Ingestion coverage query is temporarily unavailable"),
 	OPERATION_DEADLINE_EXCEEDED("Ingestion operation exceeded the shared deadline"),
 	OPERATION_INTERRUPTED("Ingestion operation was interrupted"),
+	ATTEMPT_LEASE_EXPIRED("Ingestion attempt did not finish before its lease expired"),
 	INTERNAL_ERROR("Unexpected internal ingestion error");
 
 	private final String safeMessage;

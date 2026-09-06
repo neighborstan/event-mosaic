@@ -10,6 +10,7 @@ import com.neighbor.eventmosaic.ingestion.config.BackendDataProperties;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
 import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
+import com.neighbor.eventmosaic.ingestion.observability.IngestionCycleActivity;
 import com.neighbor.eventmosaic.shared.error.ApplicationException;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import com.neighbor.eventmosaic.shared.time.OperationBudgetFactory;
@@ -39,6 +40,8 @@ public class IngestionCycleCoordinator {
 	private final OperationBudgetFactory budgetFactory;
 	private final Duration operationDeadline;
 	private final Duration cycleLease;
+	private final IngestionMetrics metrics;
+	private final IngestionCycleActivity activity;
 
 	/**
 	 * Создает единственную trigger boundary полного ingestion cycle.
@@ -55,14 +58,18 @@ public class IngestionCycleCoordinator {
 			GdeltPipelineService pipelineService,
 			OperationBudgetFactory budgetFactory,
 			GdeltIngestionProperties ingestionProperties,
-			BackendDataProperties backendDataProperties
+			BackendDataProperties backendDataProperties,
+			IngestionMetrics metrics,
+			IngestionCycleActivity activity
 	) {
 		this(
 				cycleLedger,
 				pipelineService,
 				budgetFactory,
 				backendDataProperties.operationDeadline(),
-				ingestionProperties.automatic().cycleLease());
+				ingestionProperties.automatic().cycleLease(),
+				metrics,
+				activity);
 	}
 
 	IngestionCycleCoordinator(
@@ -70,7 +77,9 @@ public class IngestionCycleCoordinator {
 			GdeltPipelineService pipelineService,
 			OperationBudgetFactory budgetFactory,
 			Duration operationDeadline,
-			Duration cycleLease
+			Duration cycleLease,
+			IngestionMetrics metrics,
+			IngestionCycleActivity activity
 	) {
 		this.cycleLedger = Objects.requireNonNull(cycleLedger, "cycleLedger must not be null");
 		this.pipelineService = Objects.requireNonNull(
@@ -80,6 +89,8 @@ public class IngestionCycleCoordinator {
 		this.operationDeadline = requirePositive(
 				operationDeadline, "operationDeadline");
 		this.cycleLease = requirePositive(cycleLease, "cycleLease");
+		this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
+		this.activity = Objects.requireNonNull(activity, "activity must not be null");
 		if (cycleLease.compareTo(operationDeadline.plus(LEASE_SAFETY_MARGIN)) < 0) {
 			throw new IllegalArgumentException(
 					"cycleLease must cover operationDeadline and lease safety margin");
@@ -92,6 +103,32 @@ public class IngestionCycleCoordinator {
 	 * @return bounded terminal outcome текущего trigger
 	 */
 	public IngestionCycleOutcome runCycle() {
+		long startedAt = System.nanoTime();
+		IngestionCycleOutcome outcome = IngestionCycleOutcome.INTERNAL_FAILURE;
+		activity.cycleStarted();
+		try {
+			outcome = runOwnedCycle();
+			return outcome;
+		}
+		catch (IngestionInterruptedException | IndexingInterruptedException exception) {
+			outcome = IngestionCycleOutcome.INTERRUPTED;
+			throw exception;
+		}
+		catch (OperationOwnershipLostException exception) {
+			outcome = IngestionCycleOutcome.OWNERSHIP_LOST;
+			throw exception;
+		}
+		catch (ApplicationException exception) {
+			outcome = IngestionCycleOutcome.EXPECTED_FAILURE;
+			throw exception;
+		}
+		finally {
+			activity.cycleFinished();
+			metrics.cycleDuration(System.nanoTime() - startedAt, outcome);
+		}
+	}
+
+	private IngestionCycleOutcome runOwnedCycle() {
 		OperationBudget budget = budgetFactory.start(operationDeadline);
 		Optional<IngestionCycleOwnership> claimed;
 		try {
@@ -228,6 +265,8 @@ public class IngestionCycleCoordinator {
 	private static IngestionCycleOutcome map(IngestionOneShotOutcome outcome) {
 		return switch (Objects.requireNonNull(outcome, "pipeline outcome must not be null")) {
 			case COMPLETED -> IngestionCycleOutcome.COMPLETED;
+			case UNCHANGED -> IngestionCycleOutcome.UNCHANGED;
+			case EXPECTED_FAILURE -> IngestionCycleOutcome.EXPECTED_FAILURE;
 			case RETRY_DEFERRED -> IngestionCycleOutcome.RETRY_DEFERRED;
 			case STORAGE_PRESSURE -> IngestionCycleOutcome.STORAGE_PRESSURE;
 			case OPERATION_DEADLINE_EXCEEDED -> IngestionCycleOutcome.DEADLINE;

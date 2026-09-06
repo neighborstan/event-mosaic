@@ -19,6 +19,8 @@ import com.neighbor.eventmosaic.ingestion.api.IngestionErrorCode;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.error.OperationDeadlineExceededException;
 import com.neighbor.eventmosaic.ingestion.error.RemoteSourceAccessException;
+import com.neighbor.eventmosaic.ingestion.observability.IngestionCycleActivity;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import com.neighbor.eventmosaic.shared.time.OperationBudgetFactory;
 import com.neighbor.eventmosaic.shared.time.OperationDeadlineReachedException;
@@ -50,6 +52,9 @@ class IngestionCycleCoordinatorTest {
 	private final IngestionCycleLedger ledger = mock(IngestionCycleLedger.class);
 	private final GdeltPipelineService pipeline = mock(GdeltPipelineService.class);
 	private final OperationBudgetFactory budgetFactory = mock(OperationBudgetFactory.class);
+	private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
+	private final IngestionMetrics metrics = new IngestionMetrics(registry);
+	private final IngestionCycleActivity activity = mock(IngestionCycleActivity.class);
 
 	private IngestionCycleCoordinator coordinator;
 
@@ -61,7 +66,9 @@ class IngestionCycleCoordinatorTest {
 				pipeline,
 				budgetFactory,
 				DEADLINE,
-				LEASE);
+				LEASE,
+				metrics,
+				activity);
 	}
 
 	@Test
@@ -75,6 +82,11 @@ class IngestionCycleCoordinatorTest {
 		assertThat(coordinator.runCycle()).isEqualTo(IngestionCycleOutcome.COMPLETED);
 
 		verify(ledger).complete(OWNERSHIP, IngestionCycleOutcome.COMPLETED);
+		assertThat(registry.get("event_mosaic.ingestion.cycle.duration").timer().count()).isEqualTo(1);
+		assertThat(registry.get("event_mosaic.ingestion.cycles").tag("outcome", "completed")
+				.counter().count()).isEqualTo(1);
+		verify(activity).cycleStarted();
+		verify(activity).cycleFinished();
 	}
 
 	@Test
@@ -104,6 +116,9 @@ class IngestionCycleCoordinatorTest {
 
 		verifyNoInteractions(pipeline);
 		verify(ledger, never()).remainingLease(any(), any());
+		assertThat(registry.get("event_mosaic.ingestion.cycles")
+				.tag("outcome", "skipped_active_cycle").counter().count()).isEqualTo(1);
+		verify(activity).cycleFinished();
 	}
 
 	@Test
@@ -152,7 +167,9 @@ class IngestionCycleCoordinatorTest {
 				pipeline,
 				budgetFactory,
 				properties,
-				GdeltTestFixtures.backendDataProperties());
+				GdeltTestFixtures.backendDataProperties(),
+				metrics,
+				activity);
 		when(ledger.claim(
 				eq(GdeltSourceContract.SOURCE_NAME),
 				eq(automaticCycleLease),
@@ -307,6 +324,10 @@ class IngestionCycleCoordinatorTest {
 		verify(ledger).complete(OWNERSHIP, IngestionCycleOutcome.COMPLETED);
 		verify(ledger, never()).complete(OWNERSHIP, IngestionCycleOutcome.OWNERSHIP_LOST);
 		verify(ledger, never()).release(OWNERSHIP);
+		assertThat(registry.get("event_mosaic.ingestion.cycle.duration")
+				.tag("outcome", "ownership_lost").timer().count()).isEqualTo(1);
+		assertThat(registry.find("event_mosaic.ingestion.cycle.duration").tag("outcome", "completed")
+				.timer()).isNull();
 	}
 
 	@Test

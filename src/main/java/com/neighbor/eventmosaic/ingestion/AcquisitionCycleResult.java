@@ -8,7 +8,8 @@ import java.util.Optional;
 record AcquisitionCycleResult(
 		Optional<IngestionRunState> runState,
 		boolean sourcePollDeferred,
-		boolean sourcePollOwnershipLost
+		boolean sourcePollOwnershipLost,
+		boolean sourceUnchanged
 ) {
 
 	AcquisitionCycleResult {
@@ -17,6 +18,11 @@ record AcquisitionCycleResult(
 			throw new IllegalArgumentException(
 					"source poll cannot be deferred after ownership loss");
 		}
+	}
+
+	AcquisitionCycleResult(Optional<IngestionRunState> runState,
+			boolean sourcePollDeferred, boolean sourcePollOwnershipLost) {
+		this(runState, sourcePollDeferred, sourcePollOwnershipLost, false);
 	}
 
 	AcquisitionCycleResult(

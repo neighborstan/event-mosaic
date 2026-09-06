@@ -20,7 +20,8 @@ record BackendDataDatabaseSnapshot(
 		long openMaintenanceOperations,
 		long aliasTransitionOperations,
 		Set<String> activeEventIndices,
-		Set<String> activeMentionIndices
+		Set<String> activeMentionIndices,
+		BackendDataOperationalSnapshot.LiveCounts live
 ) {
 
 	BackendDataDatabaseSnapshot {
@@ -37,6 +38,7 @@ record BackendDataDatabaseSnapshot(
 		Objects.requireNonNull(processingRetries, "processingRetries must not be null");
 		Objects.requireNonNull(receipts, "receipts must not be null");
 		Objects.requireNonNull(generations, "generations must not be null");
+		Objects.requireNonNull(live, "live must not be null");
 		activeEventIndices = Set.copyOf(Objects.requireNonNull(
 				activeEventIndices,
 				"activeEventIndices must not be null"));

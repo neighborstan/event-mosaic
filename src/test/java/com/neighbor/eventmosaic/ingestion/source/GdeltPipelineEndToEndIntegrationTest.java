@@ -8,6 +8,7 @@ import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetResolver;
 import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
+import com.neighbor.eventmosaic.ingestion.audit.ReceiptAuditService;
 import com.neighbor.eventmosaic.ingestion.GdeltTestFixtures;
 import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
 import com.neighbor.eventmosaic.ingestion.IngestionRunService;
@@ -64,6 +65,9 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 class GdeltPipelineEndToEndIntegrationTest {
 
 	private static final Instant UPDATE_TIME = Instant.parse("2026-07-21T14:45:00Z");
+
+	@Autowired
+	private ReceiptAuditService receiptAuditService;
 
 	@TempDir
 	Path tempDir;
@@ -304,7 +308,7 @@ class GdeltPipelineEndToEndIntegrationTest {
 				properties,
 				GdeltTestFixtures.backendDataProperties(),
 				metrics,
-				storageMonitor);
+				storageMonitor, receiptAuditService);
 	}
 
 	private void registerSource(

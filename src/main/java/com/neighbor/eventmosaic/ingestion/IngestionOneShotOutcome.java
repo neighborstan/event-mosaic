@@ -6,6 +6,12 @@ public enum IngestionOneShotOutcome {
 	/** Все доступные операции текущего cycle завершены. */
 	COMPLETED,
 
+	/** Новых данных и готовой локальной работы не обнаружено. */
+	UNCHANGED,
+
+	/** Одна из частей цикла завершилась ожидаемым отказом, остальные могли сохранить прогресс. */
+	EXPECTED_FAILURE,
+
 	/** Poll или archive пока не достиг durable retryNotBefore либо исчерпан. */
 	RETRY_DEFERRED,
 

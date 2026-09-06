@@ -12,11 +12,12 @@ public class GdeltHttpClientConfiguration {
 
 	/**
 	 * Настраивает единый client без автоматического следования redirect.
+	 * При остановке Spring незавершенные запросы отменяются: обычный close мог бы ждать открытый ответ без ограничения.
 	 *
 	 * @param properties сетевые настройки ingestion
 	 * @return HTTP client для адаптеров GDELT
 	 */
-	@Bean
+	@Bean(destroyMethod = "shutdownNow")
 	public HttpClient gdeltHttpClient(GdeltIngestionProperties properties) {
 		return HttpClient.newBuilder()
 				.connectTimeout(properties.http().connectTimeout())

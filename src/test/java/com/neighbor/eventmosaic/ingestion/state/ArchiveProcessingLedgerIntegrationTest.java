@@ -23,6 +23,8 @@ import com.neighbor.eventmosaic.ingestion.api.DiscoveredUpdate;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveLedger;
 import com.neighbor.eventmosaic.ingestion.api.StagedArchive;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger;
+import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlan;
 import com.neighbor.eventmosaic.indexing.api.ArchiveIdentityDigest;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptStatus;
 import com.neighbor.eventmosaic.indexing.api.ArchiveReceiptVerification;
@@ -31,6 +33,9 @@ import java.nio.file.Path;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.Clock;
+import java.time.ZoneOffset;
+import java.util.Set;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -45,6 +50,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Import({PostgreSqlTestcontainersConfiguration.class, FixedClockTestConfiguration.class})
 @SpringBootTest
@@ -75,6 +82,15 @@ class ArchiveProcessingLedgerIntegrationTest {
 	@Autowired
 	private JdbcClient jdbcClient;
 
+	@Autowired
+	private RecentRecoveryPlanLedger recentPlanLedger;
+
+	@Autowired
+	private JdbcArchiveProcessingRepository processingRepository;
+
+	@Autowired
+	private PlatformTransactionManager transactionManager;
+
 	@BeforeEach
 	void cleanLedger() {
 		jdbcClient.sql("""
@@ -89,6 +105,137 @@ class ArchiveProcessingLedgerIntegrationTest {
 				    ingestion_runs
 				restart identity cascade
 				""").update();
+	}
+
+	@Test
+	@DisplayName("Индексирование восстанавливается после полной серии отказов и сохраняет причину исчерпания")
+	void recentProcessingRearmsAtExactCooldownAndKeepsEvidence() throws Exception {
+		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
+		activatePlan(events.sourceUpdateTime());
+		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		Instant now = FixedClockTestConfiguration.NOW;
+		var transaction = new TransactionTemplate(transactionManager);
+		for (int retry = 0; retry <= 3; retry++) {
+			ArchiveProcessingLedger runtime = at(now);
+			var attempt = transaction.execute(_ -> runtime.claim(events.idempotencyKey(), target, Duration.ofMinutes(10)).claimedAttempt().orElseThrow());
+			assertThat(attempt).isNotNull();
+			assertThat(attempt.attemptCount()).isEqualTo(retry + 1);
+			transaction.executeWithoutResult(_ -> runtime.markFailed(attempt, new ArchiveProcessingFailure(BULK_PARTIAL_FAILURE, true), ArchiveProcessingProgress.empty(), null));
+			var state = runtime.findByArchiveIdempotencyKey(events.idempotencyKey()).orElseThrow();
+			assertThat(state.attempt().retry().retryNotBefore()).isEqualTo(now.plus(Duration.ofMinutes(retry == 3 ? 15 : 1L << retry)));
+			now = state.attempt().retry().retryNotBefore();
+		}
+		var early = at(now.minusNanos(1000));
+		var earlyClaim = transaction.execute(_ -> early.claim(events.idempotencyKey(), target, Duration.ofMinutes(10)));
+		assertThat(earlyClaim).isNotNull();
+		assertThat(earlyClaim.status()).isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
+		ArchiveProcessingLedger restarted = at(now);
+		var evidence = restarted.findByArchiveIdempotencyKey(events.idempotencyKey()).orElseThrow().attempt().retry();
+		var claims = runConcurrently(
+				() -> new TransactionTemplate(transactionManager).execute(_ -> restarted.claim(events.idempotencyKey(), target, Duration.ofMinutes(10))),
+				() -> new TransactionTemplate(transactionManager).execute(_ -> restarted.claim(events.idempotencyKey(), target, Duration.ofMinutes(10))));
+		assertThat(claims).filteredOn(result -> result.status() == ArchiveProcessingClaimStatus.CLAIMED).hasSize(1);
+		var owner = claims.stream().flatMap(result -> result.claimedAttempt().stream()).findFirst().orElseThrow();
+		assertThat(owner.attemptCount()).isEqualTo(5);
+		transaction.executeWithoutResult(_ -> restarted.markIndexed(owner, ArchiveProcessingProgress.empty(), matchedVerification(target, 0)));
+		var completed = restarted.findByArchiveIdempotencyKey(events.idempotencyKey()).orElseThrow();
+		assertThat(completed.status()).isEqualTo(ArchiveProcessingStatus.INDEXED);
+		assertThat(completed.attempt().retry().retrySequence()).isEqualTo(2);
+		assertThat(completed.attempt().retry().lastExhaustedAt()).isEqualTo(evidence.lastExhaustedAt());
+		assertThat(completed.attempt().retry().lastExhaustedErrorCode()).isEqualTo(BULK_PARTIAL_FAILURE);
+		assertThat(archiveLedger.findEligibleRecentWork(10, Set.of())).noneMatch(state -> state.archive().idempotencyKey().equals(events.idempotencyKey()));
+	}
+
+	@Test
+	@DisplayName("Выборка продолжает подготовленные архивы и пропускает занятые, будущие, постоянные и завершенные попытки")
+	void eligibleProcessingWorkFollowsDurableStateAndActiveWindow() {
+		DiscoveredUpdate discovered = registerUpdate();
+		activatePlan(discovered.sourceUpdateTime());
+		var events = discovered.archives().getFirst();
+		var mentions = discovered.archives().getLast();
+		stage(events);
+		stage(mentions);
+		assertEligibleKeys(events.idempotencyKey(), mentions.idempotencyKey());
+		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
+		assertEligibleKeys(events.idempotencyKey(), mentions.idempotencyKey());
+		var target = activeTarget(events.archiveType());
+		var first = claimResult(events, target).claimedAttempt().orElseThrow();
+		assertEligibleKeys(mentions.idempotencyKey());
+		expireLease(events);
+		assertEligibleKeys(events.idempotencyKey(), mentions.idempotencyKey());
+		var recovered = claimResult(events, target).claimedAttempt().orElseThrow();
+		assertThat(processingLedger.markFailed(first, new ArchiveProcessingFailure(BULK_PARTIAL_FAILURE, true), ArchiveProcessingProgress.empty(), null))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		processingLedger.markFailed(recovered, new ArchiveProcessingFailure(BULK_PARTIAL_FAILURE, true), ArchiveProcessingProgress.empty(), null);
+		assertEligibleKeys(mentions.idempotencyKey());
+		makeProcessingRetryDue(events);
+		assertEligibleKeys(events.idempotencyKey(), mentions.idempotencyKey());
+		var retried = claimResult(events, target).claimedAttempt().orElseThrow();
+		processingLedger.markFailed(retried, new ArchiveProcessingFailure(MAPPING_FAILURE, false), ArchiveProcessingProgress.empty(), null);
+		assertEligibleKeys(mentions.idempotencyKey());
+		processingLedger.register(mentions.idempotencyKey(), fingerprint("b"));
+		var mentionTarget = activeTarget(mentions.archiveType());
+		var mentionAttempt = claimResult(mentions, mentionTarget).claimedAttempt().orElseThrow();
+		processingLedger.markIndexed(mentionAttempt, ArchiveProcessingProgress.empty(), matchedVerification(mentionTarget, 0));
+		assertEligibleKeys();
+		jdbcClient.sql("""
+				update ingestion_archive_processing set total_attempt_count = 4, automatic_retries_used = 3,
+					last_error_code = 'BULK_PARTIAL_FAILURE', last_error_retryable = true,
+					retry_not_before = :now, last_exhausted_at = failed_at, last_exhausted_error_code = 'BULK_PARTIAL_FAILURE'
+				where archive_idempotency_key = :key
+				""").param("now", Timestamp.from(FixedClockTestConfiguration.NOW)).param("key", events.idempotencyKey()).update();
+		assertEligibleKeys(events.idempotencyKey());
+		activatePlan(discovered.sourceUpdateTime().plus(Duration.ofHours(25)));
+		assertThat(archiveLedger.findEligibleRecentWork(10, Set.of())).noneMatch(state -> state.archive().idempotencyKey().equals(events.idempotencyKey()));
+		assertThat(claimResult(events, target).status()).isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
+		assertThat(processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey()).orElseThrow().attempt().count()).isEqualTo(4);
+	}
+
+	@Test
+	@DisplayName("Исчерпанная зависшая обработка становится доступной ровно через пятнадцать минут после конца аренды")
+	void expiredExhaustedProcessingLeaseRearmsOnlyAfterCooldown() {
+		DiscoveredArchive events = stagedArchive(ArchiveType.TRANSLATION_EVENTS);
+		activatePlan(events.sourceUpdateTime());
+		processingLedger.register(events.idempotencyKey(), fingerprint("a"));
+		ArchiveProcessingTargetBinding target = activeTarget(events.archiveType());
+		var abandoned = claimResult(events, target).claimedAttempt().orElseThrow();
+		Instant now = FixedClockTestConfiguration.NOW;
+		Instant leaseExpiry = now.minus(Duration.ofMinutes(15));
+		jdbcClient.sql("""
+				update ingestion_archive_processing
+				set total_attempt_count = 4, automatic_retries_used = 3,
+				    lease_expires_at = :leaseExpiry, last_attempt_at = :startedAt
+				where archive_idempotency_key = :key
+				""").param("leaseExpiry", Timestamp.from(leaseExpiry.plusNanos(1000)))
+				.param("startedAt", Timestamp.from(leaseExpiry.minusSeconds(60)))
+				.param("key", events.idempotencyKey()).update();
+		assertThat(archiveLedger.findEligibleRecentWork(10, Set.of())).noneMatch(state -> state.archive().idempotencyKey().equals(events.idempotencyKey()));
+		assertThat(claimResult(events, target).status()).isEqualTo(ArchiveProcessingClaimStatus.NOT_CLAIMABLE);
+		jdbcClient.sql("update ingestion_archive_processing set lease_expires_at = :leaseExpiry where archive_idempotency_key = :key")
+				.param("leaseExpiry", Timestamp.from(leaseExpiry)).param("key", events.idempotencyKey()).update();
+		assertThat(archiveLedger.findEligibleRecentWork(10, Set.of())).anyMatch(state -> state.archive().idempotencyKey().equals(events.idempotencyKey()));
+		var recovered = claimResult(events, target).claimedAttempt().orElseThrow();
+		assertThat(recovered.recovered()).isTrue();
+		assertThat(recovered.attemptCount()).isEqualTo(5);
+		assertThat(processingLedger.markIndexed(abandoned, ArchiveProcessingProgress.empty(), matchedVerification(target, 0)))
+				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+		var state = processingLedger.findByArchiveIdempotencyKey(events.idempotencyKey()).orElseThrow();
+		assertThat(state.attempt().retry().retrySequence()).isEqualTo(2);
+		assertThat(state.attempt().retry().lastExhaustedAt()).isEqualTo(leaseExpiry);
+		assertThat(state.attempt().retry().lastExhaustedErrorCode()).isEqualTo("ATTEMPT_LEASE_EXPIRED");
+	}
+
+	private ArchiveProcessingLedger at(Instant now) {
+		return new JdbcArchiveProcessingLedger(processingRepository, Clock.fixed(now, ZoneOffset.UTC));
+	}
+
+	private void activatePlan(Instant frontier) {
+		recentPlanLedger.activate(update(frontier), RecentWindowPlan.fromBoundaries(frontier.minus(Duration.ofHours(24)), frontier, frontier));
+	}
+
+	private void assertEligibleKeys(String... expectedKeys) {
+		assertThat(archiveLedger.findEligibleRecentWork(10, Set.of())).extracting(state -> state.archive().idempotencyKey()).containsExactly(expectedKeys);
 	}
 
 	@Test

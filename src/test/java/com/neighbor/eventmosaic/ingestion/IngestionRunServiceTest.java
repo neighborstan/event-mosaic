@@ -112,6 +112,19 @@ class IngestionRunServiceTest {
 	}
 
 	@Test
+	@DisplayName("Остановленный worker не получает новую попытку и не обращается к источнику")
+	void interruptedWorkerDoesNotStartSourceClaim() {
+		Thread.currentThread().interrupt();
+		try {
+			assertThatThrownBy(() -> service.prepareOneShot(OperationBudget.start(Duration.ofMinutes(1))))
+					.isInstanceOf(IngestionInterruptedException.class);
+			verifyNoInteractions(sourcePollLedger, ledger, manifestClient, downloader, stager);
+		} finally {
+			Thread.interrupted();
+		}
+	}
+
+	@Test
 	@DisplayName("Ошибка discovery останавливает цикл до регистрации обновления")
 	void discoveryFailureStopsBeforeRegistration() {
 		RemoteSourceAccessException failure = new RemoteSourceAccessException(

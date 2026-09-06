@@ -18,7 +18,8 @@ public record BackendDataOperationalSnapshot(
 		GenerationCounts generations,
 		long repairRequiredPartitions,
 		long openMaintenanceOperations,
-		AliasConsistencyState aliasConsistency
+		AliasConsistencyState aliasConsistency,
+		LiveCounts live
 ) {
 
 	/** Проверяет обязательные bounded-группы operational state. */
@@ -29,6 +30,7 @@ public record BackendDataOperationalSnapshot(
 		Objects.requireNonNull(receipts, "receipts must not be null");
 		Objects.requireNonNull(generations, "generations must not be null");
 		Objects.requireNonNull(aliasConsistency, "aliasConsistency must not be null");
+		Objects.requireNonNull(live, "live must not be null");
 		if (lagSeconds < 0
 				|| openGaps < 0
 				|| permanentFailures < 0
@@ -52,31 +54,63 @@ public record BackendDataOperationalSnapshot(
 				GenerationCounts.empty(),
 				0,
 				0,
-				AliasConsistencyState.UNAVAILABLE);
+				AliasConsistencyState.UNAVAILABLE,
+				LiveCounts.empty());
 	}
 
 	/** Возвращает число current retry states, для которых уже наступил срок. */
 	public long retryDue() {
 		return sourcePollRetries.due()
 				+ acquisitionRetries.due()
-				+ processingRetries.due();
+				+ processingRetries.due()
+				+ live.receiptAuditRetries().due();
 	}
 
 	/** Возвращает число current retry states с еще не наступившим сроком. */
 	public long retryDeferred() {
 		return sourcePollRetries.deferred()
 				+ acquisitionRetries.deferred()
-				+ processingRetries.deferred();
+				+ processingRetries.deferred()
+				+ live.receiptAuditRetries().deferred();
 	}
 
-	/** Возвращает число current retry states с исчерпанным automatic budget. */
+	/** Возвращает число исчерпанных серий, включая ожидающие паузу и уже готовые начать следующую серию. */
 	public long retryExhausted() {
 		return sourcePollRetries.exhausted()
 				+ acquisitionRetries.exhausted()
-				+ processingRetries.exhausted();
+				+ processingRetries.exhausted()
+				+ live.receiptAuditRetries().exhausted();
 	}
 
-	/** Current retry counts одного bounded owner. */
+	/** Возраст опроса и данных источника, пауза повторов и оставшаяся работа суточного восстановления. */
+	public record LiveCounts(
+			long successfulPollAgeSeconds,
+			long sourceOutageAgeSeconds,
+			long sourceLagSeconds,
+			long sourceRetryDelaySeconds,
+			boolean sourceCooldown,
+			boolean catalogPending,
+			long eventBootstrapRemaining,
+			long mentionBootstrapRemaining,
+			RetryCounts receiptAuditRetries
+	) {
+
+		/** Проверяет безопасные возраста и количества; -1 означает отсутствие успешного опроса или данных. */
+		public LiveCounts {
+			Objects.requireNonNull(receiptAuditRetries, "receiptAuditRetries must not be null");
+			if (successfulPollAgeSeconds < -1 || sourceOutageAgeSeconds < 0 || sourceLagSeconds < -1
+					|| sourceRetryDelaySeconds < 0 || eventBootstrapRemaining < 0 || mentionBootstrapRemaining < 0) {
+				throw new IllegalArgumentException("live counts contain invalid age or count");
+			}
+		}
+
+		/** Возвращает отсутствие наблюдений источника и активного плана. */
+		public static LiveCounts empty() {
+			return new LiveCounts(-1, 0, -1, 0, false, false, 0, 0, RetryCounts.empty());
+		}
+	}
+
+	/** Количество повторных попыток одной части загрузки по текущему состоянию. */
 	public record RetryCounts(long due, long deferred, long exhausted) {
 
 		/** Проверяет, что агрегированные counts неотрицательны. */
