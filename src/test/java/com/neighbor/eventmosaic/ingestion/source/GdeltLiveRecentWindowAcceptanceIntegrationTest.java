@@ -4,27 +4,29 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
-import com.neighbor.eventmosaic.TestcontainersConfiguration;
+import com.neighbor.eventmosaic.EventMosaicApplication;
 import com.neighbor.eventmosaic.gdelt.api.GdeltArchiveKind;
 import com.neighbor.eventmosaic.gdelt.api.GdeltSourceContract;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexKind;
 import com.neighbor.eventmosaic.indexing.api.GdeltIndexWriter;
 import com.neighbor.eventmosaic.indexing.api.IndexTargetResolver;
-import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
-import com.neighbor.eventmosaic.ingestion.audit.ReceiptAuditService;
-import com.neighbor.eventmosaic.ingestion.GdeltTestFixtures;
-import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
-import com.neighbor.eventmosaic.ingestion.IngestionOneShotOutcome;
-import com.neighbor.eventmosaic.ingestion.IngestionRunService;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveProcessingLedger;
 import com.neighbor.eventmosaic.ingestion.api.ArchiveType;
 import com.neighbor.eventmosaic.ingestion.api.IngestionArchiveLedger;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageQuery;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCoverageStatus;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOutcome;
 import com.neighbor.eventmosaic.ingestion.api.SourcePollLedger;
+import com.neighbor.eventmosaic.ingestion.audit.ReceiptAuditService;
 import com.neighbor.eventmosaic.ingestion.config.FirstRunPolicy;
 import com.neighbor.eventmosaic.ingestion.config.GdeltIngestionProperties;
 import com.neighbor.eventmosaic.ingestion.error.IngestionInterruptedException;
+import com.neighbor.eventmosaic.ingestion.GdeltPipelineService;
+import com.neighbor.eventmosaic.ingestion.GdeltTestFixtures;
+import com.neighbor.eventmosaic.ingestion.IngestionCycleCoordinator;
+import com.neighbor.eventmosaic.ingestion.IngestionMetrics;
+import com.neighbor.eventmosaic.ingestion.IngestionOneShotOutcome;
+import com.neighbor.eventmosaic.ingestion.IngestionRunService;
 import com.neighbor.eventmosaic.ingestion.observability.BackendDataStorageMonitor;
 import com.neighbor.eventmosaic.ingestion.recovery.RecentRecoveryPlanLedger;
 import com.neighbor.eventmosaic.ingestion.recovery.RecentWindowPlanner;
@@ -42,14 +44,17 @@ import com.neighbor.eventmosaic.processing.api.ArchiveProcessingRequest;
 import com.neighbor.eventmosaic.processing.api.ArchiveProcessingResult;
 import com.neighbor.eventmosaic.processing.api.GdeltArchiveProcessor;
 import com.neighbor.eventmosaic.processing.api.ProcessingFingerprintFactory;
+import com.neighbor.eventmosaic.TestcontainersConfiguration;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -61,32 +66,44 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.EnumMap;
+import java.util.function.BooleanSupplier;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BooleanSupplier;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import javax.sql.DataSource;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.config.BeanPostProcessor;
+import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.web.server.context.WebServerApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.scheduling.concurrent.ConcurrentTaskScheduler;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.JsonNode;
 
 @Import({
 		TestcontainersConfiguration.class,
@@ -95,6 +112,154 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 @SpringBootTest
 @DisplayName("Приемка восстановления суточного GDELT recent-окна")
 class GdeltLiveRecentWindowAcceptanceIntegrationTest {
+
+	@Test
+	@DisplayName("Обычный web-запуск сам заполняет карту, получает следующее обновление и сохраняет данные после перезапуска")
+	void automaticWebStartupCompletesMapAndResumesWithoutDuplicateWork() throws Exception {
+		source.close();
+		var slots = new ArrayList<>(WINDOW_SLOTS);
+		slots.add(WINDOW_TO);
+		source = new FakeGdeltSource(slots, trace);
+		source.frontier.set(FRONTIER);
+		source.useCoherentMaster();
+		var manifestEntered = new CountDownLatch(1);
+		var releaseManifest = new CountDownLatch(1);
+		var historicalEntered = new CountDownLatch(1);
+		var releaseHistorical = new CountDownLatch(1);
+		source.beforeManifest = () -> awaitRelease(manifestEntered, releaseManifest);
+		source.beforeArchive = name -> {
+			if (name.equals(source.artifact(FIRST_HISTORICAL,
+					ArchiveType.TRANSLATION_EVENTS).archiveName())) {
+				awaitRelease(historicalEntered, releaseHistorical);
+			}
+		};
+		try (var runtime = automaticRuntime()) {
+			assertThat(manifestEntered.await(30, TimeUnit.SECONDS)).isTrue();
+			assertThat(runtime.getEnvironment().getProperty(
+					"event-mosaic.ingestion.gdelt.one-shot-enabled", Boolean.class)).isFalse();
+			// На совершенно пустом Elasticsearch еще нет read alias: API честно сообщает недоступность.
+			assertThat(snapshotResponse(runtime).statusCode()).isEqualTo(503);
+			assertThat(runCount()).isZero();
+			releaseManifest.countDown();
+			assertThat(historicalEntered.await(30, TimeUnit.SECONDS)).isTrue();
+			assertThat(snapshot(runtime).path("coverage").path("status").asString()).isEqualTo("PARTIAL");
+			assertThat(source.manifestRequests()).isEqualTo(1);
+			// Пока первый цикл удерживает HTTP-ответ, конкурирующий trigger не начинает I/O.
+			assertThat(runtime.getBean(IngestionCycleCoordinator.class)
+					.runCycle()).isEqualTo(IngestionCycleOutcome.SKIPPED_ACTIVE_CYCLE);
+			assertThat(source.manifestRequests()).isEqualTo(1);
+			releaseHistorical.countDown();
+			Awaitility.await().atMost(Duration.ofMinutes(2)).untilAsserted(() -> {
+				var response = snapshot(runtime);
+				assertThat(response.path("coverage").path("status").asString()).isEqualTo("COMPLETE");
+				assertThat(response.path("quality").path("eligibleEventCount").asLong()).isEqualTo(96);
+				assertThat(documentCount(GdeltIndexKind.MENTION)).isEqualTo(96);
+			});
+			int polls = source.manifestRequests();
+			Awaitility.await().atMost(Duration.ofSeconds(10))
+					.until(() -> source.manifestRequests() > polls);
+			assertThat(source.objectRequests()).isEqualTo(192);
+			clock.advance(SLOT);
+			source.frontier.set(WINDOW_TO);
+			Awaitility.await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+				assertThat(runCount()).isEqualTo(97);
+				assertThat(documentCount(GdeltIndexKind.MENTION)).isEqualTo(97);
+				assertThat(snapshot(runtime).path("coverage").path("status").asString()).isEqualTo("COMPLETE");
+			});
+		}
+		finally {
+			releaseManifest.countDown();
+			releaseHistorical.countDown();
+		}
+		var hashes = finalFileHashes();
+		int downloads = source.objectRequests();
+		long previousEpoch = jdbcClient.sql("select fencing_epoch from ingestion_cycle_state")
+				.query(Long.class).single();
+		try (var restarted = automaticRuntime()) {
+			Awaitility.await().atMost(Duration.ofSeconds(15))
+					.until(() -> jdbcClient.sql("""
+							select count(*) from ingestion_cycle_state
+							where fencing_epoch > :previousEpoch and status = 'IDLE' and last_outcome = 'UNCHANGED'
+							""").param("previousEpoch", previousEpoch).query(Long.class).single() == 1);
+			assertThat(snapshot(restarted).path("coverage").path("status").asString()).isEqualTo("COMPLETE");
+			assertThat(runCount()).isEqualTo(97);
+			assertThat(documentCount(GdeltIndexKind.EVENT)).isEqualTo(97);
+			assertThat(documentCount(GdeltIndexKind.MENTION)).isEqualTo(97);
+		}
+		assertThat(source.objectRequests()).isEqualTo(downloads);
+		assertThat(finalFileHashes()).isEqualTo(hashes);
+		assertThat(jdbcClient.sql("select status from ingestion_cycle_state").query(String.class).single())
+				.isEqualTo("IDLE");
+	}
+
+	private ConfigurableApplicationContext automaticRuntime() {
+		return new SpringApplicationBuilder(
+				EventMosaicApplication.class)
+				.initializers(application -> {
+					var context = (GenericApplicationContext) application;
+					context.registerBean(DataSource.class, () -> dataSource,
+							definition -> definition.setDestroyMethodName(""));
+					context.registerBean(ElasticsearchClient.class, () -> elasticsearchClient,
+							definition -> definition.setDestroyMethodName(""));
+					context.registerBean("acceptanceClock", Clock.class, () -> clock,
+							definition -> definition.setPrimary(true));
+					context.registerBean("localManifest", GdeltManifestClient.class,
+							() -> new GdeltManifestClient(httpClient, source.rootUri().resolve("/manifest"),
+									Duration.ofSeconds(30), 65_536, new HttpRetryAfterParser(clock)),
+							definition -> definition.setPrimary(true));
+					context.registerBean("localCatalog", GdeltTranslationMasterCatalogClient.class,
+							() -> new GdeltTranslationMasterCatalogClient(httpClient,
+									source.rootUri().resolve("/masterfilelist-translation.txt"),
+									Duration.ofSeconds(30), new HttpRetryAfterParser(clock),
+									new GdeltTranslationMasterCatalogParser(new GdeltManifestLineParser())),
+							definition -> definition.setPrimary(true));
+					context.registerBean("localDownload", ArchiveDownloadUriResolver.class,
+							() -> name -> source.rootUri().resolve("/objects/" + name.value()),
+							definition -> definition.setPrimary(true));
+					context.getBeanFactory().addBeanPostProcessor(new BeanPostProcessor() {
+						@Override
+						public Object postProcessAfterInitialization(Object bean, String name) {
+							if (bean instanceof ConcurrentTaskScheduler scheduler) {
+								scheduler.setClock(clock);
+							}
+							return bean;
+						}
+					});
+				})
+				.run("--server.port=0", "--spring.docker.compose.enabled=false",
+						"--event-mosaic.ingestion.gdelt.automatic.enabled=true",
+						"--event-mosaic.ingestion.gdelt.automatic.poll-delay=100ms",
+						"--event-mosaic.ingestion.gdelt.staging-root=" + tempDir.resolve("staging"));
+	}
+
+	private JsonNode snapshot(ConfigurableApplicationContext runtime)
+			throws Exception {
+		var response = snapshotResponse(runtime);
+		assertThat(response.statusCode()).isEqualTo(200);
+		return new JsonMapper().readTree(response.body());
+	}
+
+	private HttpResponse<String> snapshotResponse(
+			ConfigurableApplicationContext runtime) throws Exception {
+		int port = ((WebServerApplicationContext) runtime)
+				.getWebServer().getPort();
+		return httpClient.send(HttpRequest.newBuilder(
+				URI.create("http://127.0.0.1:" + port + "/api/v1/map/country-snapshot")).timeout(Duration.ofSeconds(10)).GET().build(),
+				HttpResponse.BodyHandlers.ofString());
+	}
+
+	private static void awaitRelease(CountDownLatch entered,
+			CountDownLatch release) {
+		entered.countDown();
+		try {
+			if (!release.await(30, TimeUnit.SECONDS)) {
+				throw new IllegalStateException("Acceptance response was not released");
+			}
+		}
+		catch (InterruptedException exception) {
+			Thread.currentThread().interrupt();
+		}
+	}
 
 	private static final Duration SLOT = GdeltSourceContract.UPDATE_INTERVAL;
 	private static final Instant INITIAL_NOW = Instant.parse("2026-07-20T13:00:00Z");
@@ -157,7 +322,7 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 	private AcceptanceClock clock;
 
 	@Autowired
-	private javax.sql.DataSource dataSource;
+	private DataSource dataSource;
 
 	private final List<String> trace = new CopyOnWriteArrayList<>();
 	private HttpClient httpClient;
@@ -255,11 +420,11 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 
 		// Два новых Spring runtime работают с тем же внешним хранилищем. Закрытие runtime не владеет жизнью БД/ES.
 		for (int restart = 0; restart < 2; restart++) {
-			try (var runtime = new org.springframework.boot.builder.SpringApplicationBuilder(
-					com.neighbor.eventmosaic.EventMosaicApplication.class)
+			try (var runtime = new SpringApplicationBuilder(
+					EventMosaicApplication.class)
 					.initializers(application -> {
-						var context = (org.springframework.context.support.GenericApplicationContext) application;
-						context.registerBean(javax.sql.DataSource.class, () -> dataSource,
+						var context = (GenericApplicationContext) application;
+						context.registerBean(DataSource.class, () -> dataSource,
 								definition -> definition.setDestroyMethodName(""));
 						context.registerBean(ElasticsearchClient.class, () -> elasticsearchClient,
 								definition -> definition.setDestroyMethodName(""));
@@ -646,6 +811,10 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 
 	private static final class FakeGdeltSource implements AutoCloseable {
 
+		private final AtomicReference<Instant> frontier = new AtomicReference<>(FRONTIER);
+		private volatile Runnable beforeManifest = () -> {};
+		private volatile java.util.function.Consumer<String> beforeArchive = name -> {};
+
 		private final HttpServer server;
 		private final Map<String, ArchiveArtifact> artifacts;
 		private final Map<Instant, EnumMap<ArchiveType, ArchiveArtifact>> artifactsByTime;
@@ -738,6 +907,7 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 
 		private void serveManifest(HttpExchange exchange) throws IOException {
 			manifestRequests.incrementAndGet();
+			beforeManifest.run();
 			trace.add("manifest");
 			if (manifestUnavailable.get()) {
 				exchange.sendResponseHeaders(503, -1);
@@ -777,6 +947,7 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 				return;
 			}
 			objectRequests.incrementAndGet();
+			beforeArchive.accept(archiveName);
 			if (archiveName.equals(unavailableArchive.get())) {
 				exchange.sendResponseHeaders(503, -1);
 				exchange.close();
@@ -794,8 +965,9 @@ class GdeltLiveRecentWindowAcceptanceIntegrationTest {
 		}
 
 		private String manifestBody() {
-			return metadataLine(artifact(FRONTIER, ArchiveType.TRANSLATION_EVENTS))
-					+ metadataLine(artifact(FRONTIER, ArchiveType.TRANSLATION_MENTIONS));
+			Instant capturedFrontier = frontier.get();
+			return metadataLine(artifact(capturedFrontier, ArchiveType.TRANSLATION_EVENTS))
+					+ metadataLine(artifact(capturedFrontier, ArchiveType.TRANSLATION_MENTIONS));
 		}
 
 		private String masterBody(MasterPhase phase) {

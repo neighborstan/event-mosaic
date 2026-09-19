@@ -12,8 +12,6 @@ import type {
 type Listener = () => void;
 type CountryListener = (regionId: string | null) => void;
 
-const TONE_PATTERN_ID_PREFIX = "event-mosaic-country-pattern:";
-
 interface SubscriptionRecord {
   event: MapLibreOwnedEvent | MapLibreCountryEvent | "background-select";
   unsubscribeCalls: number;
@@ -45,13 +43,6 @@ export class ControlledMapLibreMap implements MapLibreOwnedMap {
   }>[] = [];
 
   readonly layerAdditions: AddLayerObject[] = [];
-  readonly imageAdditions: Readonly<{
-    id: string;
-    width: number;
-    height: number;
-    data: Uint8Array | Uint8ClampedArray;
-  }>[] = [];
-  readonly imageRemovals: string[] = [];
   readonly featureStateUpdates: Readonly<{
     regionId: string;
     state: Readonly<Record<string, string | boolean>>;
@@ -64,19 +55,10 @@ export class ControlledMapLibreMap implements MapLibreOwnedMap {
 
   private readonly sourceIds = new Set<string>();
   private readonly layerIds = new Set<string>();
-  private readonly images = new Map<
-    string,
-    Readonly<{
-      width: number;
-      height: number;
-      data: Uint8Array | Uint8ClampedArray;
-    }>
-  >();
   private readonly featureStates = new Map<
     string,
     Record<string, string | boolean>
   >();
-  private maximumToneImageCountValue = 0;
 
   removeCalls = 0;
 
@@ -136,40 +118,6 @@ export class ControlledMapLibreMap implements MapLibreOwnedMap {
     this.operationLog.push(`layer:${layer.id}`);
   }
 
-  hasImage(id: string): boolean {
-    return this.images.has(id);
-  }
-
-  addImage(
-    id: string,
-    image: Readonly<{
-      width: number;
-      height: number;
-      data: Uint8Array | Uint8ClampedArray;
-    }>,
-  ): void {
-    if (this.images.has(id)) {
-      throw new Error(`Тестовая карта уже содержит image ${id}`);
-    }
-
-    this.images.set(id, image);
-    this.maximumToneImageCountValue = Math.max(
-      this.maximumToneImageCountValue,
-      this.activeToneImageCount(),
-    );
-    this.imageAdditions.push({ id, ...image });
-    this.operationLog.push(`image:${id}`);
-  }
-
-  removeImage(id: string): void {
-    if (!this.images.delete(id)) {
-      throw new Error(`Тестовая карта не содержит image ${id}`);
-    }
-
-    this.imageRemovals.push(id);
-    this.operationLog.push(`remove-image:${id}`);
-  }
-
   setCountryFeatureState(
     regionId: string,
     state: Readonly<Record<string, string | boolean>>,
@@ -205,7 +153,6 @@ export class ControlledMapLibreMap implements MapLibreOwnedMap {
   simulateStyleReload(): void {
     this.sourceIds.clear();
     this.layerIds.clear();
-    this.images.clear();
     this.featureStates.clear();
     this.operationLog.push("style-reset");
     this.emit("style.load");
@@ -234,22 +181,8 @@ export class ControlledMapLibreMap implements MapLibreOwnedMap {
       );
   }
 
-  activeImageIds(): readonly string[] {
-    return [...this.images.keys()];
-  }
-
-  maximumActiveToneImageCount(): number {
-    return this.maximumToneImageCountValue;
-  }
-
   stateFor(regionId: string): Readonly<Record<string, string | boolean>> {
     return this.featureStates.get(regionId) ?? {};
-  }
-
-  private activeToneImageCount(): number {
-    return [...this.images.keys()].filter((imageId) =>
-      imageId.startsWith(TONE_PATTERN_ID_PREFIX),
-    ).length;
   }
 
   private addSubscription<T>(

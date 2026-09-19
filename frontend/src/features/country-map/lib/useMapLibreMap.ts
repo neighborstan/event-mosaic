@@ -21,23 +21,11 @@ export type MapLibreTechnicalState =
   | Readonly<{ status: "ready" }>
   | Readonly<{ status: "provider-error" }>;
 
-type CountryMapRegionVisualBase = Readonly<{
+export type CountryMapRegionVisual = Readonly<{
   regionId: string;
+  status: "no-events" | "missing-tone-only" | "tone-mixture";
+  fillColor: string;
 }>;
-
-export type CountryMapRegionVisual =
-  | (CountryMapRegionVisualBase & Readonly<{ status: "no-events" }>)
-  | (CountryMapRegionVisualBase & Readonly<{ status: "missing-tone-only" }>)
-  | (CountryMapRegionVisualBase &
-      Readonly<{
-        status: "tone-mixture";
-        pattern: Readonly<{
-          fingerprint: string;
-          rgba: Uint8Array | Uint8ClampedArray;
-          width: number;
-          height: number;
-        }>;
-      }>);
 
 export type MapLibreOwnedEvent = "load" | "style.load" | "error";
 export type MapLibreCountryEvent = "hover" | "leave" | "select";
@@ -65,16 +53,6 @@ export interface MapLibreOwnedMap {
   ): void;
   hasLayer(id: string): boolean;
   addLayer(layer: AddLayerObject): void;
-  hasImage(id: string): boolean;
-  addImage(
-    id: string,
-    image: Readonly<{
-      width: number;
-      height: number;
-      data: Uint8Array | Uint8ClampedArray;
-    }>,
-  ): void;
-  removeImage(id: string): void;
   setCountryFeatureState(
     regionId: string,
     state: Readonly<Record<string, string | boolean>>,
@@ -101,50 +79,15 @@ type UseMapLibreMapOptions = Readonly<{
 
 export const COUNTRY_GEOMETRY_SOURCE_ID = "event-mosaic-country-geometry";
 export const COUNTRY_FILL_LAYER_ID = "event-mosaic-country-fill";
-export const COUNTRY_TONE_LAYER_ID = "event-mosaic-country-tone";
 export const COUNTRY_LINE_LAYER_ID = "event-mosaic-country-line";
 export const COUNTRY_STATE_LAYER_ID = "event-mosaic-country-state";
-
-const TRANSPARENT_PATTERN_ID = "event-mosaic-country-pattern-transparent";
-const TONE_PATTERN_PREFIX = "event-mosaic-country-pattern:";
 
 const COUNTRY_FILL_LAYER = {
   id: COUNTRY_FILL_LAYER_ID,
   type: "fill",
   source: COUNTRY_GEOMETRY_SOURCE_ID,
   paint: {
-    "fill-color": [
-      "case",
-      ["==", ["feature-state", "visualStatus"], "no-events"],
-      "#dfe7e8",
-      ["==", ["feature-state", "visualStatus"], "missing-tone-only"],
-      "#746d7d",
-      ["==", ["feature-state", "visualStatus"], "tone-mixture"],
-      "#eef3f3",
-      "#4f7175",
-    ],
-    "fill-opacity": [
-      "case",
-      ["==", ["feature-state", "visualStatus"], "no-events"],
-      0.3,
-      ["==", ["feature-state", "visualStatus"], "missing-tone-only"],
-      0.46,
-      ["==", ["feature-state", "visualStatus"], "tone-mixture"],
-      0.12,
-      0.28,
-    ],
-  },
-} as const satisfies AddLayerObject;
-
-const COUNTRY_TONE_LAYER = {
-  id: COUNTRY_TONE_LAYER_ID,
-  type: "fill",
-  source: COUNTRY_GEOMETRY_SOURCE_ID,
-  paint: {
-    "fill-pattern": [
-      "image",
-      ["coalesce", ["feature-state", "patternImageId"], TRANSPARENT_PATTERN_ID],
-    ],
+    "fill-color": ["coalesce", ["feature-state", "fillColor"], "#dfe7e8"],
     "fill-opacity": 1,
   },
 } as const satisfies AddLayerObject;
@@ -171,19 +114,18 @@ const COUNTRY_LINE_LAYER = {
 
 const COUNTRY_STATE_LAYER = {
   id: COUNTRY_STATE_LAYER_ID,
-  type: "fill",
+  type: "line",
   source: COUNTRY_GEOMETRY_SOURCE_ID,
   paint: {
-    "fill-color": "#f5c65f",
-    "fill-opacity": [
+    "line-width": [
       "case",
       ["boolean", ["feature-state", "selected"], false],
-      0.24,
+      2.5,
       ["boolean", ["feature-state", "hovered"], false],
-      0.1,
+      1.8,
       0,
     ],
-    "fill-outline-color": [
+    "line-color": [
       "case",
       ["boolean", ["feature-state", "selected"], false],
       "#b36b16",
@@ -196,16 +138,9 @@ const COUNTRY_STATE_LAYER = {
 
 const OWNED_LAYERS = [
   COUNTRY_FILL_LAYER,
-  COUNTRY_TONE_LAYER,
   COUNTRY_LINE_LAYER,
   COUNTRY_STATE_LAYER,
 ] as const;
-
-const TRANSPARENT_PATTERN = {
-  width: 1,
-  height: 1,
-  data: new Uint8ClampedArray(4),
-} as const;
 
 const LOADING_STATE = {
   status: "loading",
@@ -220,8 +155,8 @@ const READY_STATE = {
 } as const satisfies MapLibreTechnicalState;
 
 /**
- * Создает одну карту и в одном месте владеет геометрией, динамическими
- * изображениями, feature state и смысловыми событиями стран.
+ * Создает одну карту и в одном месте владеет геометрией, сводной окраской,
+ * feature state и смысловыми событиями стран.
  */
 export function useMapLibreMap({
   containerRef,
@@ -244,7 +179,6 @@ export function useMapLibreMap({
   const selectedRegionIdRef = useRef<string | null>(selectedRegionId);
   const onHoverRegionRef = useRef(onHoverRegion);
   const onSelectRegionRef = useRef(onSelectRegion);
-  const ownedToneImageByRegionRef = useRef(new Map<string, string>());
   const isStyleLoadedRef = useRef(false);
   const attributionCompact = attributionControl.compact;
   const [technicalState, setTechnicalState] =
@@ -266,7 +200,6 @@ export function useMapLibreMap({
 
     let isOwned = true;
     isStyleLoadedRef.current = false;
-    ownedToneImageByRegionRef.current = new Map<string, string>();
     const map = mapFactory({
       container,
       style,
@@ -293,7 +226,6 @@ export function useMapLibreMap({
             visualRegionsRef.current,
             hoveredRegionIdRef.current,
             selectedRegionIdRef.current,
-            ownedToneImageByRegionRef.current,
           )
           ? LOADING_STATE
           : READY_STATE,
@@ -354,7 +286,6 @@ export function useMapLibreMap({
       if (mapRef.current === map) {
         mapRef.current = null;
         isStyleLoadedRef.current = false;
-        ownedToneImageByRegionRef.current = new Map<string, string>();
       }
     };
   }, [attributionCompact, containerRef, mapFactory, style]);
@@ -371,7 +302,6 @@ export function useMapLibreMap({
         visualRegions,
         hoveredRegionIdRef.current,
         selectedRegionIdRef.current,
-        ownedToneImageByRegionRef.current,
       )
     ) {
       setTechnicalState(READY_STATE);
@@ -412,7 +342,6 @@ function syncCountryResources(
   visualRegions: readonly CountryMapRegionVisual[] | null,
   hoveredRegionId: string | null,
   selectedRegionId: string | null,
-  ownedToneImageByRegion: Map<string, string>,
 ): boolean {
   if (!map.hasSource(COUNTRY_GEOMETRY_SOURCE_ID)) {
     map.addCountryGeometrySource(
@@ -422,91 +351,21 @@ function syncCountryResources(
     );
   }
 
-  if (!map.hasImage(TRANSPARENT_PATTERN_ID)) {
-    map.addImage(TRANSPARENT_PATTERN_ID, TRANSPARENT_PATTERN);
-  }
-
   for (const layer of OWNED_LAYERS) {
-    if (!map.hasLayer(layer.id)) {
-      map.addLayer(layer);
-    }
+    if (!map.hasLayer(layer.id)) map.addLayer(layer);
   }
-
-  const nextToneImageByRegion = new Map<string, string>();
-  const nextToneImages = new Map<
-    string,
-    Readonly<{
-      width: number;
-      height: number;
-      data: Uint8Array | Uint8ClampedArray;
-    }>
-  >();
-  if (visualRegions !== null) {
-    for (const region of visualRegions) {
-      if (region.status !== "tone-mixture") {
-        continue;
-      }
-
-      const imageId = patternImageId(region.pattern.fingerprint);
-      nextToneImageByRegion.set(region.regionId, imageId);
-      nextToneImages.set(imageId, {
-        width: region.pattern.width,
-        height: region.pattern.height,
-        data: region.pattern.rgba,
-      });
-    }
-  }
-
-  const nextToneImageIds = new Set(nextToneImages.keys());
-  const staleToneImageIds = new Set<string>();
-  for (const imageId of ownedToneImageByRegion.values()) {
-    if (!nextToneImageIds.has(imageId)) {
-      staleToneImageIds.add(imageId);
-    }
-  }
-
-  for (const [regionId, imageId] of ownedToneImageByRegion) {
-    if (staleToneImageIds.has(imageId)) {
-      map.setCountryFeatureState(regionId, {
-        patternImageId: TRANSPARENT_PATTERN_ID,
-      });
-    }
-  }
-
-  for (const staleImageId of staleToneImageIds) {
-    if (map.hasImage(staleImageId)) {
-      map.removeImage(staleImageId);
-    }
-  }
-
-  for (const [imageId, image] of nextToneImages) {
-    if (!map.hasImage(imageId)) {
-      map.addImage(imageId, image);
-    }
-  }
-
   if (visualRegions !== null) {
     for (const region of visualRegions) {
       map.setCountryFeatureState(region.regionId, {
         visualStatus: region.status,
-        patternImageId:
-          region.status === "tone-mixture"
-            ? patternImageId(region.pattern.fingerprint)
-            : TRANSPARENT_PATTERN_ID,
+        fillColor: region.fillColor,
         hovered: region.regionId === hoveredRegionId,
         selected: region.regionId === selectedRegionId,
       });
     }
   }
-
-  ownedToneImageByRegion.clear();
-  for (const [regionId, imageId] of nextToneImageByRegion) {
-    ownedToneImageByRegion.set(regionId, imageId);
-  }
-
   return (
     map.hasSource(COUNTRY_GEOMETRY_SOURCE_ID) &&
-    map.hasImage(TRANSPARENT_PATTERN_ID) &&
     OWNED_LAYERS.every((layer) => map.hasLayer(layer.id))
   );
 }
@@ -523,10 +382,6 @@ function updateInteractionState(
   if (nextRegionId !== null) {
     map.setCountryFeatureState(nextRegionId, { [key]: true });
   }
-}
-
-function patternImageId(fingerprint: string): string {
-  return `${TONE_PATTERN_PREFIX}${fingerprint}`;
 }
 
 function createMapLibreMap(options: MapOptions): MapLibreOwnedMap {
@@ -576,16 +431,26 @@ function createMapLibreMap(options: MapOptions): MapLibreOwnedMap {
       return map.getLayer(id) !== undefined;
     },
     addLayer(layer) {
-      map.addLayer(layer);
-    },
-    hasImage(id) {
-      return map.hasImage(id);
-    },
-    addImage(id, image) {
-      map.addImage(id, image);
-    },
-    removeImage(id) {
-      map.removeImage(id);
+      // Подписи фоновой карты остаются над сводной окраской и границами.
+      const styleLayers = map.getStyle().layers;
+      const firstLabel = styleLayers.find(
+        (candidate) => candidate.type === "symbol",
+      )?.id;
+      map.addLayer(layer, firstLabel);
+      if (layer.id === COUNTRY_FILL_LAYER_ID) {
+        // Фон страны теперь задает сводка, поэтому подписи обоих providers
+        // должны читаться на каждом из ее оттенков.
+        for (const label of styleLayers) {
+          if (
+            label.type === "symbol" &&
+            label.layout?.["text-field"] !== undefined
+          ) {
+            map.setPaintProperty(label.id, "text-color", "#24383e");
+            map.setPaintProperty(label.id, "text-halo-color", "#ffffff");
+            map.setPaintProperty(label.id, "text-halo-width", 1.2);
+          }
+        }
+      }
     },
     setCountryFeatureState(regionId, state) {
       map.setFeatureState(

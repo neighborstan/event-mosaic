@@ -140,7 +140,7 @@ public abstract class IngestionRuntimeModeCondition implements Condition {
 					GENERATION_CLEANUP_MODE);
 			return new ModeRequest(
 					context.getResourceLoader() instanceof WebApplicationContext,
-					environment.getProperty(AUTOMATIC_ENABLED, Boolean.class, false),
+					environment.getProperty(AUTOMATIC_ENABLED, Boolean.class, true),
 					environment.getProperty(ONE_SHOT_ENABLED, Boolean.class, false),
 					partitionRebuildRequested,
 					generationCleanupRequested);

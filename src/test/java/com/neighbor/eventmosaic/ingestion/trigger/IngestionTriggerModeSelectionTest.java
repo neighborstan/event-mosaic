@@ -87,7 +87,7 @@ class IngestionTriggerModeSelectionTest {
 	@Test
 	@DisplayName("Выключенный режим не создает ни один механизм запуска")
 	void disabledModeDoesNotCreateTriggerBeans() {
-		webContextRunner.run(context -> {
+		webContextRunner.withPropertyValues("event-mosaic.ingestion.gdelt.automatic.enabled=false").run(context -> {
 			assertThat(context).doesNotHaveBean(IngestionOneShotRunner.class);
 			assertThat(context).doesNotHaveBean(PartitionRebuildCommandLineAdapter.class);
 			assertThat(context).doesNotHaveBean(GenerationCleanupCommandLineAdapter.class);
@@ -123,10 +123,9 @@ class IngestionTriggerModeSelectionTest {
 	}
 
 	@Test
-	@DisplayName("Автоматический режим выбирается только в обычном веб-процессе")
+	@DisplayName("Без дополнительных настроек автоматическая загрузка включается только в обычном веб-процессе")
 	void automaticModeRequiresOrdinaryWebRuntime() {
 		webContextRunner
-				.withPropertyValues(AUTOMATIC_ENABLED)
 				.run(context -> {
 					assertThat(context).hasSingleBean(AutomaticIngestionScheduler.class);
 					assertThat(context).hasSingleBean(ScheduledExecutorService.class);
@@ -135,7 +134,6 @@ class IngestionTriggerModeSelectionTest {
 					assertThat(context).doesNotHaveBean(GenerationCleanupCommandLineAdapter.class);
 				});
 		nonWebContextRunner
-				.withPropertyValues(AUTOMATIC_ENABLED)
 				.run(context -> {
 					assertThat(context).doesNotHaveBean(AutomaticIngestionScheduler.class);
 					assertThat(context).doesNotHaveBean(ScheduledExecutorService.class);

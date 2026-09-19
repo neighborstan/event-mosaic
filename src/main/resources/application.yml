@@ -92,7 +92,7 @@ event-mosaic:
         recovery-lease: 15m
         first-run-policy: RECENT_WINDOW
       automatic:
-        enabled: false
+        enabled: true
         poll-delay: 1m
         cycle-lease: 15m
         shutdown-grace: 30s

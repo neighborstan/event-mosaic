@@ -8,16 +8,12 @@ $ErrorActionPreference = "Stop"
 # Backend и frontend затем запускаются одной конфигурацией "Event Mosaic Local" в IDEA.
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $ComposeFile = Join-Path $ProjectRoot "compose.yml"
-$EventTemplateFile = Join-Path `
-    $ProjectRoot `
-    "src\main\resources\elasticsearch\gdelt-events-v1-template.json"
 
 # Отдельное имя Compose-проекта изолирует контейнеры, сеть и Docker volumes.
 # Обычный локальный стек проекта с базой event_mosaic вообще не используется.
 $ComposeProject = "event-mosaic-map04b-review"
 $ElasticsearchOrigin = "http://127.0.0.1:19200"
-$EventTemplateName = "gdelt-events-v1-template"
-$ReviewEventIndex = "gdelt-events-v1-p19700101-g9999"
+$LegacyReviewEventIndex = "gdelt-events-v1-p19700101-g9999"
 $EventReadAlias = "gdelt-events-read"
 
 # Эти значения нужны compose.yml. Они действуют только во время скрипта,
@@ -146,6 +142,38 @@ function Wait-ElasticsearchReady {
     throw "Elasticsearch не стал готов за 60 секунд. Проверьте Docker Desktop."
 }
 
+function Disconnect-EmptyLegacyReviewIndex {
+    # Старый сценарий подключал пустую заглушку к поиску до запуска Spring.
+    # Ее дата не соответствует недельным разделам и блокирует автозагрузку.
+    $legacyAlias = Invoke-Elasticsearch `
+        -Method GET `
+        -Path "/$LegacyReviewEventIndex/_alias/$EventReadAlias" `
+        -AllowNotFound
+    if ($null -eq $legacyAlias) {
+        return
+    }
+
+    $documents = Invoke-Elasticsearch -Method GET -Path "/$LegacyReviewEventIndex/_count"
+    if ($documents._shards.failed -ne 0 -or $documents.count -ne 0) {
+        throw "Старая заглушка $LegacyReviewEventIndex содержит документы или не проверена полностью. Остановлено без изменения данных; требуется отдельная проверка этого индекса."
+    }
+
+    # Снимаем только одну известную привязку. Сам индекс и остальные aliases сохраняются.
+    $aliasJson = @{
+        actions = @(
+            @{
+                remove = @{
+                    index = $LegacyReviewEventIndex
+                    alias = $EventReadAlias
+                    must_exist = $true
+                }
+            }
+        )
+    } | ConvertTo-Json -Depth 6 -Compress
+    Invoke-Elasticsearch -Method POST -Path "/_aliases" -BodyJson $aliasJson | Out-Null
+    Write-Host "Пустая заглушка прежнего сценария отключена от поиска; данные сохранены."
+}
+
 function Set-ReviewEnvironment {
     $original = [ordered]@{}
     foreach ($entry in $ReviewEnvironment.GetEnumerator()) {
@@ -225,56 +253,16 @@ try {
     Invoke-ReviewCompose -ComposeArguments @("up", "-d", "--wait")
     Wait-ElasticsearchReady
 
-    # Пустой Elasticsearch сам по себе недостаточен: snapshot читает стабильный
-    # alias и ожидает production mapping. Поэтому ставим tracked Event template.
-    Write-Host "Устанавливаю Event index template..."
-    $templateJson = Get-Content -LiteralPath $EventTemplateFile -Raw
-    Invoke-Elasticsearch `
-        -Method PUT `
-        -Path "/_index_template/$EventTemplateName" `
-        -BodyJson $templateJson | Out-Null
-
-    # Индекс пустой, поэтому на карте будут честные нулевые счетчики и UNKNOWN
-    # coverage. Имя подходит под template и существует только в отдельном volume.
-    $existingIndex = Invoke-Elasticsearch `
-        -Method GET `
-        -Path "/$ReviewEventIndex" `
-        -AllowNotFound
-    if ($null -eq $existingIndex) {
-        Write-Host "Создаю пустой Event index..."
-        $createIndexJson = @{
-            aliases = @{
-                $EventReadAlias = @{}
-            }
-        } | ConvertTo-Json -Depth 5 -Compress
-        Invoke-Elasticsearch `
-            -Method PUT `
-            -Path "/$ReviewEventIndex" `
-            -BodyJson $createIndexJson | Out-Null
-    }
-    else {
-        # Повторный start идемпотентен: возвращаем alias, если его сняли вручную.
-        $aliasJson = @{
-            actions = @(
-                @{
-                    add = @{
-                        index = $ReviewEventIndex
-                        alias = $EventReadAlias
-                    }
-                }
-            )
-        } | ConvertTo-Json -Depth 6 -Compress
-        Invoke-Elasticsearch `
-            -Method POST `
-            -Path "/_aliases" `
-            -BodyJson $aliasJson | Out-Null
-    }
+    Disconnect-EmptyLegacyReviewIndex
+    # Spring сам устанавливает templates, создает рабочие индексы и подключает
+    # их к поиску. До первого успешного цикла временная недоступность данных ожидаема.
 
     Write-Host ""
     Write-Host "Инфраструктура готова."
     Write-Host "1. В IDEA выберите конфигурацию 'Event Mosaic Local' и нажмите Run."
     Write-Host "2. Дождитесь строки 'Started EventMosaicApplication'."
     Write-Host "3. Откройте http://127.0.0.1:5173"
+    Write-Host "   На пустом хранилище дождитесь загрузки GDELT и обновите страницу."
     Write-Host "4. После проверки остановите Run в IDEA и запустите stop-map-review.ps1"
 }
 finally {

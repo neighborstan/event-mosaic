@@ -115,7 +115,7 @@ describe("Экран карты с проверенным snapshot", () => {
       screen.getByRole("status", { name: "Состояние данных событий" }),
     ).toHaveTextContent("Сопоставлено событий: 4. Полнота: COMPLETE");
     expect(requireControlledMap(mapFixture).sourceAdditions).toHaveLength(1);
-    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(4);
+    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(3);
   });
 
   test("Неизвестный provider показывает безопасную ошибку до MapLibre и обоих HTTP owners", () => {
@@ -264,7 +264,7 @@ describe("Экран карты с проверенным snapshot", () => {
     );
     expect(screen.getByRole("main")).not.toHaveTextContent("0 событий");
     expect(requireControlledMap(mapFixture).sourceAdditions).toHaveLength(1);
-    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(4);
+    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(3);
   });
 
   test("Roster mismatch отклоняет snapshot целиком, не создавая второй source или динамический layer", async () => {
@@ -297,7 +297,7 @@ describe("Экран карты с проверенным snapshot", () => {
       screen.getByRole("alert", { name: "Ошибка данных событий" }),
     ).toHaveTextContent("Не удалось загрузить, проверить или связать");
     expect(requireControlledMap(mapFixture).sourceAdditions).toHaveLength(1);
-    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(4);
+    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(3);
   });
 
   test.each(["PARTIAL", "UNKNOWN"] satisfies CountryCoverageStatus[])(
@@ -443,31 +443,73 @@ describe("Экран карты с проверенным snapshot", () => {
       screen.getByRole("status", { name: "Состояние данных событий" }),
     ).toHaveTextContent("Принят снимок событий");
     expect(secondMap.sourceAdditions).toHaveLength(1);
-    expect(secondMap.layerAdditions).toHaveLength(4);
+    expect(secondMap.layerAdditions).toHaveLength(3);
   });
 
-  test("Показывает именованную легенду с семью фактическими группами и специальными состояниями", async () => {
+  test("Объясняет сводные цвета, смешанную картину и отличие отсутствующих данных от нулевого тона", async () => {
     const { mapFixture } = await renderAcceptedScreen();
     const legend = screen.getByRole("region", {
-      name: "Легенда тональности",
+      name: "Шкала тональности",
     });
-    const toneGroups = within(legend).getByRole("list", {
-      name: "Семь фактических групп тональности",
-    });
-    const specialStates = within(legend).getByRole("list", {
-      name: "Плотность и специальные состояния",
-    });
-
-    expect(within(toneGroups).getAllByRole("listitem")).toHaveLength(7);
-    expect(toneGroups).toHaveTextContent("Крайне негативный");
-    expect(toneGroups).toHaveTextContent("Тон ровно 0");
-    expect(toneGroups).toHaveTextContent("Крайне позитивный");
-    expect(legend).toHaveTextContent("фактические проценты");
-    expect(specialStates).toHaveTextContent("Плотность и прозрачность растут");
-    expect(specialStates).toHaveTextContent(
-      '"Тональность неизвестна" не считается настоящим тоном 0',
+    expect(within(legend).getAllByRole("listitem")).toHaveLength(6);
+    expect(legend).toHaveTextContent("80% и более отрицательных");
+    expect(legend).toHaveTextContent("Преобладает тон 0");
+    expect(legend).toHaveTextContent(
+      "Смешанная картина не означает нулевой тон",
     );
-    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(4);
+    expect(legend).toHaveTextContent("Нет событий в доступных данных");
+    expect(legend).toHaveTextContent("Тональность неизвестна");
+    expect(requireControlledMap(mapFixture).layerAdditions).toHaveLength(3);
+  });
+
+  test("Выбор страны из списка и смена показателя сохраняют сводку без новых запросов и пересоздания карты", async () => {
+    const user = userEvent.setup();
+    const { geometry, mapFixture, geometryFixture, snapshotFixture } =
+      await renderAcceptedScreen();
+    const firstRegion = requireGeometryFeature(geometry, 0);
+    const map = requireControlledMap(mapFixture);
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Страна" }),
+      firstRegion.properties.regionId,
+    );
+    const summary = screen.getByRole("complementary", {
+      name: firstRegion.properties.displayName,
+    });
+    const toneSummary = summary.textContent;
+    const toneColor = map.stateFor(firstRegion.properties.regionId)[
+      "fillColor"
+    ];
+    await user.click(
+      screen.getByRole("button", { name: "Количество событий" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Количество событий" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    const legend = screen.getByRole("region", {
+      name: "Шкала количества событий",
+    });
+    expect(within(legend).getAllByRole("listitem")).toHaveLength(5);
+    expect(legend).toHaveTextContent(
+      "включая события с неизвестной тональностью",
+    );
+    expect(summary.textContent).toBe(toneSummary);
+    expect(map.stateFor(firstRegion.properties.regionId)["fillColor"]).not.toBe(
+      toneColor,
+    );
+    await user.click(screen.getByRole("button", { name: "Тональность" }));
+    expect(map.stateFor(firstRegion.properties.regionId)["fillColor"]).toBe(
+      toneColor,
+    );
+    expect(map.stateFor(firstRegion.properties.regionId)["selected"]).toBe(
+      true,
+    );
+    expect(geometryFixture.requests).toHaveLength(1);
+    expect(snapshotFixture.requests).toHaveLength(1);
+    expect(map.sourceAdditions).toHaveLength(1);
+    expect(map.layerAdditions).toHaveLength(3);
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("combobox", { name: "Страна" })).toHaveValue("");
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
   });
 
   test("Наведение не заменяет выбор, а новая страна, фон, кнопка закрытия и Escape управляют одной закрепленной сводкой", async () => {

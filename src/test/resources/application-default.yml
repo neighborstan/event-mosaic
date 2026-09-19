@@ -1,0 +1,6 @@
+# Обычные тесты Spring не обращаются к GDELT. Сквозная проверка автозагрузки явно включает локальный источник.
+event-mosaic:
+  ingestion:
+    gdelt:
+      automatic:
+        enabled: false

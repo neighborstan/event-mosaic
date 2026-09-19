@@ -31,6 +31,36 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 @DisplayName("Operational snapshot backend data из PostgreSQL")
 class JdbcBackendDataOperationalRepositoryIntegrationTest {
 
+	@Test
+	@DisplayName("Диагностика учитывает первый и остальные активные индексы без ложного сообщения о расхождении")
+	void includesEveryActiveGenerationInAliasExpectation() {
+		for (int offset = 0; offset < 2; offset++) {
+			Instant start = Instant.parse("2026-07-13T00:00:00Z").plus(Duration.ofDays(7L * offset));
+			String key = offset == 0 ? "p20260713" : "p20260720";
+			jdbcClient.sql("""
+					insert into index_logical_partitions
+					(partition_key, partition_start_at, partition_end_at, partition_interval)
+					values (:key, :start, :end, 'P7D')
+					""").param("key", key).param("start", Timestamp.from(start))
+					.param("end", Timestamp.from(start.plus(Duration.ofDays(7)))).update();
+			jdbcClient.sql("""
+					insert into index_generations
+					(generation_uuid, partition_key, generation_number, state, event_index_name,
+					 mention_index_name, event_index_uuid, mention_index_uuid, heartbeat_at, activated_at)
+					values (:uuid, :key, 1, 'ACTIVE', :event, :mention, :eventUuid, :mentionUuid, :at, :at)
+					""").param("uuid", java.util.UUID.randomUUID()).param("key", key)
+					.param("event", "gdelt-events-v1-" + key + "-g0001")
+					.param("mention", "gdelt-mentions-v1-" + key + "-g0001")
+					.param("eventUuid", "event-uuid-" + key).param("mentionUuid", "mention-uuid-" + key)
+					.param("at", Timestamp.from(start)).update();
+			var snapshot = repository.read();
+			assertThat(snapshot.activeEventIndices()).hasSize(offset + 1)
+					.contains("gdelt-events-v1-p20260713-g0001");
+			assertThat(snapshot.activeMentionIndices()).hasSize(offset + 1)
+					.contains("gdelt-mentions-v1-p20260713-g0001");
+		}
+	}
+
 	@Autowired
 	private JdbcBackendDataOperationalRepository repository;
 

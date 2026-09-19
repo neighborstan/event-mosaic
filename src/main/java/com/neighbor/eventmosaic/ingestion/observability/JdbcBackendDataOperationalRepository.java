@@ -213,10 +213,8 @@ class JdbcBackendDataOperationalRepository {
 				order by partition_key
 				""")
 				.query(resultSet -> {
-					while (resultSet.next()) {
-						eventIndices.add(resultSet.getString("event_index_name"));
-						mentionIndices.add(resultSet.getString("mention_index_name"));
-					}
+					eventIndices.add(resultSet.getString("event_index_name"));
+					mentionIndices.add(resultSet.getString("mention_index_name"));
 				});
 		return counts.toSnapshot(eventIndices, mentionIndices);
 	}

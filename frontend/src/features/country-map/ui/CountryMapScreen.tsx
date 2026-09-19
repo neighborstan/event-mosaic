@@ -22,7 +22,11 @@ import {
 } from "../lib/useMapLibreMap";
 import {
   buildCountryVisualModel,
-  COUNTRY_TONE_LEGEND_ITEMS,
+  COUNTRY_TONE_SUMMARIES,
+  COUNTRY_VOLUME_LEVELS,
+  COUNTRY_EMPTY_COLOR,
+  COUNTRY_MISSING_TONE_COLOR,
+  type CountryMapDisplayMode,
   type CountryToneVisualGroup,
   type CountryVisualRegion,
 } from "../model/countryVisualModel";
@@ -70,8 +74,8 @@ export function CountryMapScreen({
             <h1 id="country-map-title">Карта событий по странам</h1>
           </div>
           <p className="country-map-shell__intro">
-            Цвет показывает фактическую тональность событий, а плотность - их
-            объем за последний проверенный период.
+            Тональность и количество событий за последние 24 часа. Обобщенная
+            картина по странам.
           </p>
         </header>
         {providerResolution.status === "resolved" ? (
@@ -109,6 +113,7 @@ function CountryMapCanvas({
   mapFactory,
 }: CountryMapCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [displayMode, setDisplayMode] = useState<CountryMapDisplayMode>("tone");
   const [hoveredRegionId, setHoveredRegionId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const geometryState = useCountryGeometry({ loader: geometryLoader });
@@ -124,8 +129,10 @@ function CountryMapCanvas({
     snapshotState.status === "accepted" ? snapshotState.joinedSnapshot : null;
   const visualRegions = useMemo(
     () =>
-      joinedSnapshot === null ? null : buildCountryVisualModel(joinedSnapshot),
-    [joinedSnapshot],
+      joinedSnapshot === null
+        ? null
+        : buildCountryVisualModel(joinedSnapshot, displayMode),
+    [joinedSnapshot, displayMode],
   );
   const visualRegionsById = useMemo(
     () =>
@@ -189,6 +196,54 @@ function CountryMapCanvas({
       aria-label="Область карты стран"
       aria-busy={technicalState.status === "loading"}
     >
+      <div className="country-map-shell__toolbar">
+        <div
+          className="country-map-shell__modes"
+          role="group"
+          aria-label="Что показать на карте"
+        >
+          <button
+            type="button"
+            aria-pressed={displayMode === "tone"}
+            onClick={() => setDisplayMode("tone")}
+          >
+            Тональность
+          </button>
+          <button
+            type="button"
+            aria-pressed={displayMode === "volume"}
+            onClick={() => setDisplayMode("volume")}
+          >
+            Количество событий
+          </button>
+        </div>
+        <label className="country-map-shell__country-picker">
+          Страна
+          <select
+            value={selectedRegionId ?? ""}
+            disabled={visualRegions === null}
+            onChange={(event) =>
+              setSelectedRegionId(event.target.value || null)
+            }
+          >
+            <option value="">Выберите на карте или в списке</option>
+            {[...(visualRegions ?? [])]
+              .sort((left, right) =>
+                left.geometry.properties.displayName.localeCompare(
+                  right.geometry.properties.displayName,
+                ),
+              )
+              .map((region) => (
+                <option key={region.regionId} value={region.regionId}>
+                  {region.geometry.properties.displayName}
+                </option>
+              ))}
+          </select>
+        </label>
+      </div>
+      {snapshotState.status === "accepted" ? (
+        <CountryToneLegend mode={displayMode} />
+      ) : null}
       <div className="country-map-shell__map-stage">
         <div
           ref={containerRef}
@@ -216,7 +271,10 @@ function CountryMapCanvas({
       </div>
       <MapTechnicalStatus state={technicalState} />
       <SnapshotTechnicalStatus state={snapshotState} />
-      {snapshotState.status === "accepted" ? <CountryToneLegend /> : null}
+      <p className="country-map-shell__scope-note">
+        Цвет относится ко всей стране. При приближении места отдельных событий
+        пока не показываются.
+      </p>
     </section>
   );
 }
@@ -378,26 +436,26 @@ function buildSecondaryStatusParts(
   return parts;
 }
 
-function CountryToneLegend(): JSX.Element {
+function CountryToneLegend({
+  mode,
+}: Readonly<{ mode: CountryMapDisplayMode }>): JSX.Element {
+  const items =
+    mode === "tone"
+      ? Object.values(COUNTRY_TONE_SUMMARIES)
+      : COUNTRY_VOLUME_LEVELS.map((level) => ({
+          ...level,
+          description: "событий",
+        }));
   return (
     <section
       className="country-map-shell__legend"
-      aria-labelledby="country-map-legend-title"
+      aria-label={
+        mode === "tone" ? "Шкала тональности" : "Шкала количества событий"
+      }
     >
-      <div className="country-map-shell__legend-heading">
-        <h2 id="country-map-legend-title">Легенда тональности</h2>
-        <p>
-          Цветовые доли визуально усилены квадратным корнем, чтобы меньшая
-          группа оставалась заметной. Подсказка и карточка показывают только
-          фактические проценты.
-        </p>
-      </div>
-      <ul
-        className="country-map-shell__tone-scale"
-        aria-label="Семь фактических групп тональности"
-      >
-        {COUNTRY_TONE_LEGEND_ITEMS.map((item) => (
-          <li key={item.key}>
+      <ul className="country-map-shell__tone-scale">
+        {items.map((item) => (
+          <li key={item.label}>
             <span
               className="country-map-shell__legend-swatch"
               style={{ backgroundColor: item.color }}
@@ -405,39 +463,88 @@ function CountryToneLegend(): JSX.Element {
             />
             <span>
               <strong>{item.label}</strong>
-              <small>{item.range}</small>
+              <small>{item.description}</small>
             </span>
           </li>
         ))}
       </ul>
-      <ul
-        className="country-map-shell__special-states"
-        aria-label="Плотность и специальные состояния"
-      >
-        <li>
-          <span
-            className="country-map-shell__legend-swatch country-map-shell__legend-swatch--density"
-            aria-hidden="true"
-          />
-          Плотность и прозрачность растут с числом событий с известной
-          тональностью и имеют верхний предел.
-        </li>
-        <li>
-          <span
-            className="country-map-shell__legend-swatch country-map-shell__legend-swatch--empty"
-            aria-hidden="true"
-          />
-          "0 событий" - отдельное неокрашенное состояние.
-        </li>
-        <li>
-          <span
-            className="country-map-shell__legend-swatch country-map-shell__legend-swatch--missing"
-            aria-hidden="true"
-          />
-          "Тональность неизвестна" не считается настоящим тоном 0.
-        </li>
-      </ul>
+      <div className="country-map-shell__legend-notes">
+        <span>
+          <i style={{ backgroundColor: COUNTRY_EMPTY_COLOR }} />
+          Нет событий в доступных данных
+        </span>
+        {mode === "tone" ? (
+          <span>
+            <i style={{ backgroundColor: COUNTRY_MISSING_TONE_COLOR }} />
+            Тональность неизвестна
+          </span>
+        ) : null}
+        <span>
+          {mode === "tone"
+            ? "Доли среди событий с известным тоном. Смешанная картина не означает нулевой тон."
+            : "Все события, включая события с неизвестной тональностью."}
+        </span>
+      </div>
     </section>
+  );
+}
+
+function CountryComposition({
+  region,
+}: Readonly<{ region: CountryVisualRegion }>): JSX.Element | null {
+  if (region.status !== "tone-mixture") return null;
+  const summary = COUNTRY_TONE_SUMMARIES[region.summaryKey];
+  const parts = [
+    {
+      label: "Негативные",
+      percentage: region.negativePercentage,
+      color: "#bd3a2b",
+    },
+    { label: "Тон 0", percentage: region.zeroPercentage, color: "#929ba5" },
+    {
+      label: "Позитивные",
+      percentage: region.positivePercentage,
+      color: "#177f99",
+    },
+  ];
+  return (
+    <div
+      className="country-map-shell__composition"
+      role="group"
+      aria-label="Состав тональности страны"
+    >
+      <p className="country-map-shell__composition-title">
+        <span style={{ backgroundColor: summary.color }} aria-hidden="true" />
+        {region.summaryKey === "zero"
+          ? summary.label
+          : `${summary.label} картина`}
+      </p>
+      <div className="country-map-shell__composition-bar" aria-hidden="true">
+        {parts.map((part) => (
+          <span
+            key={part.label}
+            style={{
+              width: `${part.percentage}%`,
+              backgroundColor: part.color,
+            }}
+          />
+        ))}
+      </div>
+      <div className="country-map-shell__composition-values">
+        {parts.map((part) => (
+          <span key={part.label}>
+            <strong>{formatPercentage(part.percentage)}</strong>
+            {part.label}
+          </span>
+        ))}
+      </div>
+      {region.data.coloredEventCount < 30 ? (
+        <p className="country-map-shell__small-sample">
+          Мало событий с известным тоном: {region.data.coloredEventCount}.
+          Учитывайте это при сравнении стран.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -456,7 +563,7 @@ function CountryHoverSummary({
     >
       <strong>{region.geometry.properties.displayName}</strong>
       <p>{countryCountSummary(region, coverageStatus)}</p>
-      <ToneGroupSummary groups={region.groups} compact />
+      <CountryComposition region={region} />
       {region.data.missingToneEventCount > 0 ? (
         <p>Тональность неизвестна: {region.data.missingToneEventCount}.</p>
       ) : null}
@@ -500,61 +607,66 @@ function CountrySelectedSummary({
           Закрыть
         </button>
       </div>
-      <p>{`UTC-период [${snapshot.snapshot.from}, ${snapshot.snapshot.to}).`}</p>
+
       <p>{countryCountSummary(region, snapshot.coverage.status)}</p>
       <p>
         С известной тональностью: {region.data.coloredEventCount}. Тональность
         неизвестна: {region.data.missingToneEventCount}.
       </p>
-      <ToneGroupSummary groups={region.groups} compact={false} />
-      <p>{`Полнота всего снимка: ${snapshot.coverage.status}.`}</p>
-      <p>
-        Источник геометрии: Natural Earth 10m (
-        {region.geometry.properties.geometrySource}), версия country-v1.
-      </p>
-      <p>
-        {region.geometry.properties.disputeStatus === "DISPUTED_DE_FACTO"
-          ? "Статус: спорная территория в представлении de facto."
-          : "Статус: стандартная территория в выбранной геометрии."}
-      </p>
+      <CountryComposition region={region} />
+      <ToneGroupSummary groups={region.groups} />
+      <details className="country-map-shell__metadata">
+        <summary>Период, полнота и границы</summary>
+        <p>{`UTC-период [${snapshot.snapshot.from}, ${snapshot.snapshot.to}).`}</p>
+        <p>{`Полнота всего снимка: ${snapshot.coverage.status}.`}</p>
+        <p>
+          Источник геометрии: Natural Earth 10m (
+          {region.geometry.properties.geometrySource}), версия country-v1.
+        </p>
+        <p>
+          {region.geometry.properties.disputeStatus === "DISPUTED_DE_FACTO"
+            ? "Статус: спорная территория в представлении de facto."
+            : "Статус: стандартная территория в выбранной геометрии."}
+        </p>
+      </details>
     </aside>
   );
 }
 
 function ToneGroupSummary({
   groups,
-  compact,
 }: Readonly<{
   groups: readonly CountryToneVisualGroup[];
-  compact: boolean;
 }>): JSX.Element | null {
-  const visibleGroups = compact
-    ? groups.filter((group) => group.count > 0)
-    : groups;
-  if (visibleGroups.length === 0) {
-    return null;
-  }
-
+  if (groups.every((group) => group.count === 0)) return null;
   return (
-    <ul
-      className="country-map-shell__tone-summary"
-      aria-label={
-        compact
-          ? "Ненулевые группы тональности страны"
-          : "Все группы тональности страны"
-      }
+    <section
+      className="country-map-shell__distribution"
+      aria-label="Все группы тональности страны"
     >
-      {visibleGroups.map((group) => (
-        <li key={group.key}>
-          <span
-            className="country-map-shell__legend-swatch"
-            style={{ backgroundColor: group.color }}
-            aria-hidden="true"
-          />
-          <span>{`${group.label}: ${group.count} (${formatPercentage(group.percentage)}).`}</span>
-        </li>
-      ))}
-    </ul>
+      <h3>Распределение по семи диапазонам</h3>
+      <ul className="country-map-shell__tone-summary">
+        {groups.map((group) => (
+          <li key={group.key}>
+            <div className="country-map-shell__tone-row">
+              <span>{group.label}</span>
+              <span>
+                {group.count}{" "}
+                <strong>{formatPercentage(group.percentage)}</strong>
+              </span>
+            </div>
+            <div className="country-map-shell__tone-track" aria-hidden="true">
+              <span
+                style={{
+                  width: `${group.percentage}%`,
+                  backgroundColor: group.color,
+                }}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

@@ -99,8 +99,8 @@ class GdeltIngestionPropertiesTest {
 	}
 
 	@Test
-	@DisplayName("Автоматический режим получает безопасные промежуточные значения по умолчанию")
-	void automaticModeUsesSafeCheckpointDefaults() {
+	@DisplayName("Явно выключенный автоматический режим сохраняет ограничения времени и объема работы")
+	void disabledAutomaticModeKeepsWorkAndTimeLimits() {
 		GdeltIngestionProperties.Automatic automatic = properties(
 				FirstRunPolicy.LATEST,
 				null,

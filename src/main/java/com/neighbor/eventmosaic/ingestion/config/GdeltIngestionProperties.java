@@ -141,7 +141,7 @@ public record GdeltIngestionProperties(
 	 * @param receiptAudit настройки периодической проверки сохраненных подтверждений индексации
 	 */
 	public record Automatic(
-			@DefaultValue("false") boolean enabled,
+			@DefaultValue("true") boolean enabled,
 			@DefaultValue("1m") @NotNull Duration pollDelay,
 			@DefaultValue("15m") @NotNull Duration cycleLease,
 			@DefaultValue("30s") @NotNull Duration shutdownGrace,

@@ -30,7 +30,7 @@ class IngestionRuntimePropertiesBindingTest {
 
 			assertThat(properties.continuity().firstRunPolicy())
 					.isEqualTo(FirstRunPolicy.RECENT_WINDOW);
-			assertThat(automatic.enabled()).isFalse();
+			assertThat(automatic.enabled()).isTrue();
 			assertThat(automatic.pollDelay()).isEqualTo(Duration.ofMinutes(1));
 			assertThat(automatic.cycleLease()).isEqualTo(Duration.ofMinutes(15));
 			assertThat(automatic.shutdownGrace()).isEqualTo(Duration.ofSeconds(30));

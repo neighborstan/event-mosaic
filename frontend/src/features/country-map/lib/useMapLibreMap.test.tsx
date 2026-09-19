@@ -13,7 +13,6 @@ import {
   COUNTRY_GEOMETRY_SOURCE_ID,
   COUNTRY_LINE_LAYER_ID,
   COUNTRY_STATE_LAYER_ID,
-  COUNTRY_TONE_LAYER_ID,
   useMapLibreMap,
   type CountryMapRegionVisual,
   type MapLibreMapFactory,
@@ -152,7 +151,7 @@ describe("Владение жизненным циклом MapLibre", () => {
     expect(fixture.maps).toHaveLength(1);
   });
 
-  test("Добавляет источник со стабильным regionId и четыре owned layers", () => {
+  test("Добавляет источник со стабильным regionId и три слоя без текстур", () => {
     const fixture = createControlledMapLibreFactory();
     const geometry = createValidatedCountryGeometry();
     render(<MapHarness mapFactory={fixture.factory} geometry={geometry} />);
@@ -172,11 +171,9 @@ describe("Владение жизненным циклом MapLibre", () => {
     ]);
     expect(map.layerAdditions.map((layer) => layer.id)).toEqual([
       COUNTRY_FILL_LAYER_ID,
-      COUNTRY_TONE_LAYER_ID,
       COUNTRY_LINE_LAYER_ID,
       COUNTRY_STATE_LAYER_ID,
     ]);
-    expect(map.activeImageIds()).toHaveLength(1);
   });
 
   test("Синхронизирует геометрию после стиля без пересоздания карты", () => {
@@ -196,76 +193,51 @@ describe("Владение жизненным циклом MapLibre", () => {
 
     expect(fixture.maps).toHaveLength(1);
     expect(map.sourceAdditions).toHaveLength(1);
-    expect(map.layerAdditions).toHaveLength(4);
+    expect(map.layerAdditions).toHaveLength(3);
     expect(screen.getByTestId("map-state")).toHaveTextContent("ready");
   });
 
-  test("Неизменный refresh переиспользует image, а измененный безопасно переключает pattern", () => {
+  test("Обновление сводки меняет цвет без пересоздания карты и геометрии", () => {
     const fixture = createControlledMapLibreFactory();
     const geometry = createValidatedCountryGeometry();
     const regionId = geometry.features[0]?.properties.regionId ?? "country:r0";
-    const firstVisual = [toneVisual(regionId, "first", 31)];
-    const secondVisual = [toneVisual(regionId, "second", 47)];
     const view = render(
       <MapHarness
         mapFactory={fixture.factory}
         geometry={geometry}
-        visualRegions={firstVisual}
+        visualRegions={[toneVisual(regionId, "#c8554b")]}
       />,
     );
     const map = requireControlledMap(fixture);
-
     act(() => {
       map.emit("load");
     });
-    const additionsAfterFirstSnapshot = map.imageAdditions.length;
-
+    expect(map.stateFor(regionId)["fillColor"]).toBe("#c8554b");
     view.rerender(
       <MapHarness
         mapFactory={fixture.factory}
         geometry={geometry}
-        visualRegions={firstVisual}
+        visualRegions={[toneVisual(regionId, "#b2a3c9")]}
       />,
     );
-    expect(map.imageAdditions).toHaveLength(additionsAfterFirstSnapshot);
-
-    const operationCountBeforeRefresh = map.operationLog.length;
+    expect(map.stateFor(regionId)["fillColor"]).toBe("#b2a3c9");
     view.rerender(
       <MapHarness
         mapFactory={fixture.factory}
         geometry={geometry}
-        visualRegions={secondVisual}
+        visualRegions={[noEventsVisual(regionId)]}
       />,
     );
-
-    expect(map.imageAdditions).toHaveLength(additionsAfterFirstSnapshot + 1);
-    expect(map.imageRemovals).toHaveLength(1);
-    const latestPatternState = map.stateFor(regionId)["patternImageId"];
-    expect(latestPatternState).toEqual(expect.stringContaining("second"));
-    const refreshOperations = map.operationLog.slice(
-      operationCountBeforeRefresh,
-    );
-    const transparentStateOperation = refreshOperations.findIndex(
-      (operation) => operation === `feature-state:${regionId}`,
-    );
-    const removalOperation = refreshOperations.findIndex((operation) =>
-      operation.startsWith("remove-image:"),
-    );
-    const additionOperation = refreshOperations.findIndex((operation) =>
-      operation.includes("pattern:second"),
-    );
-    const finalStateOperation = refreshOperations.lastIndexOf(
-      `feature-state:${regionId}`,
-    );
-    expect(transparentStateOperation).toBeLessThan(removalOperation);
-    expect(removalOperation).toBeLessThan(additionOperation);
-    expect(additionOperation).toBeLessThan(finalStateOperation);
-    expect(map.maximumActiveToneImageCount()).toBe(1);
+    expect(map.stateFor(regionId)).toMatchObject({
+      visualStatus: "no-events",
+      fillColor: "#eef1f3",
+    });
     expect(fixture.maps).toHaveLength(1);
     expect(map.sourceAdditions).toHaveLength(1);
+    expect(map.layerAdditions).toHaveLength(3);
   });
 
-  test("Настоящий style reload восстанавливает source, images, layers и state без новых listeners", () => {
+  test("Настоящий style reload восстанавливает геометрию, слои и цвет без новых listeners", () => {
     const fixture = createControlledMapLibreFactory();
     const geometry = createValidatedCountryGeometry();
     const regionId = geometry.features[0]?.properties.regionId ?? "country:r0";
@@ -273,7 +245,7 @@ describe("Владение жизненным циклом MapLibre", () => {
       <MapHarness
         mapFactory={fixture.factory}
         geometry={geometry}
-        visualRegions={[toneVisual(regionId, "stable", 53)]}
+        visualRegions={[toneVisual(regionId, "#c8554b")]}
       />,
     );
     const map = requireControlledMap(fixture);
@@ -281,78 +253,22 @@ describe("Владение жизненным циклом MapLibre", () => {
     act(() => {
       map.emit("load");
     });
-    const initialImageCount = map.imageAdditions.length;
 
     act(() => {
       map.simulateStyleReload();
     });
 
     expect(map.sourceAdditions).toHaveLength(2);
-    expect(map.layerAdditions).toHaveLength(8);
-    expect(map.imageAdditions).toHaveLength(initialImageCount * 2);
+    expect(map.layerAdditions).toHaveLength(6);
     expect(map.stateFor(regionId)).toEqual(
-      expect.objectContaining({ visualStatus: "tone-mixture" }),
+      expect.objectContaining({
+        visualStatus: "tone-mixture",
+        fillColor: "#c8554b",
+      }),
     );
     expect(map.activeListenerCount("style.load")).toBe(1);
     expect(map.activeCountryListenerCount("hover")).toBe(1);
     expect(fixture.maps).toHaveLength(1);
-  });
-
-  test("Ограничивает generated images точным roster из 258 стран", () => {
-    const fixture = createControlledMapLibreFactory();
-    const geometry = createValidatedCountryGeometry();
-    const visualRegions = geometry.features.map((feature, index) =>
-      toneVisual(
-        feature.properties.regionId,
-        `fingerprint-${index.toString()}`,
-        index % 255,
-      ),
-    );
-    const view = render(
-      <MapHarness
-        mapFactory={fixture.factory}
-        geometry={geometry}
-        visualRegions={visualRegions}
-      />,
-    );
-    const map = requireControlledMap(fixture);
-
-    act(() => {
-      map.emit("load");
-    });
-
-    expect(
-      map
-        .activeImageIds()
-        .filter((imageId) => imageId.includes("pattern:fingerprint-")),
-    ).toHaveLength(258);
-    expect(map.featureStateUpdates).toHaveLength(258);
-    expect(map.maximumActiveToneImageCount()).toBe(258);
-
-    const refreshedVisualRegions = geometry.features.map((feature, index) =>
-      toneVisual(
-        feature.properties.regionId,
-        `replacement-${index.toString()}`,
-        (index + 1) % 255,
-      ),
-    );
-    view.rerender(
-      <MapHarness
-        mapFactory={fixture.factory}
-        geometry={geometry}
-        visualRegions={refreshedVisualRegions}
-      />,
-    );
-
-    expect(
-      map
-        .activeImageIds()
-        .filter((imageId) => imageId.includes("pattern:replacement-")),
-    ).toHaveLength(258);
-    expect(map.imageRemovals).toHaveLength(258);
-    expect(map.maximumActiveToneImageCount()).toBe(258);
-    expect(fixture.maps).toHaveLength(1);
-    expect(map.sourceAdditions).toHaveLength(1);
   });
 
   test("Смысловые события сообщают только regionId и отдельный выбор фона", () => {
@@ -387,7 +303,7 @@ describe("Владение жизненным циклом MapLibre", () => {
     const secondRegionId =
       geometry.features[1]?.properties.regionId ?? "country:r1";
     const visualRegions = [
-      toneVisual(firstRegionId, "first", 61),
+      toneVisual(firstRegionId, "#c8554b"),
       noEventsVisual(secondRegionId),
     ];
     const view = render(
@@ -403,7 +319,6 @@ describe("Владение жизненным циклом MapLibre", () => {
     });
     const sourceCount = map.sourceAdditions.length;
     const layerCount = map.layerAdditions.length;
-    const imageCount = map.imageAdditions.length;
 
     view.rerender(
       <MapHarness
@@ -419,31 +334,17 @@ describe("Владение жизненным циклом MapLibre", () => {
     expect(map.stateFor(secondRegionId)["hovered"]).toBe(true);
     expect(map.sourceAdditions).toHaveLength(sourceCount);
     expect(map.layerAdditions).toHaveLength(layerCount);
-    expect(map.imageAdditions).toHaveLength(imageCount);
     expect(fixture.maps).toHaveLength(1);
   });
 });
 
 function toneVisual(
   regionId: string,
-  fingerprint: string,
-  byte: number,
+  fillColor: string,
 ): CountryMapRegionVisual {
-  return {
-    regionId,
-    status: "tone-mixture",
-    pattern: {
-      fingerprint,
-      rgba: new Uint8ClampedArray(64 * 64 * 4).fill(byte),
-      width: 64,
-      height: 64,
-    },
-  };
+  return { regionId, status: "tone-mixture", fillColor };
 }
 
 function noEventsVisual(regionId: string): CountryMapRegionVisual {
-  return {
-    regionId,
-    status: "no-events",
-  };
+  return { regionId, status: "no-events", fillColor: "#eef1f3" };
 }
