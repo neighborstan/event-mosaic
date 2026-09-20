@@ -5,28 +5,30 @@ import java.time.Duration;
 import java.util.Optional;
 
 /**
- * Транзакционная граница единственного source-scoped ingestion cycle owner.
- * Все изменяющие операции проверяют одновременно token и fencing epoch.
+ * Хранит право выполнять один цикл загрузки для каждого источника данных.
+ * Захват и завершение выполняются атомарно в базе, чтобы два процесса не могли
+ * одновременно управлять одним циклом. Владельца определяют случайный ключ
+ * и возрастающий номер захвата; завершить цикл может только действующий владелец.
  */
 public interface IngestionCycleLedger {
 
 	/**
-	 * Пытается получить cycle ownership на заданный срок.
+	 * Пытается получить право выполнять загрузку на заданный срок.
 	 *
-	 * @param sourceName стабильное имя source
-	 * @param leaseDuration длительность ownership
-	 * @return новый owner либо empty, пока действующий lease занят
+	 * @param sourceName постоянное имя источника данных
+	 * @param leaseDuration срок, на который процесс получает цикл
+	 * @return данные нового владельца либо пустой результат, пока цикл занят
 	 */
 	Optional<IngestionCycleOwnership> claim(String sourceName, Duration leaseDuration);
 
 	/**
-	 * Пытается получить cycle ownership, не начиная запрос к PostgreSQL без
-	 * целой секунды в общем лимите операции.
+	 * Пытается получить право на загрузку с учетом общего лимита времени.
+	 * Не начинает запрос к PostgreSQL, если осталось меньше целой секунды.
 	 *
-	 * @param sourceName стабильное имя source
-	 * @param leaseDuration длительность ownership
-	 * @param budget общий лимит времени, начатый до попытки claim
-	 * @return новый owner либо empty, пока действующий lease занят
+	 * @param sourceName постоянное имя источника данных
+	 * @param leaseDuration срок, на который процесс получает цикл
+	 * @param budget общий лимит времени, отсчитываемый до попытки захвата
+	 * @return данные нового владельца либо пустой результат, пока цикл занят
 	 */
 	Optional<IngestionCycleOwnership> claim(
 			String sourceName,
@@ -35,41 +37,21 @@ public interface IngestionCycleLedger {
 	);
 
 	/**
-	 * Продлевает lease только для подтвержденного текущего owner.
+	 * Проверяет владельца и возвращает оставшийся срок его права на загрузку
+	 * по часам PostgreSQL. Ключ и номер захвата должны совпадать с действующими.
 	 *
-	 * @param ownership token и fencing epoch текущего owner
-	 * @param leaseDuration новый срок от текущего времени PostgreSQL
-	 * @return обновленный owner либо empty после потери ownership
-	 */
-	Optional<IngestionCycleOwnership> renew(
-			IngestionCycleOwnership ownership,
-			Duration leaseDuration
-	);
-
-	/**
-	 * Проверяет, что ownership еще принадлежит caller и не истек.
-	 *
-	 * @param ownership проверяемые token и fencing epoch
-	 * @return {@code true} только для текущего непросроченного owner
-	 */
-	boolean isCurrent(IngestionCycleOwnership ownership);
-
-	/**
-	 * Возвращает остаток lease по часам PostgreSQL только для текущего owner.
-	 *
-	 * @param ownership проверяемые token и fencing epoch
-	 * @return положительный остаток либо empty после expiry или takeover
+	 * @param ownership данные проверяемого владельца
+	 * @return положительный остаток времени либо пустой результат, если права уже нет
 	 */
 	Optional<Duration> remainingLease(IngestionCycleOwnership ownership);
 
 	/**
-	 * Возвращает свежий остаток lease с учетом общего лимита времени текущего
-	 * cycle. Реализация не должна начинать запрос, когда для него осталось меньше
-	 * целой секунды.
+	 * Проверяет владельца и оставшийся срок его права на загрузку с учетом общего
+	 * лимита времени. Не начинает запрос, если осталось меньше целой секунды.
 	 *
-	 * @param ownership проверяемые token и fencing epoch
-	 * @param budget общий лимит времени, созданный до получения ownership
-	 * @return положительный остаток либо empty после expiry или takeover
+	 * @param ownership данные проверяемого владельца
+	 * @param budget общий лимит времени, отсчитываемый до попытки захвата
+	 * @return положительный остаток времени либо пустой результат, если права уже нет
 	 */
 	Optional<Duration> remainingLease(
 			IngestionCycleOwnership ownership,
@@ -77,19 +59,12 @@ public interface IngestionCycleLedger {
 	);
 
 	/**
-	 * Сохраняет progress текущего owner без продления lease.
+	 * Одной транзакцией сохраняет итог и освобождает цикл для следующей загрузки.
+	 * Просроченный или чужой владелец, а также повторное завершение не меняют запись.
 	 *
-	 * @param ownership token и fencing epoch текущего owner
-	 * @return результат условного изменения
-	 */
-	AttemptTransitionResult markProgress(IngestionCycleOwnership ownership);
-
-	/**
-	 * Сохраняет bounded terminal outcome и освобождает cycle.
-	 *
-	 * @param ownership token и fencing epoch текущего owner
-	 * @param outcome ограниченный итог cycle
-	 * @return результат условного изменения
+	 * @param ownership данные владельца, который завершает загрузку
+	 * @param outcome итог загрузки из поддерживаемого набора результатов
+	 * @return примененное изменение либо отказ из-за потери права на цикл
 	 */
 	AttemptTransitionResult complete(
 			IngestionCycleOwnership ownership,
@@ -97,18 +72,10 @@ public interface IngestionCycleLedger {
 	);
 
 	/**
-	 * Освобождает cycle без записи нового terminal outcome.
+	 * Возвращает сохраненное состояние цикла и последний итог загрузки источника.
 	 *
-	 * @param ownership token и fencing epoch текущего owner
-	 * @return результат условного изменения
-	 */
-	AttemptTransitionResult release(IngestionCycleOwnership ownership);
-
-	/**
-	 * Возвращает current state source.
-	 *
-	 * @param sourceName стабильное имя source
-	 * @return state либо empty до первого claim
+	 * @param sourceName постоянное имя источника данных
+	 * @return состояние либо пустой результат до первого захвата
 	 */
 	Optional<IngestionCycleState> findBySourceName(String sourceName);
 }

@@ -9,12 +9,14 @@ import com.neighbor.eventmosaic.ingestion.api.AttemptTransitionResult;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCycleLedger;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOutcome;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCycleOwnership;
+import com.neighbor.eventmosaic.ingestion.api.IngestionCycleState;
 import com.neighbor.eventmosaic.ingestion.api.IngestionCycleStatus;
 import com.neighbor.eventmosaic.shared.time.OperationBudget;
 import com.zaxxer.hikari.HikariDataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -26,11 +28,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BiFunction;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.jdbc.autoconfigure.JdbcProperties;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -43,7 +46,7 @@ import org.springframework.transaction.TransactionException;
 
 @Import(PostgreSqlTestcontainersConfiguration.class)
 @SpringBootTest
-@DisplayName("Общее владение одним ingestion cycle через PostgreSQL")
+@DisplayName("PostgreSQL разрешает выполнять цикл загрузки только одному владельцу")
 class IngestionCycleLedgerIntegrationTest {
 
 	private static final String SOURCE_NAME = GdeltSourceContract.SOURCE_NAME;
@@ -73,7 +76,7 @@ class IngestionCycleLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Общие JDBC-настройки ограничивают пул и запросы, но не задают statement options")
+	@DisplayName("Настройки базы ограничивают ожидание соединения и запросов без общих параметров сеанса")
 	void applicationJdbcTimeoutsAreBoundFromOneConfiguration() throws Exception {
 		HikariDataSource hikari = dataSource.unwrap(HikariDataSource.class);
 
@@ -88,7 +91,7 @@ class IngestionCycleLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Первый claim выдает owner с lease от времени PostgreSQL")
+	@DisplayName("Первый захват разрешает загрузку на срок по часам PostgreSQL и запрещает повторный захват")
 	void firstClaimUsesPostgreSqlTime() {
 		Instant beforeClaim = databaseNow();
 
@@ -100,7 +103,6 @@ class IngestionCycleLedgerIntegrationTest {
 		assertThat(ownership.leaseExpiresAt())
 				.isBetween(beforeClaim.plus(LEASE), afterClaim.plus(LEASE));
 		assertThat(cycleLedger.claim(SOURCE_NAME, LEASE)).isEmpty();
-		assertThat(cycleLedger.isCurrent(ownership)).isTrue();
 		assertThat(cycleLedger.remainingLease(ownership)).hasValueSatisfying(remaining -> {
 			assertThat(remaining).isPositive();
 			assertThat(remaining).isLessThanOrEqualTo(LEASE);
@@ -114,7 +116,7 @@ class IngestionCycleLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Два одновременных claim выдают ownership только одному экземпляру")
+	@DisplayName("Из двух одновременных попыток только одна получает право выполнять загрузку")
 	void concurrentClaimsIssueOneOwnership() throws Exception {
 		List<Optional<IngestionCycleOwnership>> claims = runConcurrently(
 				() -> cycleLedger.claim(SOURCE_NAME, LEASE),
@@ -126,7 +128,7 @@ class IngestionCycleLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Истекший lease получает новый token и ограждает прежнего owner")
+	@DisplayName("После истечения срока новый владелец получает цикл, а прежний не может изменить его состояние")
 	void expiredLeaseFencesPreviousOwner() {
 		IngestionCycleOwnership first = cycleLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
 		expireLease();
@@ -134,27 +136,21 @@ class IngestionCycleLedgerIntegrationTest {
 
 		IngestionCycleOwnership successor = cycleLedger.claim(SOURCE_NAME, LEASE)
 				.orElseThrow();
+		IngestionCycleState successorState = cycleLedger.findBySourceName(SOURCE_NAME)
+				.orElseThrow();
 
 		assertThat(successor.token()).isNotEqualTo(first.token());
 		assertThat(successor.fencingEpoch()).isEqualTo(2);
-		assertThat(cycleLedger.isCurrent(first)).isFalse();
-		assertThat(cycleLedger.renew(first, LEASE)).isEmpty();
-		assertThat(cycleLedger.markProgress(first))
-				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(cycleLedger.complete(first, IngestionCycleOutcome.COMPLETED))
-				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
-		assertThat(cycleLedger.release(first))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(cycleLedger.remainingLease(first)).isEmpty();
 		assertThat(cycleLedger.remainingLease(successor)).hasValueSatisfying(remaining ->
 				assertThat(remaining).isPositive());
-		assertThat(cycleLedger.isCurrent(successor)).isTrue();
-		assertThat(cycleLedger.findBySourceName(SOURCE_NAME).orElseThrow().ownership())
-				.isEqualTo(successor);
+		assertThat(cycleLedger.findBySourceName(SOURCE_NAME)).contains(successorState);
 	}
 
 	@Test
-	@DisplayName("Другой token при той же epoch не может изменить текущий cycle")
+	@DisplayName("Подмена ключа владельца при прежнем номере захвата не дает права завершить загрузку")
 	void forgedTokenCannotChangeCurrentCycle() {
 		IngestionCycleOwnership current = cycleLedger.claim(SOURCE_NAME, LEASE)
 				.orElseThrow();
@@ -168,7 +164,7 @@ class IngestionCycleLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Другая epoch при том же token не может изменить текущий cycle")
+	@DisplayName("Подмена номера захвата при прежнем ключе владельца не дает права завершить загрузку")
 	void forgedEpochCannotChangeCurrentCycle() {
 		IngestionCycleOwnership current = cycleLedger.claim(SOURCE_NAME, LEASE)
 				.orElseThrow();
@@ -182,53 +178,94 @@ class IngestionCycleLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Progress и renewal сохраняются только у owner, а completion освобождает cycle")
-	void progressRenewalAndCompletionRemainFenced() {
+	@DisplayName("Завершение сохраняет результат и освобождает цикл, а повторное завершение ничего не меняет")
+	void completionRecordsOutcomeAndReleasesCycleOnce() {
 		IngestionCycleOwnership claimed = cycleLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
-
-		assertThat(cycleLedger.markProgress(claimed))
+		IngestionCycleState activeState = cycleLedger.findBySourceName(SOURCE_NAME)
+				.orElseThrow();
+		Instant beforeCompletion = databaseNow();
+		assertThat(cycleLedger.complete(claimed, IngestionCycleOutcome.UNCHANGED))
 				.isEqualTo(AttemptTransitionResult.APPLIED);
-		Instant beforeRenewal = databaseNow();
-		IngestionCycleOwnership renewed = cycleLedger.renew(claimed, LEASE).orElseThrow();
-		Instant afterRenewal = databaseNow();
-		assertThat(renewed.token()).isEqualTo(claimed.token());
-		assertThat(renewed.fencingEpoch()).isEqualTo(claimed.fencingEpoch());
-		assertThat(renewed.leaseExpiresAt())
-				.isBetween(beforeRenewal.plus(LEASE), afterRenewal.plus(LEASE));
-		assertThat(cycleLedger.findBySourceName(SOURCE_NAME).orElseThrow().ownership())
-				.isEqualTo(renewed);
+		Instant afterCompletion = databaseNow();
 
-		assertThat(cycleLedger.complete(renewed, IngestionCycleOutcome.UNCHANGED))
-				.isEqualTo(AttemptTransitionResult.APPLIED);
-
-		assertThat(cycleLedger.findBySourceName(SOURCE_NAME).orElseThrow())
+		IngestionCycleState completedState = cycleLedger.findBySourceName(SOURCE_NAME)
+				.orElseThrow();
+		assertThat(completedState)
 				.satisfies(state -> {
 					assertThat(state.status()).isEqualTo(IngestionCycleStatus.IDLE);
 					assertThat(state.ownership()).isNull();
-					assertThat(state.lastProgressAt()).isNotNull();
-					assertThat(state.lastTerminalAt()).isNotNull();
+					assertThat(state.lastProgressAt()).isNull();
+					assertThat(state.lastStartedAt()).isEqualTo(activeState.lastStartedAt());
+					assertThat(state.createdAt()).isEqualTo(activeState.createdAt());
+					assertThat(state.fencingEpoch()).isEqualTo(claimed.fencingEpoch());
+					assertThat(state.lastTerminalAt()).isBetween(beforeCompletion, afterCompletion);
+					assertThat(state.updatedAt()).isEqualTo(state.lastTerminalAt());
 					assertThat(state.lastOutcome()).isEqualTo(IngestionCycleOutcome.UNCHANGED);
-					assertThat(state.stateVersion()).isEqualTo(4);
+					assertThat(state.stateVersion()).isEqualTo(activeState.stateVersion() + 1);
 				});
-		assertThat(cycleLedger.complete(renewed, IngestionCycleOutcome.COMPLETED))
+		assertThat(cycleLedger.complete(claimed, IngestionCycleOutcome.COMPLETED))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
-		assertThat(cycleLedger.remainingLease(renewed)).isEmpty();
+		assertThat(cycleLedger.remainingLease(claimed)).isEmpty();
+		assertThat(cycleLedger.findBySourceName(SOURCE_NAME)).contains(completedState);
 	}
 
 	@Test
-	@DisplayName("Release без terminal outcome освобождает cycle и следующий claim повышает epoch")
-	void releaseAllowsNextClaimWithHigherEpoch() {
+	@DisplayName("После завершения следующий цикл получает новый ключ и больший номер захвата")
+	void completionAllowsNextClaimWithHigherEpoch() {
 		IngestionCycleOwnership first = cycleLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
 
-		assertThat(cycleLedger.release(first)).isEqualTo(AttemptTransitionResult.APPLIED);
+		assertThat(cycleLedger.complete(first, IngestionCycleOutcome.COMPLETED))
+				.isEqualTo(AttemptTransitionResult.APPLIED);
 		IngestionCycleOwnership second = cycleLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
 
 		assertThat(second.fencingEpoch()).isEqualTo(2);
 		assertThat(second.token()).isNotEqualTo(first.token());
 	}
 
+	@ParameterizedTest(name = "Сохраненное время прогресса присутствует: {0}")
+	@ValueSource(booleans = {false, true})
+	@DisplayName("Прежнее время прогресса читается без изменений и сбрасывается при новом цикле")
+	void storedProgressRemainsReadableAndResetsOnNextClaim(boolean hasProgress) {
+		IngestionCycleOwnership ownership = cycleLedger.claim(SOURCE_NAME, LEASE)
+				.orElseThrow();
+		IngestionCycleState initialState = cycleLedger.findBySourceName(SOURCE_NAME)
+				.orElseThrow();
+		Instant progressAt = hasProgress ? initialState.lastStartedAt() : null;
+		assertThat(jdbcClient.sql("""
+				update ingestion_cycle_state
+				set last_progress_at = :progressAt
+				where source_name = :sourceName
+				""")
+				.param("progressAt", progressAt == null ? null : Timestamp.from(progressAt),
+						Types.TIMESTAMP)
+				.param("sourceName", SOURCE_NAME)
+				.update()).isEqualTo(1);
+
+		IngestionCycleState storedState = cycleLedger.findBySourceName(SOURCE_NAME)
+				.orElseThrow();
+		assertThat(storedState.lastProgressAt()).isEqualTo(progressAt);
+		assertThat(storedState).usingRecursiveComparison()
+				.ignoringFields("lastProgressAt")
+				.isEqualTo(initialState);
+		assertThat(cycleLedger.findBySourceName(SOURCE_NAME)).contains(storedState);
+
+		assertThat(cycleLedger.complete(ownership, IngestionCycleOutcome.UNCHANGED))
+				.isEqualTo(AttemptTransitionResult.APPLIED);
+		assertThat(cycleLedger.findBySourceName(SOURCE_NAME).orElseThrow().lastProgressAt())
+				.isEqualTo(progressAt);
+		IngestionCycleOwnership next = cycleLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
+		assertThat(next.token()).isNotEqualTo(ownership.token());
+		assertThat(next.fencingEpoch()).isEqualTo(ownership.fencingEpoch() + 1);
+		assertThat(cycleLedger.findBySourceName(SOURCE_NAME).orElseThrow())
+				.satisfies(state -> {
+					assertThat(state.ownership()).isEqualTo(next);
+					assertThat(state.lastProgressAt()).isNull();
+					assertThat(state.lastOutcome()).isEqualTo(IngestionCycleOutcome.UNCHANGED);
+				});
+	}
+
 	@Test
-	@DisplayName("Текущий owner условно сохраняет потерю ownership как terminal outcome")
+	@DisplayName("Действующий владелец может один раз завершить цикл с результатом потери владения")
 	void currentOwnerCanRecordOwnershipLostOutcome() {
 		IngestionCycleOwnership current = cycleLedger.claim(SOURCE_NAME, LEASE)
 				.orElseThrow();
@@ -248,32 +285,9 @@ class IngestionCycleLedgerIntegrationTest {
 	}
 
 	@Test
-	@DisplayName("Renew после ожидания блокировки не оживляет уже истекший lease")
-	void blockedRenewUsesDatabaseTimeAfterRowLock() throws Exception {
-		assertBlockedTransitionRejected((repository, ownership) ->
-				repository.renew(ownership, LEASE).isEmpty());
-	}
-
-	@Test
-	@DisplayName("Progress после ожидания блокировки не меняет уже истекший cycle")
-	void blockedProgressUsesDatabaseTimeAfterRowLock() throws Exception {
-		assertBlockedTransitionRejected((repository, ownership) ->
-				repository.markProgress(ownership) == AttemptTransitionResult.OWNERSHIP_LOST);
-	}
-
-	@Test
-	@DisplayName("Completion после ожидания блокировки не закрывает уже истекший cycle")
+	@DisplayName("Если срок владения истек во время ожидания блокировки, завершение не меняет цикл")
 	void blockedCompletionUsesDatabaseTimeAfterRowLock() throws Exception {
-		assertBlockedTransitionRejected((repository, ownership) ->
-				repository.complete(ownership, IngestionCycleOutcome.COMPLETED)
-						== AttemptTransitionResult.OWNERSHIP_LOST);
-	}
-
-	@Test
-	@DisplayName("Release после ожидания блокировки не освобождает уже истекший cycle")
-	void blockedReleaseUsesDatabaseTimeAfterRowLock() throws Exception {
-		assertBlockedTransitionRejected((repository, ownership) ->
-				repository.release(ownership) == AttemptTransitionResult.OWNERSHIP_LOST);
+		assertBlockedCompletionRejected();
 	}
 
 	@Test
@@ -315,10 +329,10 @@ class IngestionCycleLedgerIntegrationTest {
 				});
 	}
 
-	private void assertBlockedTransitionRejected(
-			BiFunction<JdbcIngestionCycleRepository, IngestionCycleOwnership, Boolean> transition
-	) throws Exception {
+	private void assertBlockedCompletionRejected() throws Exception {
 		IngestionCycleOwnership ownership = cycleLedger.claim(SOURCE_NAME, LEASE).orElseThrow();
+		IngestionCycleState initialState = cycleLedger.findBySourceName(SOURCE_NAME)
+				.orElseThrow();
 		ExecutorService executor = Executors.newSingleThreadExecutor();
 		try (Connection holder = dataSource.getConnection();
 				Connection worker = dataSource.getConnection()) {
@@ -331,8 +345,8 @@ class IngestionCycleLedgerIntegrationTest {
 					.single();
 			JdbcIngestionCycleRepository workerRepository =
 					new JdbcIngestionCycleRepository(workerClient);
-			Future<Boolean> result = executor.submit(
-					() -> transition.apply(workerRepository, ownership));
+			Future<AttemptTransitionResult> result = executor.submit(() ->
+					workerRepository.complete(ownership, IngestionCycleOutcome.COMPLETED));
 
 			awaitBlockedRowLock(workerPid);
 			Instant expiresAt = databaseNow().plusMillis(200);
@@ -340,12 +354,15 @@ class IngestionCycleLedgerIntegrationTest {
 			awaitDatabaseTimeAfter(expiresAt);
 			holder.commit();
 
-			assertThat(result.get(10, TimeUnit.SECONDS)).isTrue();
+			assertThat(result.get(10, TimeUnit.SECONDS))
+					.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 			assertThat(cycleLedger.findBySourceName(SOURCE_NAME).orElseThrow())
 					.satisfies(state -> {
-						assertThat(state.status()).isEqualTo(IngestionCycleStatus.ACTIVE);
-						assertThat(state.ownership()).isNotNull();
-						assertThat(state.stateVersion()).isEqualTo(1);
+						assertThat(state).usingRecursiveComparison()
+								.ignoringFields("ownership")
+								.isEqualTo(initialState);
+						assertThat(state.ownership()).isEqualTo(new IngestionCycleOwnership(
+								SOURCE_NAME, ownership.token(), ownership.fencingEpoch(), expiresAt));
 					});
 		}
 		finally {
@@ -412,18 +429,14 @@ class IngestionCycleLedgerIntegrationTest {
 			IngestionCycleOwnership forged,
 			IngestionCycleOwnership current
 	) {
-		assertThat(cycleLedger.isCurrent(forged)).isFalse();
+		IngestionCycleState initialState = cycleLedger.findBySourceName(SOURCE_NAME)
+				.orElseThrow();
 		assertThat(cycleLedger.remainingLease(forged)).isEmpty();
-		assertThat(cycleLedger.renew(forged, LEASE)).isEmpty();
-		assertThat(cycleLedger.markProgress(forged))
-				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
 		assertThat(cycleLedger.complete(forged, IngestionCycleOutcome.COMPLETED))
 				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
-		assertThat(cycleLedger.release(forged))
-				.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
-		assertThat(cycleLedger.isCurrent(current)).isTrue();
-		assertThat(cycleLedger.findBySourceName(SOURCE_NAME).orElseThrow().ownership())
-				.isEqualTo(current);
+		assertThat(cycleLedger.remainingLease(current)).hasValueSatisfying(remaining ->
+				assertThat(remaining).isPositive());
+		assertThat(cycleLedger.findBySourceName(SOURCE_NAME)).contains(initialState);
 	}
 
 	private void expireLease() {

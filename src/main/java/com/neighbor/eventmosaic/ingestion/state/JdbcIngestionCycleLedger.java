@@ -19,8 +19,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Открывает транзакции для source-scoped cycle ownership. Время claim и lease
- * получает repository из PostgreSQL после блокировки строки.
+ * Управляет правом на выполнение загрузки через транзакции PostgreSQL.
+ * При захвате отсчитывает срок по времени базы после получения блокировки
+ * строки, чтобы ожидание другого процесса не сокращало выданный срок.
  */
 @Repository
 public class JdbcIngestionCycleLedger implements IngestionCycleLedger {
@@ -30,11 +31,11 @@ public class JdbcIngestionCycleLedger implements IngestionCycleLedger {
 	private final Duration budgetedTransactionTimeout;
 
 	/**
-	 * Создает ledger поверх узкого JDBC repository.
+	 * Соединяет операции хранения состояния с транзакциями и лимитом времени запросов.
 	 *
-	 * @param repository SQL-операции current cycle state
-	 * @param transactionManager механизм локальных JDBC-транзакций
-	 * @param jdbcProperties общая настройка timeout для запросов приложения
+	 * @param repository операции чтения и изменения состояния цикла
+	 * @param transactionManager механизм транзакций базы данных
+	 * @param jdbcProperties общий лимит времени запросов приложения
 	 */
 	@Autowired
 	public JdbcIngestionCycleLedger(
@@ -100,24 +101,6 @@ public class JdbcIngestionCycleLedger implements IngestionCycleLedger {
 	}
 
 	@Override
-	@Transactional
-	public Optional<IngestionCycleOwnership> renew(
-			IngestionCycleOwnership ownership,
-			Duration leaseDuration
-	) {
-		Objects.requireNonNull(ownership, "ownership must not be null");
-		requirePositive(leaseDuration);
-		return repository.renew(ownership, leaseDuration);
-	}
-
-	@Override
-	@Transactional(readOnly = true)
-	public boolean isCurrent(IngestionCycleOwnership ownership) {
-		Objects.requireNonNull(ownership, "ownership must not be null");
-		return repository.isCurrent(ownership);
-	}
-
-	@Override
 	@Transactional(readOnly = true)
 	public Optional<Duration> remainingLease(IngestionCycleOwnership ownership) {
 		Objects.requireNonNull(ownership, "ownership must not be null");
@@ -141,13 +124,6 @@ public class JdbcIngestionCycleLedger implements IngestionCycleLedger {
 
 	@Override
 	@Transactional
-	public AttemptTransitionResult markProgress(IngestionCycleOwnership ownership) {
-		Objects.requireNonNull(ownership, "ownership must not be null");
-		return repository.markProgress(ownership);
-	}
-
-	@Override
-	@Transactional
 	public AttemptTransitionResult complete(
 			IngestionCycleOwnership ownership,
 			IngestionCycleOutcome outcome
@@ -155,13 +131,6 @@ public class JdbcIngestionCycleLedger implements IngestionCycleLedger {
 		Objects.requireNonNull(ownership, "ownership must not be null");
 		Objects.requireNonNull(outcome, "outcome must not be null");
 		return repository.complete(ownership, outcome);
-	}
-
-	@Override
-	@Transactional
-	public AttemptTransitionResult release(IngestionCycleOwnership ownership) {
-		Objects.requireNonNull(ownership, "ownership must not be null");
-		return repository.release(ownership);
 	}
 
 	@Override

@@ -17,7 +17,7 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
-/** Выполняет fenced SQL-переходы current ingestion cycle state. */
+/** Хранит состояние цикла в PostgreSQL и отклоняет завершение чужим или просроченным владельцем. */
 @Repository
 class JdbcIngestionCycleRepository {
 
@@ -91,70 +91,6 @@ class JdbcIngestionCycleRepository {
 				leaseExpiresAt));
 	}
 
-	Optional<IngestionCycleOwnership> renew(
-			IngestionCycleOwnership ownership,
-			Duration leaseDuration
-	) {
-		Optional<Instant> leaseExpiresAt = jdbcClient.sql("""
-				with locked_cycle as materialized (
-				    select source_name
-				    from ingestion_cycle_state
-				    where source_name = :sourceName
-				      and status = :status
-				      and owner_token = :ownerToken
-				      and fencing_epoch = :fencingEpoch
-				    for update
-				),
-				database_time as materialized (
-				    select clock_timestamp() as current_time
-				    from locked_cycle
-				)
-				update ingestion_cycle_state cycle
-				set lease_expires_at = database_time.current_time
-				        + cast(:leaseDurationSeconds as numeric) * interval '1 second',
-				    last_progress_at = database_time.current_time,
-				    state_version = cycle.state_version + 1,
-				    updated_at = database_time.current_time
-				from locked_cycle, database_time
-				where cycle.source_name = locked_cycle.source_name
-				  and cycle.lease_expires_at > database_time.current_time
-				returning cycle.lease_expires_at
-				""")
-				.param("leaseDurationSeconds", durationSeconds(leaseDuration))
-				.param("sourceName", ownership.sourceName())
-				.param("status", IngestionCycleStatus.ACTIVE.name())
-				.param("ownerToken", ownership.token())
-				.param("fencingEpoch", ownership.fencingEpoch())
-				.query((resultSet, rowNumber) ->
-						resultSet.getTimestamp("lease_expires_at").toInstant())
-				.optional();
-		return leaseExpiresAt.map(expiresAt -> new IngestionCycleOwnership(
-				ownership.sourceName(),
-				ownership.token(),
-				ownership.fencingEpoch(),
-				expiresAt));
-	}
-
-	boolean isCurrent(IngestionCycleOwnership ownership) {
-		return jdbcClient.sql("""
-				select exists (
-				    select 1
-				    from ingestion_cycle_state
-				    where source_name = :sourceName
-				      and status = :status
-				      and owner_token = :ownerToken
-				      and fencing_epoch = :fencingEpoch
-				      and lease_expires_at > clock_timestamp()
-				)
-				""")
-				.param("sourceName", ownership.sourceName())
-				.param("status", IngestionCycleStatus.ACTIVE.name())
-				.param("ownerToken", ownership.token())
-				.param("fencingEpoch", ownership.fencingEpoch())
-				.query(Boolean.class)
-				.single();
-	}
-
 	Optional<Duration> remainingLease(IngestionCycleOwnership ownership) {
 		return jdbcClient.sql("""
 				with database_time as (
@@ -178,37 +114,6 @@ class JdbcIngestionCycleRepository {
 				.query((resultSet, rowNumber) -> duration(
 						resultSet.getBigDecimal("remaining_seconds")))
 				.optional();
-	}
-
-	AttemptTransitionResult markProgress(IngestionCycleOwnership ownership) {
-		int updated = jdbcClient.sql("""
-				with locked_cycle as materialized (
-				    select source_name
-				    from ingestion_cycle_state
-				    where source_name = :sourceName
-				      and status = :status
-				      and owner_token = :ownerToken
-				      and fencing_epoch = :fencingEpoch
-				    for update
-				),
-				database_time as materialized (
-				    select clock_timestamp() as current_time
-				    from locked_cycle
-				)
-				update ingestion_cycle_state cycle
-				set last_progress_at = database_time.current_time,
-				    state_version = cycle.state_version + 1,
-				    updated_at = database_time.current_time
-				from locked_cycle, database_time
-				where cycle.source_name = locked_cycle.source_name
-				  and cycle.lease_expires_at > database_time.current_time
-				""")
-				.param("sourceName", ownership.sourceName())
-				.param("status", IngestionCycleStatus.ACTIVE.name())
-				.param("ownerToken", ownership.token())
-				.param("fencingEpoch", ownership.fencingEpoch())
-				.update();
-		return AttemptTransitionResult.fromUpdatedRows(updated);
 	}
 
 	AttemptTransitionResult complete(
@@ -243,40 +148,6 @@ class JdbcIngestionCycleRepository {
 				""")
 				.param("idleStatus", IngestionCycleStatus.IDLE.name())
 				.param("outcome", outcome.name())
-				.param("sourceName", ownership.sourceName())
-				.param("activeStatus", IngestionCycleStatus.ACTIVE.name())
-				.param("ownerToken", ownership.token())
-				.param("fencingEpoch", ownership.fencingEpoch())
-				.update();
-		return AttemptTransitionResult.fromUpdatedRows(updated);
-	}
-
-	AttemptTransitionResult release(IngestionCycleOwnership ownership) {
-		int updated = jdbcClient.sql("""
-				with locked_cycle as materialized (
-				    select source_name
-				    from ingestion_cycle_state
-				    where source_name = :sourceName
-				      and status = :activeStatus
-				      and owner_token = :ownerToken
-				      and fencing_epoch = :fencingEpoch
-				    for update
-				),
-				database_time as materialized (
-				    select clock_timestamp() as current_time
-				    from locked_cycle
-				)
-				update ingestion_cycle_state cycle
-				set status = :idleStatus,
-				    owner_token = null,
-				    lease_expires_at = null,
-				    state_version = cycle.state_version + 1,
-				    updated_at = database_time.current_time
-				from locked_cycle, database_time
-				where cycle.source_name = locked_cycle.source_name
-				  and cycle.lease_expires_at > database_time.current_time
-				""")
-				.param("idleStatus", IngestionCycleStatus.IDLE.name())
 				.param("sourceName", ownership.sourceName())
 				.param("activeStatus", IngestionCycleStatus.ACTIVE.name())
 				.param("ownerToken", ownership.token())
@@ -373,10 +244,5 @@ class JdbcIngestionCycleRepository {
 				.movePointRight(9)
 				.intValueExact();
 		return Duration.ofSeconds(wholeSeconds, nanos);
-	}
-
-	private static BigDecimal durationSeconds(Duration duration) {
-		return BigDecimal.valueOf(duration.getSeconds())
-				.add(BigDecimal.valueOf(duration.getNano(), 9));
 	}
 }

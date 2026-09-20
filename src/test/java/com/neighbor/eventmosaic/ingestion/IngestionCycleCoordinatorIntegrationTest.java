@@ -153,12 +153,13 @@ class IngestionCycleCoordinatorIntegrationTest {
 					.isEqualTo(IngestionCycleOutcome.COMPLETED);
 			assertThat(recoverySideEffects).hasValue(1);
 			verify(recoveryPipeline).runCycle(any(OperationBudget.class));
+			var recoveredState = recovery.ledger().findBySourceName(SOURCE_NAME).orElseThrow();
 			assertThat(recovery.ledger().complete(
 					abandonedOwnership,
 					IngestionCycleOutcome.INTERNAL_FAILURE))
 					.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
-			assertThat(recovery.ledger().release(abandonedOwnership))
-					.isEqualTo(AttemptTransitionResult.OWNERSHIP_LOST);
+			assertThat(recovery.ledger().remainingLease(abandonedOwnership)).isEmpty();
+			assertThat(recovery.ledger().findBySourceName(SOURCE_NAME)).contains(recoveredState);
 		}
 
 		assertThat(cycleState()).satisfies(state -> {

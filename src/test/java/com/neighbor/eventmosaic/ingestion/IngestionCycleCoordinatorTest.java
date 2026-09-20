@@ -291,7 +291,6 @@ class IngestionCycleCoordinatorTest {
 
 		verifyNoInteractions(pipeline);
 		verify(ledger).complete(OWNERSHIP, IngestionCycleOutcome.OWNERSHIP_LOST);
-		verify(ledger, never()).release(OWNERSHIP);
 	}
 
 	@Test
@@ -307,7 +306,6 @@ class IngestionCycleCoordinatorTest {
 		assertThatThrownBy(coordinator::runCycle).isSameAs(ownershipLost);
 
 		verify(ledger).complete(OWNERSHIP, IngestionCycleOutcome.OWNERSHIP_LOST);
-		verify(ledger, never()).release(OWNERSHIP);
 	}
 
 	@Test
@@ -323,7 +321,6 @@ class IngestionCycleCoordinatorTest {
 
 		verify(ledger).complete(OWNERSHIP, IngestionCycleOutcome.COMPLETED);
 		verify(ledger, never()).complete(OWNERSHIP, IngestionCycleOutcome.OWNERSHIP_LOST);
-		verify(ledger, never()).release(OWNERSHIP);
 		assertThat(registry.get("event_mosaic.ingestion.cycle.duration")
 				.tag("outcome", "ownership_lost").timer().count()).isEqualTo(1);
 		assertThat(registry.find("event_mosaic.ingestion.cycle.duration").tag("outcome", "completed")
