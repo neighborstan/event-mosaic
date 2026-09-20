@@ -207,14 +207,8 @@ function Restore-Environment {
 
 Assert-CommandAvailable -Name "docker"
 Assert-ApplicationPortAvailable -Port 18080 -ApplicationName "backend"
-Assert-ApplicationPortAvailable -Port 5173 -ApplicationName "frontend"
 
-# Shared IDEA-конфигурация использует проверенный project-local Node.js.
-# Этот check дает понятную ошибку до попытки запуска npm внутри IDEA.
-$NodeExecutable = Join-Path $ProjectRoot ".local\node-v24.19.0-win-x64\node.exe"
-if (-not (Test-Path -LiteralPath $NodeExecutable -PathType Leaf)) {
-    throw "Не найден $NodeExecutable. Сначала выполните обычный bootstrap проекта."
-}
+# Node.js/npm проверяет Gradle при запуске приложения; подготовке контейнеров они не нужны.
 
 $originalEnvironment = Set-ReviewEnvironment
 Push-Location $ProjectRoot
@@ -261,9 +255,10 @@ try {
     Write-Host "Инфраструктура готова."
     Write-Host "1. В IDEA выберите конфигурацию 'Event Mosaic Local' и нажмите Run."
     Write-Host "2. Дождитесь строки 'Started EventMosaicApplication'."
-    Write-Host "3. Откройте http://127.0.0.1:5173"
+    Write-Host "3. Откройте http://127.0.0.1:18080 (карта и API без Vite)."
     Write-Host "   На пустом хранилище дождитесь загрузки GDELT и обновите страницу."
-    Write-Host "4. После проверки остановите Run в IDEA и запустите stop-map-review.ps1"
+    Write-Host "4. Для обычной остановки нажмите Stop в IDEA; данные и контейнеры сохраняются."
+    Write-Host "   stop-map-review.ps1 нужен только для явного удаления проверочного стека и его данных."
 }
 finally {
     Pop-Location
